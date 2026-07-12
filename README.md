@@ -20,29 +20,6 @@
 
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download)
 
-### 编译运行
-
-```bash
-git clone https://github.com/hahahotsoup/hahahotsoup-s-rssreader-core.git
-cd hahahotsoup-s-rssreader-core
-dotnet build
-dotnet run
-```
-
-首次运行后，程序会在 exe 所在目录自动创建数据库文件。
-
-### 测试用 RSS 服务器
-
-项目附带了一个模拟 RSS 服务器 `rss_server.py`，方便测试：
-
-```bash
-pip install flask    # 如果使用 Flask 版本
-python rss_server.py
-```
-
-然后在程序中输入 `http://localhost:5000/rss` 即可订阅。修改
-`ARTICLES` 列表后重启服务器，再用程序更新就能看到 diff 效果。
-
 ## 使用说明
 
 启动后显示主菜单：
