@@ -112,7 +112,6 @@ A 看看已有订阅 | B 下载新RSS源 | Q 退出
 ├── Hahahotsoup.RssReader.sln
 ├── Hahahotsoup.RssReader.Core.csproj
 ├── RssReader.cs          # 全部代码（单文件）
-├── rss_server.py         # 测试用模拟 RSS 服务器
 └── README.md
 ```
 
