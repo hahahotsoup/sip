@@ -17,12 +17,19 @@ using Microsoft.Data.Sqlite;
 
 // 工作目录 = exe 所在文件夹（Mac/Linux/Windows 都适用）
 string workDir = AppDomain.CurrentDomain.BaseDirectory;
-string dbPath = Path.Combine(workDir, "hahahotsoup's rss reader's core.db");
+string dbPath = Path.Combine(workDir, "rss.db");
 InitDatabase(dbPath);
+
+// ═══════════ CLI 模式 ═══════════
+if (args.Length > 0)
+{
+    RunCli(args, dbPath);
+    return 0;
+}
 
 Console.WriteLine($"工作目录：{workDir}");
 
-// ═══════════ 第二步：主循环 ═══════════
+// ═══════════ 主循环 ═══════════
 // while(true) 是死循环，程序一直跑、等你输入命令
 while (true)
 {
@@ -155,6 +162,110 @@ while (true)
 // ═══════════════════════════════════════════════════
 // 以下是所有方法，按调用顺序排列
 // ═══════════════════════════════════════════════════
+
+// ═══════════ CLI 参数处理 ═══════════
+void RunCli(string[] args, string dbPath)
+{
+    var cmd = args[0].ToLower();
+
+    if (cmd is "-h" or "--help")
+    {
+        PrintHelp();
+        return;
+    }
+
+    if (cmd is "-l" or "-list")
+    {
+        ListFeedsFromDb(dbPath);
+        return;
+    }
+
+    if (args.Length < 2)
+    {
+        Console.WriteLine($"缺少参数。用法: rssreader {cmd} <值>");
+        return;
+    }
+
+    switch (cmd)
+    {
+        case "-u" or "-update":
+            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine("编号必须是数字"); return; }
+            UpdateByDisplayNum(aNum, dbPath);
+            break;
+        case "-d" or "--download":
+            DownloadCli(args[1], dbPath);
+            break;
+        case "-a" or "--archive":
+            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine("编号必须是数字"); return; }
+            AddTimestamp(tNum, dbPath);
+            break;
+        case "-una" or "--unarchive":
+            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine("编号必须是数字"); return; }
+            RemoveTimestamp(uNum, dbPath);
+            break;
+        case "-r" or "--remove":
+            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine("编号必须是数字"); return; }
+            DeleteFeed(dNum, dbPath);
+            break;
+        default:
+            Console.WriteLine($"未知命令: {cmd}");
+            PrintHelp();
+            break;
+    }
+}
+
+void PrintHelp()
+{
+    Console.WriteLine(@"
+用法: rssreader <命令> [参数]
+
+命令:
+  -l, --list       列出所有订阅源
+  -u, --update     更新指定订阅源（编号）
+  -d, --download   下载新的 RSS 源（URL）
+  -a, --archive    归档（加时间戳）
+  -una, --unarchive 去归档
+  -r, --remove     删除订阅源
+  -h, --help       显示此帮助
+
+示例:
+  rssreader -l
+  rssreader -d https://example.com/rss
+  rssreader -u 1
+  rssreader -a 1
+  rssreader -r 1
+");
+}
+
+// CLI 模式更新（同步等待异步方法）
+void UpdateByDisplayNum(int displayNum, string dbPath)
+{
+    int realId = GetRealId(displayNum, dbPath);
+    if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
+
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Title, FeedUrl FROM Feeds WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", realId);
+    using var r = cmd.ExecuteReader();
+    r.Read();
+    string title = r.GetString(0);
+    string url = r.GetString(1);
+    r.Close();
+
+    if (IsArchived(title)) { Console.WriteLine($"《{title}》已归档，不能更新"); return; }
+
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine("更新完成"); }
+    catch (Exception ex) { Console.WriteLine($"出错: {ex.Message}"); }
+}
+
+// CLI 模式下载（同步等待异步方法）
+void DownloadCli(string url, string dbPath)
+{
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine("下载完成"); }
+    catch (Exception ex) { Console.WriteLine($"出错: {ex.Message}"); }
+}
 
 // ═══════════ 建表方法 ═══════════
 // 只在程序启动时调用一次。IF NOT EXISTS 保证不会覆盖已有数据。
@@ -330,18 +441,19 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
 // 返回 null = 没找到或全是归档源 → 当作新源处理
 string? GetActiveRawXml(string title, SqliteConnection conn)
 {
+    // 先查出所有同名源的 RawXml 和 Title，用 C# IsArchived 过滤
     var cmd = conn.CreateCommand();
-    // 排除标题以 _8位数字_6位数字 结尾的归档源
-    cmd.CommandText = @"
-        SELECT RawXml FROM Feeds
-        WHERE Title = @title
-          AND Title NOT LIKE '%\________\______' ESCAPE '\'
-        LIMIT 1
-    ";
+    cmd.CommandText = "SELECT Title, RawXml FROM Feeds WHERE Title = @title OR Title LIKE @title || '\\_%' ESCAPE '\\'";
     cmd.Parameters.AddWithValue("@title", title);
 
-    object? result = cmd.ExecuteScalar();  // ExecuteScalar：拿第一行第一列
-    return result?.ToString();            // null 就返回 null，有值就转成 string
+    using var reader = cmd.ExecuteReader();
+    while (reader.Read())
+    {
+        string t = reader.GetString(0);
+        if (!IsArchived(t))  // 只返回未归档的
+            return reader.GetString(1);
+    }
+    return null;  // 没找到或全是归档源
 }
 
 // ═══════════ 判断标题是否有时间戳后缀（即是否已被归档） ═══════════
