@@ -1,0 +1,18 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+## VS Code
+.vscode/
+
+## Database files (local data, don't commit)
+*.db
+
+## OS
+.DS_Store
+Thumbs.db
