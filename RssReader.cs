@@ -44,8 +44,8 @@ while (true)
             ListFeedsFromDb(dbPath);
 
             // --- 子菜单 ---
-            // 输入数字 → 更新 | T 编号 → 归档化 | R 编号 → 去归档化 | D 编号 → 删除
-            Console.Write("编号=更新 | T=归档化 | R=去归档化 | D=删除：| 随意输入什么退出");
+            // 输入数字 → U → 更新rss | T 编号 → 归档化 | R 编号 → 去归档化 | D 编号 → 删除 | L 编号 → 列出指定订阅源文章 |随意输入什么退出
+            Console.Write("编号=更新 | T=归档化 | R=去归档化 | D=删除 | L=列出指定订阅源文章：| 随意输入什么退出");
             string input = Console.ReadLine()!;
 
             if (input.StartsWith("T", StringComparison.OrdinalIgnoreCase))
@@ -78,51 +78,33 @@ while (true)
                 }
                 DeleteFeed(did, dbPath);
             }
+            else if (input.StartsWith("U", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!int.TryParse(input[1..].Trim(), out int displayNum))
+                {
+                    Console.WriteLine("格式错误。正确：U 1");
+                    continue;
+                }
+                await UpdateFeed(displayNum, dbPath);
+            }
+            else if (input.StartsWith("L", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!int.TryParse(input[1..].Trim(), out int lNum))
+                {
+                    Console.WriteLine("格式错误。正确：L 1");
+                    continue;
+                }
+                // L 进入文章管理子循环
+                int feedRealId = GetRealId(lNum, dbPath);
+                if (feedRealId == 0) { Console.WriteLine("没找到这个编号"); continue; }
+                ManageArticles(feedRealId, lNum, dbPath);
+            }
             else
             {
-                // === 更新模式 ===
                 if (!int.TryParse(input, out int displayNum))
                 {
-                    Console.WriteLine("");
                     break;
                 }
-
-                // 显示编号 → 真实 Id
-                int realId = GetRealId(displayNum, dbPath);
-                if (realId == 0)
-                {
-                    Console.WriteLine("没找到这个编号");
-                    continue;
-                }
-
-                using var conn = new SqliteConnection($"Data Source={dbPath}");
-                conn.Open();
-                var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT Title, FeedUrl FROM Feeds WHERE Id = @id";
-                cmd.Parameters.AddWithValue("@id", realId);
-
-                using var infoReader = cmd.ExecuteReader();
-                infoReader.Read();
-                string title = infoReader.GetString(0);
-                string feedUrl = infoReader.GetString(1);
-                infoReader.Close();
-
-                // 已归档的源禁止更新
-                if (IsArchived(title))
-                {
-                    Console.WriteLine($"《{title}》已归档，不能更新。请先 R {displayNum} 去归档");
-                    continue;
-                }
-
-                try
-                {
-                    await DownloadAndSaveToDb(feedUrl, dbPath);
-                    Console.WriteLine("更新完成");
-                }
-                catch (TaskCanceledException) { Console.WriteLine("下载超时，请检查网络或链接是否有效"); }
-                catch (HttpRequestException) { Console.WriteLine("网络请求失败，链接可能已失效"); }
-                catch (SqliteException ex) { Console.WriteLine($"数据库出错：{ex.Message}"); }
-                catch (Exception ex) { Console.WriteLine($"未知错误：{ex.Message}"); }
             }
         }
     }
@@ -132,7 +114,7 @@ while (true)
         Console.WriteLine("请输入 RSS 链接：");
         string url = Console.ReadLine()!;
 
-        try  // try = "试试看，出错了我来处理"
+        try
         {
             // await = "等这个网络操作完成，期间程序不会卡死"
             await DownloadAndSaveToDb(url, dbPath);
@@ -174,7 +156,7 @@ void RunCli(string[] args, string dbPath)
         return;
     }
 
-    if (cmd is "-l" or "-list")
+    if (cmd is "-l" or "--list")
     {
         ListFeedsFromDb(dbPath);
         return;
@@ -188,9 +170,9 @@ void RunCli(string[] args, string dbPath)
 
     switch (cmd)
     {
-        case "-u" or "-update":
+        case "-u" or "--update":
             if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine("编号必须是数字"); return; }
-            UpdateByDisplayNum(aNum, dbPath);
+            UpdateFeed(aNum, dbPath).Wait();
             break;
         case "-d" or "--download":
             DownloadCli(args[1], dbPath);
@@ -237,8 +219,8 @@ void PrintHelp()
 ");
 }
 
-// CLI 模式更新（同步等待异步方法）
-void UpdateByDisplayNum(int displayNum, string dbPath)
+// ═══════════ 更新指定订阅源（A 菜单和 CLI 共用）═══════════
+async Task UpdateFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
     if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
@@ -254,10 +236,13 @@ void UpdateByDisplayNum(int displayNum, string dbPath)
     string url = r.GetString(1);
     r.Close();
 
-    if (IsArchived(title)) { Console.WriteLine($"《{title}》已归档，不能更新"); return; }
+    if (IsArchived(title)) { Console.WriteLine($" {title} 已归档，不能更新"); return; }
 
-    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine("更新完成"); }
-    catch (Exception ex) { Console.WriteLine($"出错: {ex.Message}"); }
+    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine("更新完成"); }
+    catch (TaskCanceledException) { Console.WriteLine("下载超时，请检查网络或链接是否有效"); }
+    catch (HttpRequestException) { Console.WriteLine("网络请求失败，链接可能已失效"); }
+    catch (SqliteException ex) { Console.WriteLine($"数据库出错：{ex.Message}"); }
+    catch (Exception ex) { Console.WriteLine($"未知错误：{ex.Message}"); }
 }
 
 // CLI 模式下载（同步等待异步方法）
@@ -310,6 +295,114 @@ void InitDatabase(string dbPath)
         );
     ";
     cmd.ExecuteNonQuery();
+}
+// ═══════════ 文章管理子循环 ═══════════
+void ManageArticles(int feedRealId, int feedDisplayNum, string dbPath)
+{
+    while (true)
+    {
+        ListArticlesFromDb(feedRealId, feedDisplayNum, dbPath);
+
+        Console.Write("  D 编号=删除文章 | Q=返回上级：");
+        string input = Console.ReadLine()!;
+
+        if (input.StartsWith("D", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(input[1..].Trim(), out int artNum))
+            {
+                Console.WriteLine("格式错误。正确：D 1");
+                continue;
+            }
+            DeleteArticle(feedRealId, artNum, dbPath);
+        }
+        else if (input.StartsWith("Q", StringComparison.OrdinalIgnoreCase))
+        {
+            break;  // 返回 A 菜单
+        }
+        else
+        {
+            Console.WriteLine("未知命令，D=删除 Q=返回");
+        }
+    }
+}
+
+// ═══════════ 列出指定源的所有文章（含 ROW_NUMBER 显示编号） ═══════════
+void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+
+    // 查 Feed 标题
+    var titleCmd = conn.CreateCommand();
+    titleCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
+    titleCmd.Parameters.AddWithValue("@id", feedRealId);
+    string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
+    Console.WriteLine($"── [{feedDisplayNum}] {feedTitle} 的文章列表 ──");
+
+    // 用 ROW_NUMBER 给文章编显示号（删后自动继位）
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT Id, Guid, Title, Status, Version,
+               ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
+        FROM Items
+        WHERE FeedId = @fid
+        ORDER BY Id
+    ";
+    cmd.Parameters.AddWithValue("@fid", feedRealId);
+    using var reader = cmd.ExecuteReader();
+    if (!reader.HasRows)
+    {
+        Console.WriteLine("  这个源还没有文章");
+        return;
+    }
+    while (reader.Read())
+    {
+        int displayNum = reader.GetInt32(5);    // 第5列 DisplayNum
+        string status  = reader.GetString(3);   // 第3列 Status
+        string title   = reader.GetString(2);   // 第2列 Title
+        int version    = reader.GetInt32(4);    // 第4列 Version
+
+        string tag = status switch
+        {
+            "active"   => "[现]",
+            "archived" => "[旧]",
+            "deleted"  => "[删]",
+            _          => "[?]"
+        };
+        Console.WriteLine($"  [{displayNum}] {tag} v{version} | {title}");
+    }
+}
+
+// ═══════════ 真删文章（物理删除，不可恢复） ═══════════
+void DeleteArticle(int feedRealId, int articleDisplayNum, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+
+    // 显示编号 → 真实 Id（只查当前 Feed 的文章）
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT Id, Title FROM (
+            SELECT Id, Title, ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
+            FROM Items WHERE FeedId = @fid
+        ) WHERE DisplayNum = @n
+    ";
+    cmd.Parameters.AddWithValue("@fid", feedRealId);
+    cmd.Parameters.AddWithValue("@n", articleDisplayNum);
+    using var reader = cmd.ExecuteReader();
+    if (!reader.Read()) { Console.WriteLine("没找到这篇文章"); return; }
+    long artRealId = reader.GetInt64(0);
+    string artTitle = reader.GetString(1);
+    reader.Close();
+
+    Console.Write($"确定永久删除《{artTitle}》？此操作不可恢复！(y/n)：");
+    if (Console.ReadLine()!.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+
+    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", artRealId);
+    cmd.ExecuteNonQuery();
+
+    Console.WriteLine($"《{artTitle}》已永久删除");
 }
 
 // ═══════════ 列表方法：显示数据库中所有订阅源 ═══════════
@@ -382,7 +475,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
     {
         // 同名未归档源存在！先用文本 diff 比对 Feed 级别变化
         isNewFeed = false;
-        Console.WriteLine($"订阅源《{feed.Title}》已存在，正在比对...");
+        Console.WriteLine($"订阅源{feed.Title}已存在，正在比对...");
         bool hasChanges = ShowFeedXmlDiff(oldXml, rawXml);
 
         if (hasChanges)
@@ -433,7 +526,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
     // 新源 → 全量插入不过滤；旧源 → 逐篇比对
     ShowDiff(feed, feedId, conn, isNewFeed);
 
-    Console.WriteLine($"《{feed.Title}》写入完成");
+    Console.WriteLine($"{feed.Title} 写入完成");
 }
 
 // ═══════════ 辅助方法：按标题查未归档源的旧 RawXml ═══════════
@@ -505,7 +598,7 @@ void DeleteFeed(int displayNum, string dbPath)
     int itemCount = reader.GetInt32(1);
     reader.Close();
 
-    Console.Write($"确定删除《{title}》及其 {itemCount} 篇文章？(y/n)：");
+    Console.Write($"确定删除 {title} 及其 {itemCount} 篇文章？(y/n)：");
     if (Console.ReadLine()!.ToLower() != "y")
     {
         Console.WriteLine("已取消");
@@ -520,7 +613,7 @@ void DeleteFeed(int displayNum, string dbPath)
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"《{title}》已删除");
+    Console.WriteLine($"{title}已删除");
 }
 
 // ═══════════ 加时间戳：标题 + _20260712_143000 ═══════════
@@ -543,7 +636,7 @@ void AddTimestamp(int displayNum, string dbPath)
     // 2. 已经归档的不能再归档
     if (IsArchived(oldTitle))
     {
-        Console.WriteLine($"《{oldTitle}》已被归档，无需重复操作");
+        Console.WriteLine($" {oldTitle} 已被归档，无需重复操作");
         return;
     }
 
@@ -555,7 +648,7 @@ void AddTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", newTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"标题已变更：《{oldTitle}》→《{newTitle}》");
+    Console.WriteLine($"标题已变更：{oldTitle} → {newTitle} ");
 }
 
 // ═══════════ 去时间戳：去掉 _yyyymmdd_hhmmss 后缀 ═══════════
@@ -579,7 +672,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
 
     if (plainTitle == title)
     {
-        Console.WriteLine($"《{title}》没有时间戳后缀，无需去除");
+        Console.WriteLine($" {title} 未归档化欸");
         return;
     }
 
@@ -589,7 +682,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
     long conflict = (long)cmd.ExecuteScalar()!;
     if (conflict > 0)
     {
-        Console.WriteLine($"冲突！已存在另一个名为《{plainTitle}》的源，无法去除时间戳");
+        Console.WriteLine($"冲突！已存在另一个名为 {plainTitle} 的我，无法去除时间戳");
         return;
     }
 
@@ -598,7 +691,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", plainTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"时间戳已去除：《{title}》→《{plainTitle}》");
+    Console.WriteLine($"时间戳已去除： {title} → {plainTitle} ");
 }
 
 // ════════════════════════════════════════════════════════
@@ -682,7 +775,7 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
             // 插入新版本
             InsertNewItem(conn, feedId, item, guid, version: oldVersion + 1);
 
-            Console.WriteLine($"  [已归档]《{item.Title}》作者修改了内容，旧版已保留");
+            Console.WriteLine($"  [已归档] {item.Title} 作者修改了内容，旧版已保留");
             modifyCount++;
         }
         else
@@ -715,7 +808,7 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
             if (!newGuids.Contains(delReader.GetString(1)))  // Guid 不在新列表 → 被删
             {
                 deletedIds.Add(delReader.GetInt64(0));       // 记下第0列：真实 Id
-                Console.WriteLine($"  [已删除]《{delReader.GetString(2)}》作者删除了此文");
+                Console.WriteLine($"  [已删除] {delReader.GetString(2)} 作者删除了此文");
             }
         }
         delReader.Close();  // 关掉 reader 才能做 UPDATE
@@ -785,14 +878,9 @@ bool ShowFeedXmlDiff(string oldRaw, string newRaw)
     }
 }
 
-// 🎯 练习题：GetItemSummary 生成每条文章的摘要
-// 目前格式：[唯一ID] 标题
-// 提示：试试加上 item.PublishingDate 或者 item.Author
+// ═══════════ GetItemSummary：生成文章摘要行，供文本 diff 显示用 ═══════════
 string GetItemSummary(FeedItem item)
 {
-    // 三元运算符：条件 ? 真时的值 : 假时的值
-    // 这里连续用了多层三元运算符来找一个非空的 ID
     string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? "未知";
-    // ?? 叫 null 合并运算符：左边不是 null 就用左边，是 null 就用右边
     return $"[{id}] {item.Title}";
 }
