@@ -373,7 +373,7 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     }
 }
 
-// ═══════════ 真删文章（物理删除，不可恢复） ═══════════
+// ═══════════ 删文章 ═══════════
 void DeleteArticle(int feedRealId, int articleDisplayNum, string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
