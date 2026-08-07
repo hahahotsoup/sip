@@ -28,7 +28,7 @@ InitDatabase(dbPath);
 // ═══════════ CLI 模式 ═══════════
 if (args.Length > 0)
 {
-    RunCli(args, dbPath);
+    await RunCli(args, dbPath);
     return 0;
 }
 
@@ -151,7 +151,7 @@ while (true)
 // ═══════════════════════════════════════════════════
 
 // ═══════════ CLI 参数处理 ═══════════
-void RunCli(string[] args, string dbPath)
+async Task RunCli(string[] args, string dbPath)
 {
     var cmd = args[0].ToLower();
 
@@ -177,13 +177,13 @@ void RunCli(string[] args, string dbPath)
             ShowConfig(dbPath);
             return;
         case "--index":
-            IndexArticlesCli(new string[] { }, dbPath);
+            await IndexArticlesCli(new string[] { }, dbPath);
             return;
         case "--reindex":
-            ReindexCli(dbPath);
+            await ReindexCli(dbPath);
             return;
         case "--summary-all":
-            SummaryAllCli(dbPath);
+            await SummaryAllCli(dbPath);
             return;
     }
 
@@ -219,8 +219,7 @@ void RunCli(string[] args, string dbPath)
             SearchCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--summary":
-            if (!int.TryParse(args[1], out int sumId)) { Console.WriteLine("用法: rssreader --summary <文章编号 或 feed:编号>"); return; }
-            SummaryCli(sumId, dbPath).Wait();
+            SummaryCli(args[1], dbPath).Wait();
             break;
         default:
             Console.WriteLine($"未知命令: {cmd}");
@@ -364,6 +363,8 @@ void InitDatabase(string dbPath)
             FOREIGN KEY (ItemId) REFERENCES Items(Id),
             FOREIGN KEY (ModelId) REFERENCES Models(Id)
         );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS UQ_Vectors_ItemModel ON Vectors (ItemId, ModelId);
     ";
     cmd.ExecuteNonQuery();
 
@@ -1375,6 +1376,7 @@ void SearchCli(string[] args, string dbPath)
     long count = (long)cmd.ExecuteScalar()!;
     if (count == 0) { ReportError("NO_INDEX", "当前模型尚无向量索引，请先执行 rssreader --index", json: json); return; }
 
+    cmd.Parameters.Clear();
     cmd.CommandText = @"
         SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Link,
                f.Title AS FeedTitle, f.Id AS FeedId
@@ -1528,11 +1530,49 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     }
 }
 
-// 单篇摘要 CLI；支持 feed:<编号>
-async Task SummaryCli(int idOrFeed, string dbPath)
+// 单篇/整源摘要 CLI；支持 '12' 或 'feed:3'
+async Task SummaryCli(string arg, string dbPath)
 {
-    // 通过特殊解析：命令行可能传 'feed:3'，但这里收到的是 int。改用字符串包装在调用处处理。
-    await SummarizeItem(dbPath, idOrFeed);
+    EnsureAiPrompted();
+
+    // feed:N → 为该订阅源全部未摘要的 active 文章逐个生成
+    if (arg.StartsWith("feed:", StringComparison.OrdinalIgnoreCase))
+    {
+        if (!int.TryParse(arg["feed:".Length..].Trim(), out int feedDisplay))
+        {
+            Console.WriteLine("格式错误。正确：--summary feed:3");
+            return;
+        }
+        int feedReal = GetRealId(feedDisplay, dbPath);
+        if (feedReal == 0) { Console.WriteLine($"没有找到编号 {feedDisplay} 的订阅源"); return; }
+
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active' AND FeedId = @fid AND (Summary IS NULL OR Summary = '')";
+        cmd.Parameters.AddWithValue("@fid", feedReal);
+        using var r = cmd.ExecuteReader();
+        var items = new List<(int Id, string Title)>();
+        while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
+        r.Close();
+
+        if (items.Count == 0) { Console.WriteLine($"订阅源 {feedDisplay} 的所有 active 文章都已有摘要"); return; }
+        Console.WriteLine($"将为订阅源 {feedDisplay} 的 {items.Count} 篇文章生成摘要，确认？(y/n)：");
+        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+
+        int ok = 0, fail = 0;
+        foreach (var it in items)
+        {
+            if (await SummarizeItem(dbPath, it.Id, json: false)) ok++; else fail++;
+            Console.WriteLine($"  进度：{ok + fail}/{items.Count}");
+        }
+        Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+        return;
+    }
+
+    // 单篇文章
+    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine("用法: rssreader --summary <文章编号 或 feed:编号>"); return; }
+    await SummarizeItem(dbPath, sumId);
 }
 
 // 全部摘要

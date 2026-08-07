@@ -99,6 +99,24 @@ rssreader --summary-all                   # 为所有未生成摘要的文章生
 
 > 安全提示：请勿泄露 API Key，不要截图或上传含密钥的界面；如怀疑泄露，请立即更换密钥。
 
+#### AI 使用要点
+
+- **新增文章不会自动向量化**：新下载/更新的文章要先执行 `--index` 才会进入语义搜索；搜索只会命中当前模型（`Models.IsCurrent = 1`）的向量
+- **索引幂等**：`--index` 只处理「还没有向量」的 active 文章（`Vectors` 表对 `(ItemId, ModelId)` 有唯一约束），重复执行不会重复生成
+- **搜索阈值**：默认 0.7（`ai_config.json` 的 `SearchThreshold`），可按需用 `--threshold` 覆盖；本地 bge-m3 的命中分数通常落在 0.5~0.6，建议设 0.5 左右
+- **摘要缓存**：`Items.Summary` 非空即视为已生成并跳过，不会重复调用 LLM；想重新生成需先清空该字段（`--summary-all` 同理）
+- **模型健康检查**：Embedding / LLM 不可用时返回明确错误码（`MODEL_UNAVAILABLE` / `API_KEY_MISSING` / `API_KEY_INVALID` 等），不会静默失败
+
+#### 常见问题
+
+| 现象 | 原因 / 解决 |
+|------|------------|
+| 搜索提示「尚无向量索引」 | 还没跑 `--index`，或更换 Embedding 模型后需 `--reindex` |
+| 搜索结果太少/为空 | 阈值偏高，调低 `--threshold`（本地 bge-m3 建议 0.5） |
+| 搜索报「模型维度变化」 | 换了模型，旧向量失效，执行 `--reindex` 重建 |
+| 摘要报「缺少 LLM API Key」 | 先 `--init` 录入密钥（存系统凭据库），或检查 `--config` |
+| 想让某篇重新摘要 | 清空该行 `Summary` 字段后再执行 `--summary` |
+
 ### 交互模式
 
 启动后显示主菜单：
