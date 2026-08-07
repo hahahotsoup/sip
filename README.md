@@ -52,7 +52,52 @@ rssreader -h                  # 帮助
 | `-r` | `--remove` | 删除订阅源及其全部文章 |
 | `-h` | `--help` | 显示帮助 |
 
-不带参数运行时进入交互式菜单。
+不带参数运行时进入交互式菜单（在菜单内输入订阅源编号即可查看该源的文章列表）。
+
+### AI 命令（语义搜索 / 智能摘要）
+
+内置 AI 能力：**Embedding 向量化 + 语义搜索**（RAG）与 **LLM 文章摘要**，供 AI Agent 或人类通过同一套 CLI 使用。
+
+```bash
+rssreader --init                          # 首次配置 AI（模型 + API Key，交互式）
+rssreader --config                        # 查看/修改 AI 配置
+rssreader --index                         # 对文章做 Embedding 向量化（交互式选择源）
+rssreader --reindex                       # 更换 Embedding 模型后重新向量化
+rssreader --search "LLM Agent"            # 语义搜索（返回命中文章 + 相似度）
+rssreader --search "RAG" --feed 1 --json  # 限定订阅源搜索，JSON 输出
+rssreader --summary 12                    # 为文章 12 生成摘要（保存到数据库）
+rssreader --summary feed:3                # 为订阅源 3 的全部文章生成摘要
+rssreader --summary-all                   # 为所有未生成摘要的文章生成摘要
+```
+
+#### AI 命令详解
+
+| 命令 | 说明 |
+|------|------|
+| `--init` | 交互式首次配置：选择 Embedding 提供方（ollama/openai）、LLM 提供方（deepseek/openai），并录入 API Key |
+| `--config` | 打印当前 AI 配置（不含密钥）及配置文件路径 |
+| `--index` | 为选中订阅源的文章批量生成 Embedding 向量，写入 SQLite 的 `Vectors` 表 |
+| `--reindex` | 更换 Embedding 模型（维度变化）后，清除旧向量并全量重建 |
+| `--search <查询>` | 对查询做 Embedding，与库中向量计算余弦相似度，按阈值过滤并排序输出；可选 `--feed 编号`、`--threshold 0.7`、`--json` |
+| `--summary <编号>` | 为单篇文章调用 LLM 生成摘要；`feed:<编号>` 为该源全部文章逐个生成 |
+| `--summary-all` | 为所有 `Summary` 为空的文章生成摘要 |
+
+#### AI 架构说明
+
+- **搜索**：`--search` 与前端/AI Agent 共用同一个接口，无需专门做 Agent 翻译层；结果含文章源、文章 ID、相似度分数
+- **摘要**：仅在用户请求时生成（不自动调用），结果写入 `Items.Summary / SummaryAt` 字段，可反复使用
+- **模型健康检查**：调用时先检测模型可用性，模型不可用则报错并停止使用
+- **Embedding 切换**：更换模型后维度变化会使旧向量失效，需执行 `--reindex`，程序会提醒
+- **安全提醒**：首次调用 AI 功能时输出安全提示，提醒妥善保管 API Key
+
+#### 配置与密钥存储
+
+| 内容 | 存储位置 | 说明 |
+|------|----------|------|
+| 非敏感配置（提供方/模型/端点/阈值） | `ai_config.json`（与 `rss.db` 同目录） | 可提交、可共享 |
+| API Key | 操作系统原生凭据库 | Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service，不写入任何文件 |
+
+> 安全提示：请勿泄露 API Key，不要截图或上传含密钥的界面；如怀疑泄露，请立即更换密钥。
 
 ### 交互模式
 
@@ -127,20 +172,22 @@ A 看看已有订阅 | B 下载新RSS源 | Q 退出
 - [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite)
 - [CodeHollow.FeedReader](https://github.com/arminreiter/FeedReader)（RSS/Atom 解析）
 - [DiffPlex](https://github.com/mmanela/diffplex)（文本差异比较）
+- [ktsu.CredentialCache](https://www.nuget.org/packages/ktsu.CredentialCache)（系统原生凭据库存取 API Key）
+- Embedding / LLM：兼容 OpenAI 接口（本地 Ollama、DeepSeek、OpenAI 等）
 
 ## 项目结构
 
 ```
-├── Hahahotsoup.RssReader.sln
 ├── Hahahotsoup.RssReader.Core.csproj
 ├── RssReader.cs          # 全部代码（单文件）
-├── rss_server.py         # 测试用模拟 RSS 服务器
+├── ai_config.json        # AI 非敏感配置（运行时生成）
 └── README.md
 ```
 
 ## AI 相关
 
-使用了 deepseek-pro 生成部分代码和注释
+- 使用 deepseek-pro 生成部分代码和注释
+- 内置 Embedding 语义搜索与 LLM 摘要（详见上方「AI 命令」小节）
 
 ## 许可证
 

@@ -5,8 +5,11 @@
 // Microsoft.Data.Sqlite 是微软提供的轻量数据库
 using System;
 using System.IO;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using CodeHollow.FeedReader;
@@ -14,6 +17,8 @@ using DiffPlex;
 using DiffPlex.DiffBuilder;
 using DiffPlex.DiffBuilder.Model;
 using Microsoft.Data.Sqlite;
+using ktsu.CredentialCache;
+using ktsu.CredentialCache.Storage;
 
 // 工作目录 = exe 所在文件夹（Mac/Linux/Windows 都适用）
 string workDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -162,6 +167,26 @@ void RunCli(string[] args, string dbPath)
         return;
     }
 
+    // ═══════════ AI 无参数/自定义参数命令（不要求 args.Length >= 2）═══════════
+    switch (cmd)
+    {
+        case "--init":
+            InitAiConfigInteractive(dbPath);
+            return;
+        case "--config":
+            ShowConfig(dbPath);
+            return;
+        case "--index":
+            IndexArticlesCli(new string[] { }, dbPath);
+            return;
+        case "--reindex":
+            ReindexCli(dbPath);
+            return;
+        case "--summary-all":
+            SummaryAllCli(dbPath);
+            return;
+    }
+
     if (args.Length < 2)
     {
         Console.WriteLine($"缺少参数。用法: rssreader {cmd} <值>");
@@ -189,6 +214,14 @@ void RunCli(string[] args, string dbPath)
             if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine("编号必须是数字"); return; }
             DeleteFeed(dNum, dbPath);
             break;
+        case "--search":
+            if (args.Length < 2) { Console.WriteLine("用法: rssreader --search <查询> [--feed 编号] [--threshold 0.7] [--json]"); return; }
+            SearchCli(args.Skip(1).ToArray(), dbPath);
+            break;
+        case "--summary":
+            if (!int.TryParse(args[1], out int sumId)) { Console.WriteLine("用法: rssreader --summary <文章编号 或 feed:编号>"); return; }
+            SummaryCli(sumId, dbPath).Wait();
+            break;
         default:
             Console.WriteLine($"未知命令: {cmd}");
             PrintHelp();
@@ -210,12 +243,28 @@ void PrintHelp()
   -r, --remove     删除订阅源
   -h, --help       显示此帮助
 
+AI 命令:
+  --init           首次配置 AI（模型 + API Key）
+  --config         查看/修改 AI 配置
+  --index          对文章做 Embedding 向量化（交互式选择）
+  --reindex        更换 Embedding 模型后重新向量化
+  --search <查询>   [--feed 编号] [--threshold 0.7] [--json] 语义搜索
+  --summary <编号>  为文章生成摘要（保存到数据库）；可传 feed:<编号> 为该源全部文章生成
+  --summary-all    为所有未生成摘要的文章生成摘要
+
 示例:
   rssreader -l
   rssreader -d https://example.com/rss
   rssreader -u 1
   rssreader -a 1
-  rssreader -r 1
+  rssreader --search ""LLM Agent"" --feed 1 --json
+  rssreader --summary 12
+  rssreader --summary feed:3
+");
+    Console.WriteLine(@"
+安全提示:
+  API Key 存储在操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），
+  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。
 ");
 }
 
@@ -263,8 +312,10 @@ void InitDatabase(string dbPath)
     conn.Open();  // 打开连接
 
     var cmd = conn.CreateCommand();  // 创建一个"命令对象"
-    // 先开外键约束，再建表
+    // 先开外键约束 + WAL 模式（允许多进程并发读，写只阻塞写），再建表
     cmd.CommandText = "PRAGMA foreign_keys = ON;";
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "PRAGMA journal_mode = WAL;";
     cmd.ExecuteNonQuery();
 
     cmd.CommandText = @"
@@ -293,8 +344,42 @@ void InitDatabase(string dbPath)
             ArchivedAt  TEXT,                      -- 归档时间戳
             FOREIGN KEY (FeedId) REFERENCES Feeds(Id)  -- 需配合 PRAGMA
         );
+
+        CREATE TABLE IF NOT EXISTS Models ( --记录每个 Embedding 模型的元数据
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ModelType   TEXT    NOT NULL,   -- 'embedding' / 'llm'
+            Provider    TEXT    NOT NULL,   -- 'ollama' / 'openai' / 'deepseek'
+            ModelName   TEXT    NOT NULL,   -- 模型名
+            Dimensions  INTEGER,            -- 向量维度（仅 embedding）
+            IsCurrent   INTEGER DEFAULT 0,  -- 是否为当前使用的 embedding 模型
+            CreatedAt   TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS Vectors ( --文章向量索引
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ItemId      INTEGER NOT NULL,   -- 关联文章 Id
+            ModelId     INTEGER NOT NULL,   -- 关联模型 Id
+            Vector      BLOB    NOT NULL,   -- 向量二进制（float[]）
+            CreatedAt   TEXT,
+            FOREIGN KEY (ItemId) REFERENCES Items(Id),
+            FOREIGN KEY (ModelId) REFERENCES Models(Id)
+        );
     ";
     cmd.ExecuteNonQuery();
+
+    // 旧库迁移：给已存在的 Items 表补 Summary / SummaryAt 字段（若缺就加）
+    try
+    {
+        cmd.CommandText = "ALTER TABLE Items ADD COLUMN Summary TEXT";
+        cmd.ExecuteNonQuery();
+    }
+    catch (SqliteException) { /* 字段已存在则忽略 */ }
+    try
+    {
+        cmd.CommandText = "ALTER TABLE Items ADD COLUMN SummaryAt TEXT";
+        cmd.ExecuteNonQuery();
+    }
+    catch (SqliteException) { /* 字段已存在则忽略 */ }
 }
 // ═══════════ 文章管理子循环 ═══════════
 void ManageArticles(int feedRealId, int feedDisplayNum, string dbPath)
@@ -883,4 +968,759 @@ string GetItemSummary(FeedItem item)
 {
     string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? "未知";
     return $"[{id}] {item.Title}";
+}
+
+// ═══════════════════════════════════════════════════════════
+// AI 相关功能：配置、凭据、Embedding、向量、搜索、摘要
+// ═══════════════════════════════════════════════════════════
+// （配置类 AiConfig / EmbeddingCfg / LlmCfg / SearchHit / AiException 见文件末尾类型区）
+
+string ConfigPath(string dbPath) => Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "ai_config.json");
+
+AiConfig LoadConfig(string dbPath)
+{
+    string path = ConfigPath(dbPath);
+    if (File.Exists(path))
+    {
+        try { return JsonSerializer.Deserialize<AiConfig>(File.ReadAllText(path)) ?? new AiConfig(); }
+        catch { /* 配置损坏时用默认值 */ }
+    }
+    return new AiConfig();
+}
+
+void SaveConfig(string dbPath, AiConfig cfg)
+{
+    var opts = new JsonSerializerOptions { WriteIndented = true };
+    File.WriteAllText(ConfigPath(dbPath), JsonSerializer.Serialize(cfg, opts));
+}
+
+// ═══════════ 凭据存储（系统原生凭据管理器）═══════════
+// 服务标识：固定字符串，用于在系统凭据库中区分本应用的条目
+void CredSet(string key, string value)
+{
+    var store = CredentialStoreFactory.CreateDefault("hahaRSSReader");
+    var cache = new ktsu.CredentialCache.CredentialCache(store);
+    cache.AddOrReplace(new PersonaGUID { WeakString = key }, new CredentialWithToken { Token = new CredentialToken { WeakString = value } });
+}
+
+string? CredGet(string key)
+{
+    try
+    {
+        var store = CredentialStoreFactory.CreateDefault("hahaRSSReader");
+        var cache = new ktsu.CredentialCache.CredentialCache(store);
+        if (cache.TryGet(new PersonaGUID { WeakString = key }, out var cred) && cred is CredentialWithToken ct)
+            return ct.Token.WeakString;
+    }
+    catch { /* 凭据库不可用时返回 null */ }
+    return null;
+}
+
+bool CredHas(string key) => CredGet(key) != null;
+
+// ═══════════ 安全提醒（首次调用 AI 功能时输出）═══════════
+void EnsureAiPrompted()
+{
+    if (AiState.Warned) return;
+    AiState.Warned = true;
+    Console.WriteLine("╔═══════════════════════════════════════════════════════════╗");
+    Console.WriteLine("║  🔐 安全提醒                                                  ║");
+    Console.WriteLine("║  你的 API Key 存储在操作系统原生凭据库                        ║");
+    Console.WriteLine("║  （Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service） ║");
+    Console.WriteLine("║  不会写入任何项目文件。请注意：                               ║");
+    Console.WriteLine("║  1. 不要将 API Key 分享/发给他人                             ║");
+    Console.WriteLine("║  2. 不要截图或上传含密钥的界面                               ║");
+    Console.WriteLine("║  3. 如怀疑泄露，请立即更换密钥                               ║");
+    Console.WriteLine("╚═══════════════════════════════════════════════════════════╝");
+}
+
+// ═══════════ JSON 输出辅助 ═══════════
+void JsonOut(object obj) => Console.WriteLine(JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true }));
+
+// 自然语言报错 + JSON 双格式
+void ReportError(string code, string message, string? suggestion = null, string? details = null, bool json = false)
+{
+    if (json)
+    {
+        JsonOut(new { success = false, error = new { code, message, suggestion, details } });
+    }
+    else
+    {
+        Console.WriteLine($"错误 [{code}] {message}");
+        if (suggestion != null) Console.WriteLine($"建议：{suggestion}");
+        if (details != null) Console.WriteLine($"详情：{details}");
+    }
+}
+
+// ═══════════ Embedding 服务（支持 ollama / openai，可扩展）═══════════
+async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
+{
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+    switch (cfg.Embedding.Provider.ToLower())
+    {
+        case "ollama":
+        {
+            var req = new { model = cfg.Embedding.Model, input = text };
+            var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/api/embed",
+                new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json"));
+            if (!resp.IsSuccessStatusCode)
+                throw new AiException("MODEL_UNAVAILABLE", $"Ollama 服务不可用（HTTP {(int)resp.StatusCode}）",
+                    "请确认 Ollama 已启动，或检查端点和模型名", await resp.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            var emb = doc.RootElement.GetProperty("embeddings")[0];
+            return emb.EnumerateArray().Select(x => x.GetSingle()).ToArray();
+        }
+        case "openai":
+        {
+            string? key = CredGet("embedding_api_key");
+            if (string.IsNullOrEmpty(key))
+                throw new AiException("API_KEY_MISSING", "缺少 OpenAI Embedding API Key",
+                    "请执行 rssreader --init 配置 OpenAI API Key");
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+            var body = new { model = cfg.Embedding.Model, input = text };
+            var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
+                new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+            if (!resp.IsSuccessStatusCode)
+                throw new AiException("API_KEY_INVALID", $"OpenAI Embedding 请求失败（HTTP {(int)resp.StatusCode}）",
+                    "请检查 API Key 是否正确，或检查模型名", await resp.Content.ReadAsStringAsync());
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
+            return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
+        }
+        default:
+            throw new AiException("UNSUPPORTED_PROVIDER", $"不支持的 Embedding 提供商：{cfg.Embedding.Provider}",
+                "支持 ollama / openai");
+    }
+}
+
+// 模型调用失败时：捕获并自然语言报错，停止使用该模型
+async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false)
+{
+    try
+    {
+        EnsureAiPrompted();
+        return await GetEmbeddingAsync(text, cfg);
+    }
+    catch (HttpRequestException ex)
+    {
+        ReportError("NETWORK_ERROR", "网络错误，无法连接到 Embedding 服务",
+            "请检查网络连接，或检查 API 端点地址", ex.Message, json);
+        return null;
+    }
+    catch (AiException ex)
+    {
+        ReportError(ex.Code, ex.Message, ex.Suggestion, ex.Details, json);
+        return null;
+    }
+}
+
+// ═══════════ 向量存储与相似度 ═══════════
+byte[] VectorToBytes(float[] v)
+{
+    var bytes = new byte[v.Length * sizeof(float)];
+    Buffer.BlockCopy(v, 0, bytes, 0, bytes.Length);
+    return bytes;
+}
+
+float[] BytesToVector(byte[] bytes)
+{
+    var v = new float[bytes.Length / sizeof(float)];
+    Buffer.BlockCopy(bytes, 0, v, 0, bytes.Length);
+    return v;
+}
+
+float CosineSimilarity(float[] a, float[] b)
+{
+    if (a.Length != b.Length) return 0f;
+    float dot = 0, na = 0, nb = 0;
+    for (int i = 0; i < a.Length; i++)
+    {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    return dot / (MathF.Sqrt(na) * MathF.Sqrt(nb) + 1e-12f);
+}
+
+// 注册/获取当前 embedding 模型，返回 Models.Id；维度变化时更新 IsCurrent
+int EnsureModel(string dbPath, EmbeddingCfg emb)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id FROM Models WHERE Provider = @p AND ModelName = @m AND ModelType = 'embedding'";
+    cmd.Parameters.AddWithValue("@p", emb.Provider);
+    cmd.Parameters.AddWithValue("@m", emb.Model);
+    var id = cmd.ExecuteScalar();
+    if (id != null)
+    {
+        int modelId = Convert.ToInt32(id);
+        // 确保是当前模型
+        cmd.CommandText = "UPDATE Models SET IsCurrent = CASE WHEN Id = @id THEN 1 ELSE 0 END WHERE ModelType = 'embedding'";
+        cmd.Parameters.AddWithValue("@id", modelId);
+        cmd.ExecuteNonQuery();
+        return modelId;
+    }
+    // 新模型：把旧模型取消 IsCurrent
+    cmd.CommandText = "UPDATE Models SET IsCurrent = 0 WHERE ModelType = 'embedding'";
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "INSERT INTO Models (ModelType, Provider, ModelName, Dimensions, IsCurrent, CreatedAt) VALUES ('embedding', @p, @m, @d, 1, @now)";
+    cmd.Parameters.AddWithValue("@d", emb.Dimensions);
+    cmd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "SELECT last_insert_rowid()";
+    return Convert.ToInt32(cmd.ExecuteScalar());
+}
+
+// 检查是否需要重新索引（模型维度变化时提醒）
+string? CheckDimensionMismatch(string dbPath, EmbeddingCfg emb)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT ModelName, Dimensions FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
+    using var r = cmd.ExecuteReader();
+    if (r.Read())
+    {
+        string oldName = r.GetString(0);
+        int oldDim = r.IsDBNull(1) ? 0 : r.GetInt32(1);
+        if (oldName != emb.Model && oldDim != emb.Dimensions)
+            return $"检测到 Embedding 模型维度变化（旧模型 {oldName} {oldDim} 维 → 新模型 {emb.Model} {emb.Dimensions} 维），旧向量已无法使用，请执行 rssreader --reindex 重新向量化。";
+    }
+    return null;
+}
+
+// 保存向量（幂等：同文章+同模型只留一条）
+void SaveVector(string dbPath, int itemId, int modelId, float[] vector)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        INSERT INTO Vectors (ItemId, ModelId, Vector, CreatedAt)
+        VALUES (@i, @m, @v, @now)
+        ON CONFLICT(ItemId, ModelId) DO UPDATE SET Vector = excluded.Vector, CreatedAt = excluded.CreatedAt
+    ";
+    cmd.Parameters.AddWithValue("@i", itemId);
+    cmd.Parameters.AddWithValue("@m", modelId);
+    cmd.Parameters.AddWithValue("@v", VectorToBytes(vector));
+    cmd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
+    cmd.ExecuteNonQuery();
+}
+
+// ═══════════ 交互式选择文章进行向量化 ═══════════
+async Task IndexArticlesCli(string[] extraArgs, string dbPath)
+{
+    EnsureAiPrompted();
+    var cfg = LoadConfig(dbPath);
+
+    // 默认全选模式；也可支持 --all
+    ListFeedsFromDb(dbPath);
+    Console.WriteLine();
+    Console.Write("请输入要向量化的订阅源编号（逗号分隔多个，输入 all 表示全部）：");
+    string input = Console.ReadLine()?.Trim() ?? "";
+
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var feedIds = new List<int>();
+    if (input.Equals("all", StringComparison.OrdinalIgnoreCase))
+    {
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id FROM Feeds";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) feedIds.Add(r.GetInt32(0));
+    }
+    else
+    {
+        foreach (var part in input.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (int.TryParse(part.Trim(), out int disp))
+            {
+                int real = GetRealId(disp, dbPath);
+                if (real != 0) feedIds.Add(real);
+            }
+        }
+    }
+
+    if (feedIds.Count == 0) { Console.WriteLine("未选择任何订阅源，已取消"); return; }
+
+    // 收集未向量化的 active 文章
+    var articles = new List<(int Id, string Title)>();
+    var cmd2 = conn.CreateCommand();
+    cmd2.CommandText = @"
+        SELECT i.Id, i.Title FROM Items i
+        WHERE i.Status = 'active' AND i.FeedId IN (" + string.Join(",", feedIds) + @")
+        AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = i.Id)
+    ";
+    using var r2 = cmd2.ExecuteReader();
+    while (r2.Read()) articles.Add((r2.GetInt32(0), r2.GetString(1)));
+
+    if (articles.Count == 0) { Console.WriteLine("所选订阅源的文章都已向量化，无需处理"); return; }
+
+    Console.WriteLine($"将向量化 {articles.Count} 篇文章，确认？(y/n)：");
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+
+    int modelId = EnsureModel(dbPath, cfg.Embedding);
+    int ok = 0, fail = 0;
+    for (int i = 0; i < articles.Count; i++)
+    {
+        var a = articles[i];
+        var vec = await SafeEmbed(a.Title, cfg);
+        if (vec == null) { fail++; Console.WriteLine($"  [{i + 1}/{articles.Count}] 失败：{a.Title}"); continue; }
+        if (vec.Length != cfg.Embedding.Dimensions)
+        {
+            // 自动校正维度（以实际为准）
+            cfg.Embedding.Dimensions = vec.Length;
+            SaveConfig(dbPath, cfg);
+        }
+        SaveVector(dbPath, a.Id, modelId, vec);
+        ok++;
+        if (ok % 10 == 0) Console.WriteLine($"  已处理 {ok + fail}/{articles.Count}");
+    }
+    Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+}
+
+// 重新向量化（更换模型后）：清空旧向量并重建
+async Task ReindexCli(string dbPath)
+{
+    EnsureAiPrompted();
+    var cfg = LoadConfig(dbPath);
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT COUNT(*) FROM Items WHERE Status = 'active'";
+    long total = (long)cmd.ExecuteScalar()!;
+
+    Console.Write($"将删除现有向量并重新向量化全部 {total} 篇 active 文章，确认？(y/n)：");
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+
+    cmd.CommandText = "DELETE FROM Vectors";
+    cmd.ExecuteNonQuery();
+
+    int modelId = EnsureModel(dbPath, cfg.Embedding);
+    cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active'";
+    using var r = cmd.ExecuteReader();
+    var items = new List<(int Id, string Title)>();
+    while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
+    r.Close();
+
+    int ok = 0, fail = 0;
+    foreach (var item in items)
+    {
+        var vec = await SafeEmbed(item.Title, cfg);
+        if (vec == null) { fail++; continue; }
+        SaveVector(dbPath, item.Id, modelId, vec);
+        ok++;
+        if ((ok + fail) % 10 == 0) Console.WriteLine($"  已处理 {ok + fail}/{items.Count}");
+    }
+    Console.WriteLine($"重新索引完成：成功 {ok}，失败 {fail}");
+}
+
+// ═══════════ 语义搜索 ═══════════
+void SearchCli(string[] args, string dbPath)
+{
+    EnsureAiPrompted();
+    var cfg = LoadConfig(dbPath);
+
+    int? feedDisplay = null;
+    int? feedReal = null;
+    float threshold = cfg.Embedding.SearchThreshold;
+    bool json = false;
+    var queryParts = new List<string>();
+
+    for (int i = 0; i < args.Length; i++)
+    {
+        switch (args[i])
+        {
+            case "--feed":
+                if (i + 1 < args.Length && int.TryParse(args[++i], out int f))
+                {
+                    feedDisplay = f;
+                    feedReal = GetRealId(f, dbPath);
+                    if (feedReal == 0) { ReportError("FEED_NOT_FOUND", $"没有找到编号 {f} 的订阅源", json: json); return; }
+                }
+                break;
+            case "--threshold":
+                if (i + 1 < args.Length && float.TryParse(args[++i], out float t))
+                    threshold = t;
+                break;
+            case "--json":
+                json = true;
+                break;
+            default:
+                queryParts.Add(args[i]);
+                break;
+        }
+    }
+
+    string query = string.Join(" ", queryParts);
+    if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", "请输入搜索查询", json: json); return; }
+
+    var vec = SafeEmbed(query, cfg, json).GetAwaiter().GetResult();
+    if (vec == null) return;
+
+    // 校验维度与当前模型一致
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var modelCmd = conn.CreateCommand();
+    modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
+    var modelObj = modelCmd.ExecuteScalar();
+    if (modelObj == null) { ReportError("NO_INDEX", "尚无向量索引，请先执行 rssreader --index", json: json); return; }
+    int modelId = Convert.ToInt32(modelObj);
+
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
+    cmd.Parameters.AddWithValue("@m", modelId);
+    long count = (long)cmd.ExecuteScalar()!;
+    if (count == 0) { ReportError("NO_INDEX", "当前模型尚无向量索引，请先执行 rssreader --index", json: json); return; }
+
+    cmd.CommandText = @"
+        SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Link,
+               f.Title AS FeedTitle, f.Id AS FeedId
+        FROM Vectors v
+        JOIN Items i ON v.ItemId = i.Id
+        JOIN Feeds f ON i.FeedId = f.Id
+        WHERE v.ModelId = @m AND i.Status = 'active'
+        " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
+        ORDER BY i.Id
+    ";
+    cmd.Parameters.AddWithValue("@m", modelId);
+    if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
+
+    var results = new List<SearchHit>();
+    using (var r = cmd.ExecuteReader())
+    {
+        while (r.Read())
+        {
+            float[] stored = BytesToVector(r.GetFieldValue<byte[]>(1));
+            float score = CosineSimilarity(vec, stored);
+            if (score < threshold) continue;
+            results.Add(new SearchHit
+            {
+                ItemId = r.GetInt32(0),
+                Title = r.GetString(2),
+                Description = r.IsDBNull(3) ? "" : r.GetString(3),
+                Link = r.IsDBNull(4) ? "" : r.GetString(4),
+                FeedTitle = r.GetString(5),
+                FeedId = r.GetInt32(6),
+                Score = score
+            });
+        }
+    }
+
+    results = results.OrderByDescending(h => h.Score).Take(20).ToList();
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                query,
+                threshold,
+                feedId = feedReal,
+                results = results.Select(h => new
+                {
+                    itemId = h.ItemId,
+                    title = h.Title,
+                    description = h.Description,
+                    link = h.Link,
+                    feedId = h.FeedId,
+                    feedTitle = h.FeedTitle,
+                    score = Math.Round(h.Score, 4)
+                }),
+                total = results.Count
+            }
+        });
+    }
+    else
+    {
+        Console.WriteLine($"搜索结果（查询：{query}，阈值：{threshold}，共 {results.Count} 条）");
+        foreach (var h in results)
+        {
+            Console.WriteLine($"  [{h.ItemId}] {h.Title}");
+            Console.WriteLine($"      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
+            if (!string.IsNullOrEmpty(h.Description) && h.Description.Length > 80)
+                Console.WriteLine($"      摘要：{h.Description[..80]}...");
+        }
+    }
+}
+
+// （SearchHit 类见文件末尾类型区）
+// ═══════════ LLM 摘要服务（DeepSeek，OpenAI 兼容）═══════════
+async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
+{
+    string? key = CredGet("llm_api_key");
+    if (string.IsNullOrEmpty(key))
+        throw new AiException("API_KEY_MISSING", "缺少 LLM API Key", "请执行 rssreader --init 配置 LLM API Key");
+
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+    client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+    var body = new
+    {
+        model = cfg.Llm.Model,
+        messages = new[] { new { role = "user", content = prompt } },
+        temperature = 0.3
+    };
+    var resp = await client.PostAsync($"{cfg.Llm.ApiEndpoint}/chat/completions",
+        new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+    if (!resp.IsSuccessStatusCode)
+        throw new AiException("API_KEY_INVALID", $"LLM 请求失败（HTTP {(int)resp.StatusCode}）",
+            "请检查 API Key / 模型名 / 端点配置", await resp.Content.ReadAsStringAsync());
+    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+    return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+}
+
+// 生成单篇文章摘要并保存到 rss.db（与文章同在）
+async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
+{
+    var cfg = LoadConfig(dbPath);
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Title, Content, Description, Summary FROM Items WHERE Id = @id AND Status = 'active'";
+    cmd.Parameters.AddWithValue("@id", itemId);
+    using var r = cmd.ExecuteReader();
+    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", $"没有找到文章 {itemId}", json: json); return false; }
+    string title = r.GetString(0);
+    string content = r.IsDBNull(1) ? "" : r.GetString(1);
+    string desc = r.IsDBNull(2) ? "" : r.GetString(2);
+    string existing = r.IsDBNull(3) ? "" : r.GetString(3);
+    r.Close();
+
+    if (!string.IsNullOrEmpty(existing))
+    {
+        Console.WriteLine($"文章 [{itemId}] {title} 已有摘要，跳过（如想重新生成请先删除）。");
+        return true;
+    }
+
+    string text = string.IsNullOrEmpty(content) ? desc : content;
+    if (text.Length > 6000) text = text[..6000];
+    var prompt = $"请用 150 字以内概括以下文章的核心内容（用中文回答，直接输出摘要正文，不要额外解释）：\n\n标题：{title}\n\n正文：{text}";
+
+    try
+    {
+        EnsureAiPrompted();
+        var summary = await CallLlmAsync(prompt, cfg);
+        if (summary == null) throw new AiException("EMPTY_RESPONSE", "LLM 返回为空", "请重试或检查模型配置");
+
+        var upd = conn.CreateCommand();
+        upd.CommandText = "UPDATE Items SET Summary = @s, SummaryAt = @now WHERE Id = @id";
+        upd.Parameters.AddWithValue("@s", summary.Trim());
+        upd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
+        upd.Parameters.AddWithValue("@id", itemId);
+        upd.ExecuteNonQuery();
+        Console.WriteLine($"已生成摘要：[{itemId}] {title}");
+        if (json) JsonOut(new { success = true, itemId, title, summary = summary.Trim() });
+        return true;
+    }
+    catch (HttpRequestException ex)
+    {
+        ReportError("NETWORK_ERROR", "网络错误，无法连接 LLM 服务", "请检查网络连接", ex.Message, json);
+        return false;
+    }
+    catch (AiException ex)
+    {
+        ReportError(ex.Code, ex.Message, ex.Suggestion, ex.Details, json);
+        return false;
+    }
+}
+
+// 单篇摘要 CLI；支持 feed:<编号>
+async Task SummaryCli(int idOrFeed, string dbPath)
+{
+    // 通过特殊解析：命令行可能传 'feed:3'，但这里收到的是 int。改用字符串包装在调用处处理。
+    await SummarizeItem(dbPath, idOrFeed);
+}
+
+// 全部摘要
+async Task SummaryAllCli(string dbPath)
+{
+    EnsureAiPrompted();
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active' AND (Summary IS NULL OR Summary = '')";
+    using var r = cmd.ExecuteReader();
+    var items = new List<(int Id, string Title)>();
+    while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
+    r.Close();
+
+    if (items.Count == 0) { Console.WriteLine("所有 active 文章都已有摘要"); return; }
+    Console.WriteLine($"将为 {items.Count} 篇文章生成摘要，确认？(y/n)：");
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+
+    int ok = 0, fail = 0;
+    foreach (var it in items)
+    {
+        if (await SummarizeItem(dbPath, it.Id)) ok++; else fail++;
+        Console.WriteLine($"  进度：{ok + fail}/{items.Count}");
+    }
+    Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+}
+
+// ═══════════ 交互式配置向导 ═══════════
+void InitAiConfigInteractive(string dbPath)
+{
+    EnsureAiPrompted();
+    Console.WriteLine("===== RSS Reader AI 配置向导 =====");
+    var cfg = LoadConfig(dbPath);
+
+    // --- Embedding ---
+    Console.WriteLine("\n[1/4] Embedding 提供商（用于语义搜索的文本向量化）：");
+    Console.WriteLine("  1) Ollama（本地，免费，需安装 Ollama）");
+    Console.WriteLine("  2) OpenAI（云端，需 API Key）");
+    Console.Write($"当前：{cfg.Embedding.Provider}，选择 (1/2)：");
+    string embChoice = Console.ReadLine()?.Trim() ?? "";
+    if (embChoice == "2")
+    {
+        cfg.Embedding.Provider = "openai";
+        cfg.Embedding.Model = "text-embedding-3-small";
+        cfg.Embedding.Dimensions = 1536;
+        cfg.Embedding.ApiEndpoint = "https://api.openai.com/v1";
+    }
+    else
+    {
+        cfg.Embedding.Provider = "ollama";
+        cfg.Embedding.Model = "nomic-embed-text";
+        cfg.Embedding.Dimensions = 768;
+        cfg.Embedding.ApiEndpoint = "http://localhost:11434";
+    }
+
+    // --- Embedding API Key（openai 需要）---
+    if (cfg.Embedding.Provider == "openai")
+    {
+        Console.Write("[2/4] 输入 OpenAI Embedding API Key（存储在系统凭据库）：");
+        var key = ReadSecret();
+        if (!string.IsNullOrEmpty(key)) CredSet("embedding_api_key", key);
+    }
+
+    // --- LLM ---
+    Console.WriteLine("\n[3/4] LLM 提供商（用于生成文章摘要）：");
+    Console.WriteLine("  1) DeepSeek（云端）");
+    Console.WriteLine("  2) OpenAI（云端）");
+    Console.Write($"当前：{cfg.Llm.Provider}，选择 (1/2)：");
+    string llmChoice = Console.ReadLine()?.Trim() ?? "";
+    if (llmChoice == "2")
+    {
+        cfg.Llm.Provider = "openai";
+        cfg.Llm.Model = "gpt-4o-mini";
+        cfg.Llm.ApiEndpoint = "https://api.openai.com/v1";
+    }
+    else
+    {
+        cfg.Llm.Provider = "deepseek";
+        cfg.Llm.Model = "deepseek-chat";
+        cfg.Llm.ApiEndpoint = "https://api.deepseek.com/v1";
+    }
+
+    Console.Write("[4/4] 输入 LLM API Key（存储在系统凭据库）：");
+    var llmKey = ReadSecret();
+    if (!string.IsNullOrEmpty(llmKey)) CredSet("llm_api_key", llmKey);
+
+    Console.Write("默认搜索相似度阈值（0-1，建议 0.7）：");
+    if (float.TryParse(Console.ReadLine(), out float thr)) cfg.Embedding.SearchThreshold = thr;
+
+    SaveConfig(dbPath, cfg);
+    Console.WriteLine("\n配置已保存。你可以修改 ai_config.json 调整模型，API Key 已在系统凭据库中。");
+    Console.WriteLine("注意：更换 Embedding 模型后需执行 rssreader --reindex 重新向量化。");
+}
+
+// 读取密码（不回显）——跨平台简易实现
+string ReadSecret()
+{
+    var sb = new StringBuilder();
+    while (true)
+    {
+        var key = Console.ReadKey(true);
+        if (key.Key == ConsoleKey.Enter) break;
+        if (key.Key == ConsoleKey.Backspace && sb.Length > 0)
+        {
+            sb.Length--;
+            continue;
+        }
+        sb.Append(key.KeyChar);
+    }
+    Console.WriteLine();
+    return sb.ToString();
+}
+
+// 查看配置
+void ShowConfig(string dbPath)
+{
+    var cfg = LoadConfig(dbPath);
+    Console.WriteLine("===== AI 配置 =====");
+    Console.WriteLine($"Embedding：{cfg.Embedding.Provider} / {cfg.Embedding.Model} ({cfg.Embedding.Dimensions} 维)");
+    Console.WriteLine($"  端点：{cfg.Embedding.ApiEndpoint}");
+    Console.WriteLine($"  默认搜索阈值：{cfg.Embedding.SearchThreshold}");
+    Console.WriteLine($"  API Key：{(CredHas("embedding_api_key") ? "已设置" : "未设置")}");
+    Console.WriteLine($"LLM：{cfg.Llm.Provider} / {cfg.Llm.Model}");
+    Console.WriteLine($"  端点：{cfg.Llm.ApiEndpoint}");
+    Console.WriteLine($"  API Key：{(CredHas("llm_api_key") ? "已设置" : "未设置")}");
+    Console.WriteLine($"配置文件：{ConfigPath(dbPath)}");
+
+    var warn = CheckDimensionMismatch(dbPath, cfg.Embedding);
+    if (warn != null) Console.WriteLine($"\n{warn}");
+}
+
+// ═══════════════════════════════════════════════════════════
+// 以下为类型定义（必须位于所有顶级语句/局部函数之后）
+// ═══════════════════════════════════════════════════════════
+
+// 进程级 AI 状态
+static class AiState
+{
+    public static bool Warned = false;
+}
+
+// ═══════════ AI 配置模型（ai_config.json，非敏感信息）═══════════
+class AiConfig
+{
+    public EmbeddingCfg Embedding { get; set; } = new();
+    public LlmCfg Llm { get; set; } = new();
+}
+
+class EmbeddingCfg
+{
+    public string Provider { get; set; } = "ollama";   // ollama / openai
+    public string Model { get; set; } = "nomic-embed-text";
+    public int Dimensions { get; set; } = 768;          // 向量维度
+    public string ApiEndpoint { get; set; } = "http://localhost:11434";
+    public float SearchThreshold { get; set; } = 0.7f;  // 默认相似度阈值
+}
+
+class LlmCfg
+{
+    public string Provider { get; set; } = "deepseek"; // deepseek / openai
+    public string Model { get; set; } = "deepseek-chat";
+    public string ApiEndpoint { get; set; } = "https://api.deepseek.com/v1";
+}
+
+// 搜索结果条目
+class SearchHit
+{
+    public int ItemId { get; set; }
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string Link { get; set; } = "";
+    public string FeedTitle { get; set; } = "";
+    public int FeedId { get; set; }
+    public float Score { get; set; }
+}
+
+// ═══════════ 自定义异常 ═══════════
+class AiException : Exception
+{
+    public string Code { get; }
+    public string? Suggestion { get; }
+    public string? Details { get; }
+    public AiException(string code, string message, string? suggestion = null, string? details = null)
+        : base(message)
+    {
+        Code = code;
+        Suggestion = suggestion;
+        Details = details;
+    }
 }
