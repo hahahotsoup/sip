@@ -22,6 +22,7 @@ using ktsu.CredentialCache;
 using ktsu.CredentialCache.Storage;
 using Terminal.Gui;
 using Terminal.Gui.App;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Views;
 using Terminal.Gui.ViewBase;
@@ -217,6 +218,7 @@ async Task<int> RunTui(string dbPath)
             Width = Dim.Percent(30),
             Height = Dim.Fill() - 1,
             CanFocus = true,
+            BorderStyle = LineStyle.Single,
             Title = " " + Lang.T("订阅源") + " "
         };
         tree.TreeBuilder = new DelegateTreeBuilder<TuiNode>(
@@ -232,8 +234,11 @@ async Task<int> RunTui(string dbPath)
             Y = 0,
             Width = Dim.Fill(),
             Height = Dim.Fill() - 1,
+            CanFocus = true,
             ReadOnly = true,
             WordWrap = true,
+            ScrollBars = true,
+            BorderStyle = LineStyle.Single,
             Title = " " + Lang.T("正文") + " "
         };
 
@@ -294,6 +299,7 @@ async Task<int> RunTui(string dbPath)
                 tree.AddObject(new TuiNode { IsFeed = true, FeedId = id, Title = $"{title} {stats}" });
             }
             tree.RebuildTree();
+            tree.ExpandAll();
         }
 
         void ShowSelectedContent()
@@ -597,7 +603,7 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
 }
 
 
-// HTML 正文转纯文本（去标签、解实体）
+// HTML 正文转纯文本（去标签、解实体，保留段落/换行）
 string StripHtml(string html)
 {
     if (string.IsNullOrWhiteSpace(html)) return "";
@@ -605,7 +611,19 @@ string StripHtml(string html)
     {
         var doc = new HtmlAgilityPack.HtmlDocument();
         doc.LoadHtml(html);
+        // 块级元素与换行标签后补一个换行，避免整篇被压成一坨
+        foreach (var node in doc.DocumentNode.SelectNodes("//text()[normalize-space()]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>())
+        {
+            var parent = node.ParentNode;
+            if (parent == null) continue;
+            string name = parent.Name;
+            if (name is "p" or "div" or "br" or "li" or "tr" or "section" or "article" or "h1" or "h2" or "h3" or "h4" or "h5" or "h6" or "blockquote" or "pre" or "ul" or "ol")
+                node.InnerHtml = node.InnerHtml.TrimEnd() + "\n";
+        }
         var text = doc.DocumentNode.InnerText;
+        // 把连续的多个空行压成一个空行
+        text = Regex.Replace(text, @"[ \t]+", " ");
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
         return System.Net.WebUtility.HtmlDecode(text).Trim();
     }
     catch
