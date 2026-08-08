@@ -245,13 +245,18 @@ async Task<int> RunTui(string dbPath)
             Height = Dim.Fill(),
         };
 
-        // 状态栏快捷操作
+        // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
         var statusBar = new StatusBar(new Shortcut[]
         {
-            new Shortcut(Key.F5, Lang.T("更新"), () => RefreshSelectedFeed(), Lang.T("下载当前订阅源")),
-            new Shortcut(Key.T, Lang.T("归档"), () => ArchiveSelectedFeed(), Lang.T("给当前源加时间戳")),
-            new Shortcut(Key.R, Lang.T("去归档"), () => UnarchiveSelectedFeed(), Lang.T("去掉时间戳")),
-            new Shortcut(Key.D, Lang.T("删除"), () => DeleteSelectedFeed(), Lang.T("删除当前订阅源")),
+            new Shortcut(Key.H, Lang.T("帮助"), () => ShowHelpDialog(), Lang.T("查看全部快捷键")),
+            new Shortcut(Key.U, Lang.T("更新"), () => RefreshSelectedFeed(), Lang.T("下载更新当前源 (同 CLI -u)")),
+            new Shortcut(Key.F6, Lang.T("全部更新"), () => RefreshAllFeeds(), Lang.T("下载更新所有源")),
+            new Shortcut(Key.A, Lang.T("归档"), () => ArchiveSelectedFeed(), Lang.T("给当前源加时间戳 (同 CLI -a)")),
+            new Shortcut(Key.R, Lang.T("去归档"), () => UnarchiveSelectedFeed(), Lang.T("去掉时间戳 (同 CLI -una)")),
+            new Shortcut(Key.X, Lang.T("删除"), () => DeleteSelected(), Lang.T("删除选中源/文章 (同 CLI -r)")),
+            new Shortcut(Key.D, Lang.T("加源"), () => AddFeedDialog(), Lang.T("添加新订阅源 (同 CLI -d)")),
+            new Shortcut(Key.S, Lang.T("搜索"), () => SearchDialog(), Lang.T("语义搜索 (同 CLI --search)")),
+            new Shortcut(Key.Y, Lang.T("摘要"), () => SummarizeSelected(), Lang.T("给当前文章生成摘要 (同 CLI --summary)")),
             new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
         });
 
@@ -318,6 +323,8 @@ async Task<int> RunTui(string dbPath)
             return n?.FeedId ?? 0;
         }
 
+        TuiNode? GetSelected() => tree.SelectedObject;
+
         void ArchiveSelectedFeed()
         {
             int realId = GetSelectedFeedId();
@@ -334,29 +341,173 @@ async Task<int> RunTui(string dbPath)
             RebuildTree();
         }
 
-        void DeleteSelectedFeed()
+        void DeleteSelected()
         {
-            int realId = GetSelectedFeedId();
-            if (realId == 0) return;
-            DeleteFeedByRealId(realId, dbPath);
-            RebuildTree();
-            contentView.Text = "";
+            var n = GetSelected();
+            if (n == null) return;
+            if (n.IsFeed)
+            {
+                // 删除源（同 CLI -r）
+                int ans = Ask(Lang.T("确定删除 {0}？此操作不可恢复！(y/n)", n.Title),
+                    Lang.T("确定"), Lang.T("取消"));
+                if (ans != 0) return;
+                DeleteFeedByRealId(n.FeedId, dbPath);
+                RebuildTree();
+                contentView.Text = "";
+            }
+            else
+            {
+                // 删除单篇文章
+                int ans = Ask(Lang.T("确定删除这篇文章？此操作不可恢复！"), Lang.T("确定"), Lang.T("取消"));
+                if (ans != 0) return;
+                DeleteArticleByRealId(n.ItemId, dbPath);
+                RebuildTree();
+                contentView.Text = "";
+            }
         }
 
         void RefreshSelectedFeed()
         {
             int realId = GetSelectedFeedId();
             if (realId == 0) return;
+            RunNetworkOp(() => RefreshOneFeed(realId, dbPath));
+        }
+
+        void RefreshAllFeeds()
+        {
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT FeedUrl FROM Feeds WHERE Id = @id";
-            cmd.Parameters.AddWithValue("@id", realId);
-            string? url = cmd.ExecuteScalar()?.ToString();
-            if (string.IsNullOrWhiteSpace(url)) return;
-            try { DownloadAndSaveToDb(url, dbPath).Wait(); }
-            catch { }
+            cmd.CommandText = "SELECT Id, FeedUrl FROM Feeds";
+            using var r = cmd.ExecuteReader();
+            var list = new List<(int Id, string Url)>();
+            while (r.Read())
+                list.Add((r.GetInt32(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+            RunNetworkOp(() =>
+            {
+                foreach (var f in list)
+                    if (!string.IsNullOrWhiteSpace(f.Url))
+                        try { DownloadAndSaveToDb(f.Url, dbPath).Wait(); } catch { }
+            });
+        }
+
+        // 网络操作阻塞 TUI 时显示提示，结束后重建树
+        void RunNetworkOp(Action op)
+        {
+            contentView.Text = Lang.T("处理中，请稍候...");
+            op();
+            contentView.Text = "";
             RebuildTree();
+        }
+
+        void AddFeedDialog()
+        {
+            // 输入 URL 添加新源（同 CLI -d <url>）
+            var dlg = new Dialog { Title = " " + Lang.T("添加订阅源") + " " };
+            var lbl = new Label { Text = Lang.T("RSS 链接："), X = 0, Y = 0 };
+            var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
+            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = 3 };
+            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = 3 };
+            dlg.Add(lbl, input, ok, cancel);
+            dlg.Width = 60;
+            dlg.Height = 7;
+
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+
+            Application.Run(dlg);
+            string url = input.Text.Trim();
+            if (string.IsNullOrWhiteSpace(url)) return;
+            RunNetworkOp(() =>
+            {
+                try { DownloadAndSaveToDb(url, dbPath).Wait(); }
+                catch (Exception ex) { contentView.Text = Lang.T("出错: {0}", ex.Message); }
+            });
+        }
+
+        void SearchDialog()
+        {
+            if (!File.Exists(ConfigPath(dbPath)))
+            {
+                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                return;
+            }
+            var dlg = new Dialog { Title = " " + Lang.T("语义搜索") + " " };
+            var lbl = new Label { Text = Lang.T("搜索内容："), X = 0, Y = 0 };
+            var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
+            var ok = new Button { Text = Lang.T("搜索"), IsDefault = true, X = 0, Y = 3 };
+            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = 3 };
+            dlg.Add(lbl, input, ok, cancel);
+            dlg.Width = 60;
+            dlg.Height = 7;
+
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+
+            Application.Run(dlg);
+            string q = input.Text.Trim();
+            if (string.IsNullOrWhiteSpace(q)) return;
+
+            // 复用 CLI 的搜索逻辑，把结果展示到正文区
+            var results = DoSearch(q, dbPath);
+            if (results == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            var sb = new StringBuilder();
+            sb.AppendLine(Lang.T("搜索结果（查询：{0}，共 {1} 条）", q, results.Count));
+            foreach (var h in results)
+                sb.AppendLine($"  [{h.ItemId}] {h.Title}\n      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
+            contentView.Text = sb.ToString();
+        }
+
+        void SummarizeSelected()
+        {
+            var n = GetSelected();
+            if (n == null || n.IsFeed)
+            {
+                Ask(Lang.T("请先选中一篇文章再生成摘要"), Lang.T("确定"));
+                return;
+            }
+            if (!File.Exists(ConfigPath(dbPath)))
+            {
+                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                return;
+            }
+            contentView.Text = Lang.T("正在生成摘要，请稍候...");
+            SummarizeItem(dbPath, (int)n.ItemId).Wait();
+            ShowSelectedContent();
+        }
+
+        void ShowHelpDialog()
+        {
+            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " " };
+            var txt = new TextView
+            {
+                X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
+                ReadOnly = true, WordWrap = false
+            };
+            txt.Text = string.Join("\n",
+                Lang.T("U          更新当前源"),
+                Lang.T("F6         更新所有源"),
+                Lang.T("A          归档当前源"),
+                Lang.T("R          去归档"),
+                Lang.T("X          删除选中源/文章"),
+                Lang.T("D          添加新订阅源"),
+                Lang.T("S          语义搜索"),
+                Lang.T("Y          生成文章摘要"),
+                Lang.T("H          显示本帮助"),
+                Lang.T("Q          退出"),
+                Lang.T("→ / 空格    展开/收起订阅源"),
+                Lang.T("Enter      打开文章正文"));
+            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
+            dlg.Add(txt, ok);
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            Application.Run(dlg);
+        }
+
+        // 通用确认/提示对话框，返回按钮索引（0 = 第一个按钮）
+        int Ask(string message, params string[] buttons)
+        {
+            var btns = buttons.Length > 0 ? buttons : new[] { Lang.T("确定") };
+            return MessageBox.Query(Application.Instance, Lang.T("提示"), message, btns) ?? 0;
         }
 
         // —— 事件绑定 ——
@@ -1609,60 +1760,8 @@ void SearchCli(string[] args, string dbPath)
     string query = string.Join(" ", queryParts);
     if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", Lang.T("请输入搜索查询"), json: json); return; }
 
-    var vec = SafeEmbed(query, cfg, json).GetAwaiter().GetResult();
-    if (vec == null) return;
-
-    // 校验维度与当前模型一致
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
-    conn.Open();
-    var modelCmd = conn.CreateCommand();
-    modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
-    var modelObj = modelCmd.ExecuteScalar();
-    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("尚无向量索引，请先执行 rssreader --index"), json: json); return; }
-    int modelId = Convert.ToInt32(modelObj);
-
-    var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
-    cmd.Parameters.AddWithValue("@m", modelId);
-    long count = (long)cmd.ExecuteScalar()!;
-    if (count == 0) { ReportError("NO_INDEX", Lang.T("当前模型尚无向量索引，请先执行 rssreader --index"), json: json); return; }
-
-    cmd.Parameters.Clear();
-    cmd.CommandText = @"
-        SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Link,
-               f.Title AS FeedTitle, f.Id AS FeedId
-        FROM Vectors v
-        JOIN Items i ON v.ItemId = i.Id
-        JOIN Feeds f ON i.FeedId = f.Id
-        WHERE v.ModelId = @m AND i.Status = 'active'
-        " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
-        ORDER BY i.Id
-    ";
-    cmd.Parameters.AddWithValue("@m", modelId);
-    if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
-
-    var results = new List<SearchHit>();
-    using (var r = cmd.ExecuteReader())
-    {
-        while (r.Read())
-        {
-            float[] stored = BytesToVector(r.GetFieldValue<byte[]>(1));
-            float score = CosineSimilarity(vec, stored);
-            if (score < threshold) continue;
-            results.Add(new SearchHit
-            {
-                ItemId = r.GetInt32(0),
-                Title = r.GetString(2),
-                Description = r.IsDBNull(3) ? "" : r.GetString(3),
-                Link = r.IsDBNull(4) ? "" : r.GetString(4),
-                FeedTitle = r.GetString(5),
-                FeedId = r.GetInt32(6),
-                Score = score
-            });
-        }
-    }
-
-    results = results.OrderByDescending(h => h.Score).Take(20).ToList();
+    var results = DoSearch(query, dbPath, feedReal, threshold, json);
+    if (results == null) return;
 
     if (json)
     {
@@ -1699,6 +1798,93 @@ void SearchCli(string[] args, string dbPath)
                 Console.WriteLine(Lang.T("      摘要：{0}...", h.Description[..80]));
         }
     }
+}
+
+// 语义搜索核心逻辑（CLI 与 TUI 共用）；失败返回 null
+List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, float? threshold = null, bool json = false)
+{
+    var cfg = LoadConfig(dbPath);
+    float thr = threshold ?? cfg.Embedding.SearchThreshold;
+
+    var vec = SafeEmbed(query, cfg, json).GetAwaiter().GetResult();
+    if (vec == null) return null;
+
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var modelCmd = conn.CreateCommand();
+    modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
+    var modelObj = modelCmd.ExecuteScalar();
+    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("尚无向量索引，请先执行 rssreader --index"), json: json); return null; }
+    int modelId = Convert.ToInt32(modelObj);
+
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
+    cmd.Parameters.AddWithValue("@m", modelId);
+    long count = (long)cmd.ExecuteScalar()!;
+    if (count == 0) { ReportError("NO_INDEX", Lang.T("当前模型尚无向量索引，请先执行 rssreader --index"), json: json); return null; }
+
+    cmd.Parameters.Clear();
+    cmd.CommandText = @"
+        SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Link,
+               f.Title AS FeedTitle, f.Id AS FeedId
+        FROM Vectors v
+        JOIN Items i ON v.ItemId = i.Id
+        JOIN Feeds f ON i.FeedId = f.Id
+        WHERE v.ModelId = @m AND i.Status = 'active'
+        " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
+        ORDER BY i.Id
+    ";
+    cmd.Parameters.AddWithValue("@m", modelId);
+    if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
+
+    var results = new List<SearchHit>();
+    using (var r = cmd.ExecuteReader())
+    {
+        while (r.Read())
+        {
+            float[] stored = BytesToVector(r.GetFieldValue<byte[]>(1));
+            float score = CosineSimilarity(vec, stored);
+            if (score < thr) continue;
+            results.Add(new SearchHit
+            {
+                ItemId = r.GetInt32(0),
+                Title = r.GetString(2),
+                Description = r.IsDBNull(3) ? "" : r.GetString(3),
+                Link = r.IsDBNull(4) ? "" : r.GetString(4),
+                FeedTitle = r.GetString(5),
+                FeedId = r.GetInt32(6),
+                Score = score
+            });
+        }
+    }
+    return results.OrderByDescending(h => h.Score).Take(20).ToList();
+}
+
+// 按真实 Id 更新单个源（TUI 用）
+void RefreshOneFeed(int realId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT FeedUrl FROM Feeds WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", realId);
+    string? url = cmd.ExecuteScalar()?.ToString();
+    if (string.IsNullOrWhiteSpace(url)) return;
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); }
+    catch { }
+}
+
+// 按真实 Id 删除单篇文章及其向量（TUI 用）
+void DeleteArticleByRealId(long itemId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "DELETE FROM Vectors WHERE ItemId = @id";
+    cmd.Parameters.AddWithValue("@id", itemId);
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+    cmd.ExecuteNonQuery();
 }
 
 // （SearchHit 类见文件末尾类型区）
