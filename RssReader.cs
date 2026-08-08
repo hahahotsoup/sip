@@ -198,18 +198,17 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。"));
 }
 
-// ══════════ TUI（Terminal.Gui 三栏界面）═══════════
-// 布局：左侧订阅源列表 / 右上一篇文章列表 / 右下正文预览 / 底部状态栏
-// 操作：F5 更新当前源 | T 归档 | R 去归档 | D 删除源 | Enter 打开文章正文 | Q 退出
+// ══════════ TUI（Terminal.Gui 文件夹视图）═══════════
+// 布局：左侧订阅源+文章树（源为父节点，展开即见文章）/ 右侧正文预览 / 底部状态栏
+// 操作：↑↓ 选择，←→ 展开/收起，Enter 打开文章正文，F5 更新当前源，T 归档，R 去归档，D 删除源，Q 退出
 #pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
 async Task<int> RunTui(string dbPath)
 {
     Application.Init();
     try
     {
-        // —— 左栏：订阅源列表 ——
-        var feedsObs = new ObservableCollection<string>();
-        var feedList = new ListView
+        // —— 左侧：订阅源 + 文章 树形视图 ——
+        var tree = new TreeView<TuiNode>
         {
             X = 0,
             Y = 0,
@@ -218,37 +217,23 @@ async Task<int> RunTui(string dbPath)
             CanFocus = true,
             Title = " " + Lang.T("订阅源") + " "
         };
-        feedList.SetSource(feedsObs);
+        tree.TreeBuilder = new DelegateTreeBuilder<TuiNode>(
+            childGetter: n => n.IsFeed ? LoadArticleNodes(n.FeedId, dbPath) : Enumerable.Empty<TuiNode>(),
+            canExpand: n => n.IsFeed
+        );
+        tree.AspectGetter = n => n.Title;
 
-        // —— 右上：文章列表 ——
-        var articlesObs = new ObservableCollection<string>();
-        var articleList = new ListView
-        {
-            X = Pos.Right(feedList),
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Percent(50),
-            CanFocus = true,
-            Title = " " + Lang.T("文章") + " "
-        };
-        articleList.SetSource(articlesObs);
-
-        // —— 右下：正文预览 ——
+        // —— 右侧：正文预览（占满剩余空间）——
         var contentView = new TextView
         {
-            X = Pos.Left(articleList),
-            Y = Pos.Bottom(articleList),
+            X = Pos.Right(tree),
+            Y = 0,
             Width = Dim.Fill(),
             Height = Dim.Fill() - 1,
             ReadOnly = true,
             WordWrap = true,
             Title = " " + Lang.T("正文") + " "
         };
-
-        // —— 状态变量 ——
-        var feeds = new List<(int RealId, string Display)>();        // 左栏数据
-        var articles = new List<(long ItemId, string Display)>();    // 右上数据
-        int? currentFeedRealId = null;
 
         // 主窗口
         var top = new Window
@@ -270,12 +255,11 @@ async Task<int> RunTui(string dbPath)
             new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
         });
 
-        top.Add(feedList, articleList, contentView, statusBar);
+        top.Add(tree, contentView, statusBar);
 
-        void RefreshFeedList()
+        void RebuildTree()
         {
-            feeds.Clear();
-            feedsObs.Clear();
+            tree.ClearObjects();
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
             var cmd = conn.CreateCommand();
@@ -300,54 +284,20 @@ async Task<int> RunTui(string dbPath)
                 if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
                 if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
                 string stats = string.Join(", ", parts);
-                feeds.Add((id, $"{title} {stats}"));
-                feedsObs.Add(feeds[^1].Display);
+                tree.AddObject(new TuiNode { IsFeed = true, FeedId = id, Title = $"{title} {stats}" });
             }
+            tree.RebuildTree();
         }
 
-        void RefreshArticleList(int feedRealId)
+        void ShowSelectedContent()
         {
-            currentFeedRealId = feedRealId;
-            articles.Clear();
-            articlesObs.Clear();
-            contentView.Text = "";
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
-            conn.Open();
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                SELECT Id, Title, Status, Version
-                FROM Items WHERE FeedId = @fid
-                ORDER BY Id
-            ";
-            cmd.Parameters.AddWithValue("@fid", feedRealId);
-            using var r = cmd.ExecuteReader();
-            while (r.Read())
-            {
-                long id = r.GetInt64(0);
-                string title = r.GetString(1);
-                string status = r.GetString(2);
-                int version = r.GetInt32(3);
-                string tag = status switch
-                {
-                    "active" => Lang.T("[现]"),
-                    "archived" => Lang.T("[旧]"),
-                    "deleted" => Lang.T("[删]"),
-                    _ => "[?]"
-                };
-                articles.Add((id, $"{tag} v{version} | {title}"));
-                articlesObs.Add(articles[^1].Display);
-            }
-        }
-
-        void ShowArticleContent(int index)
-        {
-            if (index < 0 || index >= articles.Count) { contentView.Text = ""; return; }
-            long itemId = articles[index].ItemId;
+            var n = tree.SelectedObject;
+            if (n == null || n.IsFeed) { contentView.Text = ""; return; }
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
             var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate FROM Items WHERE Id = @id";
-            cmd.Parameters.AddWithValue("@id", itemId);
+            cmd.Parameters.AddWithValue("@id", n.ItemId);
             using var r = cmd.ExecuteReader();
             if (r.Read())
             {
@@ -364,8 +314,8 @@ async Task<int> RunTui(string dbPath)
 
         int GetSelectedFeedId()
         {
-            int idx = feedList.SelectedItem ?? -1;
-            return (idx >= 0 && idx < feeds.Count) ? feeds[idx].RealId : 0;
+            var n = tree.SelectedObject;
+            return n?.FeedId ?? 0;
         }
 
         void ArchiveSelectedFeed()
@@ -373,7 +323,7 @@ async Task<int> RunTui(string dbPath)
             int realId = GetSelectedFeedId();
             if (realId == 0) return;
             AddTimestampForRealId(realId, dbPath);
-            RefreshFeedList();
+            RebuildTree();
         }
 
         void UnarchiveSelectedFeed()
@@ -381,7 +331,7 @@ async Task<int> RunTui(string dbPath)
             int realId = GetSelectedFeedId();
             if (realId == 0) return;
             RemoveTimestampForRealId(realId, dbPath);
-            RefreshFeedList();
+            RebuildTree();
         }
 
         void DeleteSelectedFeed()
@@ -389,8 +339,8 @@ async Task<int> RunTui(string dbPath)
             int realId = GetSelectedFeedId();
             if (realId == 0) return;
             DeleteFeedByRealId(realId, dbPath);
-            RefreshFeedList();
-            RefreshArticleList(realId);  // 清空文章区
+            RebuildTree();
+            contentView.Text = "";
         }
 
         void RefreshSelectedFeed()
@@ -406,25 +356,14 @@ async Task<int> RunTui(string dbPath)
             if (string.IsNullOrWhiteSpace(url)) return;
             try { DownloadAndSaveToDb(url, dbPath).Wait(); }
             catch { }
-            RefreshFeedList();
-            RefreshArticleList(realId);
+            RebuildTree();
         }
 
         // —— 事件绑定 ——
-        feedList.ValueChanged += (s, e) =>
-        {
-            int idx = e.NewValue ?? -1;
-            if (idx >= 0 && idx < feeds.Count)
-                RefreshArticleList(feeds[idx].RealId);
-        };
+        tree.SelectionChanged += (s, e) => ShowSelectedContent();
 
-        articleList.ValueChanged += (s, e) =>
-        {
-            int idx = e.NewValue ?? -1;
-            ShowArticleContent(idx);
-        };
-
-        RefreshFeedList();
+        RebuildTree();
+        tree.ExpandAll();
         Application.Run(top);
         return 0;
     }
@@ -434,6 +373,39 @@ async Task<int> RunTui(string dbPath)
     }
 }
 #pragma warning restore CS0618
+
+// 从数据库加载某源的文章节点（TUI 树的叶子）
+IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
+{
+    var nodes = new List<TuiNode>();
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT Id, Title, Status, Version
+        FROM Items WHERE FeedId = @fid
+        ORDER BY Id
+    ";
+    cmd.Parameters.AddWithValue("@fid", feedId);
+    using var r = cmd.ExecuteReader();
+    while (r.Read())
+    {
+        long id = r.GetInt64(0);
+        string title = r.GetString(1);
+        string status = r.GetString(2);
+        int version = r.GetInt32(3);
+        string tag = status switch
+        {
+            "active" => Lang.T("[现]"),
+            "archived" => Lang.T("[旧]"),
+            "deleted" => Lang.T("[删]"),
+            _ => "[?]"
+        };
+        nodes.Add(new TuiNode { IsFeed = false, FeedId = feedId, ItemId = id, Title = $"{tag} v{version} | {title}" });
+    }
+    return nodes;
+}
+
 
 // HTML 正文转纯文本（去标签、解实体）
 string StripHtml(string html)
@@ -2067,6 +2039,15 @@ class LlmCfg
     public string Provider { get; set; } = "openai-compatible";  // 备注字段（兼容服务名）
     public string Model { get; set; } = "deepseek-chat";
     public string ApiEndpoint { get; set; } = "https://api.deepseek.com/v1";
+}
+
+// TUI 树节点（订阅源或文章）
+class TuiNode
+{
+    public bool IsFeed { get; set; }    // true=订阅源父节点，false=文章叶子
+    public int FeedId { get; set; }     // 归属源 Id（文章节点也带，便于操作）
+    public long ItemId { get; set; }    // 文章 Id（源节点为 0）
+    public string Title { get; set; } = "";
 }
 
 // 搜索结果条目
