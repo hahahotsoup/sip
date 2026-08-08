@@ -6,6 +6,7 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -19,6 +20,11 @@ using DiffPlex.DiffBuilder.Model;
 using Microsoft.Data.Sqlite;
 using ktsu.CredentialCache;
 using ktsu.CredentialCache.Storage;
+using Terminal.Gui;
+using Terminal.Gui.App;
+using Terminal.Gui.Views;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Input;
 
 // 工作目录 = exe 所在文件夹（Mac/Linux/Windows 都适用）
 string workDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -52,119 +58,8 @@ if (args.Length > 0)
     return 0;
 }
 
-Console.WriteLine(Lang.T("工作目录：{0}", workDir));
-
-// ══════════ 主循环 ══════════
-// while(true) 是死循环，程序一直跑、等你输入命令
-while (true)
-{
-    Console.WriteLine(Lang.T("今天要来点rss嘛？A 看看已有订阅 | B 下载新RSS | 随意输入什么退出"));
-    var a = Console.ReadLine();
-
-    if (a == "A")
-    {
-        while (true)
-        {
-            // --- 先列出所有订阅源 ---
-            ListFeedsFromDb(dbPath);
-
-            // --- 子菜单 ---
-            // 输入数字 → U 编号 → 更新rss | T 编号 → 归档 | R 编号 → 去归档化 | D 编号 → 删除 | L 编号 → 列出指定订阅源文章 | 随意输入什么退出
-            Console.Write(Lang.T("编号=更新 | T=归档 | R=去归档化 | D=删除 | L=列出指定订阅源文章 | 随意输入什么退出"));
-            string input = Console.ReadLine()!;
-
-            if (input.StartsWith("T", StringComparison.OrdinalIgnoreCase))
-            {
-                // === 加时间戳 ===
-                if (!int.TryParse(input[1..].Trim(), out int tid))
-                {
-                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "T 1"));
-                    continue;
-                }
-                AddTimestamp(tid, dbPath);
-            }
-            else if (input.StartsWith("R", StringComparison.OrdinalIgnoreCase))
-            {
-                // === 去时间戳 ===
-                if (!int.TryParse(input[1..].Trim(), out int rid))
-                {
-                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "R 1"));
-                    continue;
-                }
-                RemoveTimestamp(rid, dbPath);
-            }
-            else if (input.StartsWith("D", StringComparison.OrdinalIgnoreCase))
-            {
-                // === 删除 ===
-                if (!int.TryParse(input[1..].Trim(), out int did))
-                {
-                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "D 1"));
-                    continue;
-                }
-                DeleteFeed(did, dbPath);
-            }
-            else if (input.StartsWith("U", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!int.TryParse(input[1..].Trim(), out int displayNum))
-                {
-                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "U 1"));
-                    continue;
-                }
-                await UpdateFeed(displayNum, dbPath);
-            }
-            else if (input.StartsWith("L", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!int.TryParse(input[1..].Trim(), out int lNum))
-                {
-                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "L 1"));
-                    continue;
-                }
-                // L 进入文章管理子循环
-                int feedRealId = GetRealId(lNum, dbPath);
-                if (feedRealId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); continue; }
-                ManageArticles(feedRealId, lNum, dbPath);
-            }
-            else
-            {
-                if (!int.TryParse(input, out int displayNum))
-                {
-                    break;
-                }
-            }
-        }
-    }
-    else if (a == "B")
-    {
-        // B → 输入一个 RSS 链接，下载并存入数据库
-        Console.WriteLine(Lang.T("请输入 RSS 链接："));
-        string url = Console.ReadLine()!;
-
-        try
-        {
-            // await = "等这个网络操作完成，期间程序不会卡死"
-            await DownloadAndSaveToDb(url, dbPath);
-        }
-        // 下面是三种不同类型的错误，分别处理
-        catch (TaskCanceledException cancelEx)  // 超时
-        {
-            Console.WriteLine(Lang.T("下太久了 是不是下错了？{0}", cancelEx.Message));
-        }
-        catch (HttpRequestException httpEx)  // 网络本身的问题
-        {
-            Console.WriteLine(Lang.T("网络错误：{0}", httpEx.Message));
-        }
-        catch (Exception ex)  // 兜底：所有上面没列出的错误
-        {
-            Console.WriteLine(Lang.T("发生错误：{0}", ex.Message));
-        }
-    }
-    else
-    {
-        // 输入了 A/B 以外的字符
-        Console.WriteLine(Lang.T("怪东西！"));
-        return 0;
-    }
-}
+// ══════════ TUI 模式（无参数时进入）══════════
+return await RunTui(dbPath);
 
 // ═══════════════════════════════════════════════════════════
 // 以下是所有方法，按调用顺序排列
@@ -303,6 +198,311 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。"));
 }
 
+// ══════════ TUI（Terminal.Gui 三栏界面）═══════════
+// 布局：左侧订阅源列表 / 右上一篇文章列表 / 右下正文预览 / 底部状态栏
+// 操作：F5 更新当前源 | T 归档 | R 去归档 | D 删除源 | Enter 打开文章正文 | Q 退出
+#pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
+async Task<int> RunTui(string dbPath)
+{
+    Application.Init();
+    try
+    {
+        // —— 左栏：订阅源列表 ——
+        var feedsObs = new ObservableCollection<string>();
+        var feedList = new ListView
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Percent(30),
+            Height = Dim.Fill() - 1,
+            CanFocus = true,
+            Title = " " + Lang.T("订阅源") + " "
+        };
+        feedList.SetSource(feedsObs);
+
+        // —— 右上：文章列表 ——
+        var articlesObs = new ObservableCollection<string>();
+        var articleList = new ListView
+        {
+            X = Pos.Right(feedList),
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Percent(50),
+            CanFocus = true,
+            Title = " " + Lang.T("文章") + " "
+        };
+        articleList.SetSource(articlesObs);
+
+        // —— 右下：正文预览 ——
+        var contentView = new TextView
+        {
+            X = Pos.Left(articleList),
+            Y = Pos.Bottom(articleList),
+            Width = Dim.Fill(),
+            Height = Dim.Fill() - 1,
+            ReadOnly = true,
+            WordWrap = true,
+            Title = " " + Lang.T("正文") + " "
+        };
+
+        // —— 状态变量 ——
+        var feeds = new List<(int RealId, string Display)>();        // 左栏数据
+        var articles = new List<(long ItemId, string Display)>();    // 右上数据
+        int? currentFeedRealId = null;
+
+        // 主窗口
+        var top = new Window
+        {
+            Title = " sip RSS Reader ",
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+        };
+
+        // 状态栏快捷操作
+        var statusBar = new StatusBar(new Shortcut[]
+        {
+            new Shortcut(Key.F5, Lang.T("更新"), () => RefreshSelectedFeed(), Lang.T("下载当前订阅源")),
+            new Shortcut(Key.T, Lang.T("归档"), () => ArchiveSelectedFeed(), Lang.T("给当前源加时间戳")),
+            new Shortcut(Key.R, Lang.T("去归档"), () => UnarchiveSelectedFeed(), Lang.T("去掉时间戳")),
+            new Shortcut(Key.D, Lang.T("删除"), () => DeleteSelectedFeed(), Lang.T("删除当前订阅源")),
+            new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
+        });
+
+        top.Add(feedList, articleList, contentView, statusBar);
+
+        void RefreshFeedList()
+        {
+            feeds.Clear();
+            feedsObs.Clear();
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT Id, Title,
+                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'active')   AS ActiveCount,
+                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'archived') AS ArchiveCount,
+                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'deleted')  AS DeleteCount
+                FROM Feeds
+                ORDER BY Id
+            ";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                int id = r.GetInt32(0);
+                string title = r.GetString(1);
+                int active = r.GetInt32(2);
+                int archive = r.GetInt32(3);
+                int deleted = r.GetInt32(4);
+                var parts = new List<string>();
+                if (active > 0) parts.Add(Lang.T("现存{0}篇", active + deleted));
+                if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
+                if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
+                string stats = string.Join(", ", parts);
+                feeds.Add((id, $"{title} {stats}"));
+                feedsObs.Add(feeds[^1].Display);
+            }
+        }
+
+        void RefreshArticleList(int feedRealId)
+        {
+            currentFeedRealId = feedRealId;
+            articles.Clear();
+            articlesObs.Clear();
+            contentView.Text = "";
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT Id, Title, Status, Version
+                FROM Items WHERE FeedId = @fid
+                ORDER BY Id
+            ";
+            cmd.Parameters.AddWithValue("@fid", feedRealId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                long id = r.GetInt64(0);
+                string title = r.GetString(1);
+                string status = r.GetString(2);
+                int version = r.GetInt32(3);
+                string tag = status switch
+                {
+                    "active" => Lang.T("[现]"),
+                    "archived" => Lang.T("[旧]"),
+                    "deleted" => Lang.T("[删]"),
+                    _ => "[?]"
+                };
+                articles.Add((id, $"{tag} v{version} | {title}"));
+                articlesObs.Add(articles[^1].Display);
+            }
+        }
+
+        void ShowArticleContent(int index)
+        {
+            if (index < 0 || index >= articles.Count) { contentView.Text = ""; return; }
+            long itemId = articles[index].ItemId;
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate FROM Items WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", itemId);
+            using var r = cmd.ExecuteReader();
+            if (r.Read())
+            {
+                string title = r.GetString(0);
+                string content = r.IsDBNull(1) ? "" : r.GetString(1);
+                string desc = r.IsDBNull(2) ? "" : r.GetString(2);
+                string link = r.IsDBNull(3) ? "" : r.GetString(3);
+                string pub = r.IsDBNull(4) ? "" : r.GetString(4);
+                string body = string.IsNullOrWhiteSpace(content) ? desc : content;
+                body = StripHtml(body);
+                contentView.Text = $"{title}\n\n{link}\n{pub}\n\n{body}";
+            }
+        }
+
+        int GetSelectedFeedId()
+        {
+            int idx = feedList.SelectedItem ?? -1;
+            return (idx >= 0 && idx < feeds.Count) ? feeds[idx].RealId : 0;
+        }
+
+        void ArchiveSelectedFeed()
+        {
+            int realId = GetSelectedFeedId();
+            if (realId == 0) return;
+            AddTimestampForRealId(realId, dbPath);
+            RefreshFeedList();
+        }
+
+        void UnarchiveSelectedFeed()
+        {
+            int realId = GetSelectedFeedId();
+            if (realId == 0) return;
+            RemoveTimestampForRealId(realId, dbPath);
+            RefreshFeedList();
+        }
+
+        void DeleteSelectedFeed()
+        {
+            int realId = GetSelectedFeedId();
+            if (realId == 0) return;
+            DeleteFeedByRealId(realId, dbPath);
+            RefreshFeedList();
+            RefreshArticleList(realId);  // 清空文章区
+        }
+
+        void RefreshSelectedFeed()
+        {
+            int realId = GetSelectedFeedId();
+            if (realId == 0) return;
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT FeedUrl FROM Feeds WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", realId);
+            string? url = cmd.ExecuteScalar()?.ToString();
+            if (string.IsNullOrWhiteSpace(url)) return;
+            try { DownloadAndSaveToDb(url, dbPath).Wait(); }
+            catch { }
+            RefreshFeedList();
+            RefreshArticleList(realId);
+        }
+
+        // —— 事件绑定 ——
+        feedList.ValueChanged += (s, e) =>
+        {
+            int idx = e.NewValue ?? -1;
+            if (idx >= 0 && idx < feeds.Count)
+                RefreshArticleList(feeds[idx].RealId);
+        };
+
+        articleList.ValueChanged += (s, e) =>
+        {
+            int idx = e.NewValue ?? -1;
+            ShowArticleContent(idx);
+        };
+
+        RefreshFeedList();
+        Application.Run(top);
+        return 0;
+    }
+    finally
+    {
+        Application.Shutdown();
+    }
+}
+#pragma warning restore CS0618
+
+// HTML 正文转纯文本（去标签、解实体）
+string StripHtml(string html)
+{
+    if (string.IsNullOrWhiteSpace(html)) return "";
+    try
+    {
+        var doc = new HtmlAgilityPack.HtmlDocument();
+        doc.LoadHtml(html);
+        var text = doc.DocumentNode.InnerText;
+        return System.Net.WebUtility.HtmlDecode(text).Trim();
+    }
+    catch
+    {
+        return html;
+    }
+}
+
+// 按真实 Id 归档（不查显示编号）
+void AddTimestampForRealId(int realId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", realId);
+    string oldTitle = cmd.ExecuteScalar()!.ToString()!;
+    if (IsArchived(oldTitle)) return;
+    string newTitle = oldTitle + "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+    cmd.CommandText = "UPDATE Feeds SET Title = @newTitle WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@newTitle", newTitle);
+    cmd.ExecuteNonQuery();
+}
+
+// 按真实 Id 去归档
+void RemoveTimestampForRealId(int realId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", realId);
+    string title = cmd.ExecuteScalar()!.ToString()!;
+    string plainTitle = Regex.Replace(title, @"_\d{8}_\d{6}$", "");
+    if (plainTitle == title) return;
+    cmd.CommandText = "SELECT COUNT(*) FROM Feeds WHERE Title = @title AND Id != @id";
+    cmd.Parameters.AddWithValue("@title", plainTitle);
+    long conflict = (long)cmd.ExecuteScalar()!;
+    if (conflict > 0) return;
+    cmd.CommandText = "UPDATE Feeds SET Title = @newTitle WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@newTitle", plainTitle);
+    cmd.ExecuteNonQuery();
+}
+
+// 按真实 Id 删除源（含文章与向量）
+void DeleteFeedByRealId(int realId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "DELETE FROM Vectors WHERE FeedId = @id";
+    cmd.Parameters.AddWithValue("@id", realId);
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "DELETE FROM Items WHERE FeedId = @id";
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
+    cmd.ExecuteNonQuery();
+}
+
 // ══════════ 更新指定订阅源（A 菜单和 CLI 共用）═══════════
 async Task UpdateFeed(int displayNum, string dbPath)
 {
@@ -433,35 +633,6 @@ void InitDatabase(string dbPath)
     }
     catch (SqliteException) { /* 列已存在则忽略 */ }
 }
-// ══════════ 文章管理子循环 ══════════
-void ManageArticles(int feedRealId, int feedDisplayNum, string dbPath)
-{
-    while (true)
-    {
-        ListArticlesFromDb(feedRealId, feedDisplayNum, dbPath);
-
-        Console.Write(Lang.T("  D 编号=删除文章 | Q=返回上级"));
-        string input = Console.ReadLine()!;
-
-        if (input.StartsWith("D", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!int.TryParse(input[1..].Trim(), out int artNum))
-            {
-                Console.WriteLine(Lang.T("格式错误。正确：{0}", "D 1"));
-                continue;
-            }
-            DeleteArticle(feedRealId, artNum, dbPath);
-        }
-        else if (input.StartsWith("Q", StringComparison.OrdinalIgnoreCase))
-        {
-            break;  // 返回 A 菜单
-        }
-        else
-        {
-            Console.WriteLine(Lang.T("未知命令，D=删除 Q=返回"));
-        }
-    }
-}
 
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
 void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
@@ -508,41 +679,6 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
         };
         Console.WriteLine($"  [{displayNum}] {tag} v{version} | {title}");
     }
-}
-
-// ══════════ 删文章 ══════════
-void DeleteArticle(int feedRealId, int articleDisplayNum, string dbPath)
-{
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
-    conn.Open();
-
-    // 显示编号 → 真实 Id（只查当前 Feed 的文章）
-    var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
-        SELECT Id, Title FROM (
-            SELECT Id, Title, ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
-            FROM Items WHERE FeedId = @fid
-        ) WHERE DisplayNum = @n
-    ";
-    cmd.Parameters.AddWithValue("@fid", feedRealId);
-    cmd.Parameters.AddWithValue("@n", articleDisplayNum);
-    using var reader = cmd.ExecuteReader();
-    if (!reader.Read()) { Console.WriteLine(Lang.T("没找到这篇文章")); return; }
-    long artRealId = reader.GetInt64(0);
-    string artTitle = reader.GetString(1);
-    reader.Close();
-
-    Console.Write(Lang.T("确定永久删除《{0}》？此操作不可恢复！(y/n)", artTitle));
-    if (Console.ReadLine()!.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
-
-    cmd.CommandText = "DELETE FROM Vectors WHERE ItemId = @id";
-    cmd.Parameters.AddWithValue("@id", artRealId);
-    cmd.ExecuteNonQuery();
-
-    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
-    cmd.ExecuteNonQuery();
-
-    Console.WriteLine(Lang.T("《{0}》已永久删除", artTitle));
 }
 
 // ══════════ 列表方法：显示数据库中所有订阅源 ══════════

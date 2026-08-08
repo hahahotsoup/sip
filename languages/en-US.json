@@ -165,5 +165,18 @@
   "  默认搜索阈值：{0}": "  default search threshold: {0}",
   "  API Key：{0}": "  API Key: {0}",
   "LLM：{0} / {1}": "LLM: {0} / {1}",
-  "配置文件：{0}": "Config file: {0}"
+  "配置文件：{0}": "Config file: {0}",
+  "订阅源": "Feeds",
+  "文章": "Articles",
+  "正文": "Content",
+  "更新": "Update",
+  "归档": "Archive",
+  "去归档": "Unarchive",
+  "删除": "Delete",
+  "退出": "Quit",
+  "下载当前订阅源": "Download selected feed",
+  "给当前源加时间戳": "Add timestamp to selected feed",
+  "去掉时间戳": "Remove timestamp",
+  "删除当前订阅源": "Delete selected feed",
+  "退出程序": "Exit program"
 }
