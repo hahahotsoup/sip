@@ -1,5 +1,5 @@
 // ===== 引用外部包 =====
-// using 相当于"导入工具箱"，每个包提供不同的工具
+// using 相当于导入工具包，每个包提供不同的工具
 // System.* 是 C# 自带的（网络、文件、文字处理）
 // CodeHollow.FeedReader 是第三方包，专门解析 RSS/Atom
 // Microsoft.Data.Sqlite 是微软提供的轻量数据库
@@ -25,20 +25,40 @@ string workDir = AppDomain.CurrentDomain.BaseDirectory;
 string dbPath = Path.Combine(workDir, "rss.db");
 InitDatabase(dbPath);
 
-// ═══════════ CLI 模式 ═══════════
+// 全局选项解析（任意位置均可，解析后从参数中剔除）
+// --ignoresafeannouncement：跳过安全横幅等多余输出（供脚本/Agent 使用）
+// --lang <代码>：指定语言文件（如 zh-CN / en-US）
+string? langCode = null;
+if (args.Any(a => a.Equals("--ignoresafeannouncement", StringComparison.OrdinalIgnoreCase)))
+{
+    AiState.IgnoreAnnouncement = true;
+    args = args.Where(a => !a.Equals("--ignoresafeannouncement", StringComparison.OrdinalIgnoreCase)).ToArray();
+}
+for (int gi = 0; gi < args.Length - 1; gi++)
+{
+    if (args[gi].Equals("--lang", StringComparison.OrdinalIgnoreCase))
+    {
+        langCode = args[gi + 1];
+        args = args.Where((a, i) => i != gi && i != gi + 1).ToArray();
+        break;
+    }
+}
+Lang.Init(workDir, langCode);
+
+// ══════════ CLI 模式 ══════════
 if (args.Length > 0)
 {
     await RunCli(args, dbPath);
     return 0;
 }
 
-Console.WriteLine($"工作目录：{workDir}");
+Console.WriteLine(Lang.T("工作目录：{0}", workDir));
 
-// ═══════════ 主循环 ═══════════
+// ══════════ 主循环 ══════════
 // while(true) 是死循环，程序一直跑、等你输入命令
 while (true)
 {
-    Console.WriteLine("今天要来点rss嘛？A 看看已有订阅 | B 下载新RSS源 | 随意输入什么退出");
+    Console.WriteLine(Lang.T("今天要来点rss嘛？A 看看已有订阅 | B 下载新RSS | 随意输入什么退出"));
     var a = Console.ReadLine();
 
     if (a == "A")
@@ -49,8 +69,8 @@ while (true)
             ListFeedsFromDb(dbPath);
 
             // --- 子菜单 ---
-            // 输入数字 → U → 更新rss | T 编号 → 归档化 | R 编号 → 去归档化 | D 编号 → 删除 | L 编号 → 列出指定订阅源文章 |随意输入什么退出
-            Console.Write("编号=更新 | T=归档化 | R=去归档化 | D=删除 | L=列出指定订阅源文章：| 随意输入什么退出");
+            // 输入数字 → U 编号 → 更新rss | T 编号 → 归档 | R 编号 → 去归档化 | D 编号 → 删除 | L 编号 → 列出指定订阅源文章 | 随意输入什么退出
+            Console.Write(Lang.T("编号=更新 | T=归档 | R=去归档化 | D=删除 | L=列出指定订阅源文章 | 随意输入什么退出"));
             string input = Console.ReadLine()!;
 
             if (input.StartsWith("T", StringComparison.OrdinalIgnoreCase))
@@ -58,7 +78,7 @@ while (true)
                 // === 加时间戳 ===
                 if (!int.TryParse(input[1..].Trim(), out int tid))
                 {
-                    Console.WriteLine("格式错误。正确：T 1");
+                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "T 1"));
                     continue;
                 }
                 AddTimestamp(tid, dbPath);
@@ -68,7 +88,7 @@ while (true)
                 // === 去时间戳 ===
                 if (!int.TryParse(input[1..].Trim(), out int rid))
                 {
-                    Console.WriteLine("格式错误。正确：R 1");
+                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "R 1"));
                     continue;
                 }
                 RemoveTimestamp(rid, dbPath);
@@ -78,7 +98,7 @@ while (true)
                 // === 删除 ===
                 if (!int.TryParse(input[1..].Trim(), out int did))
                 {
-                    Console.WriteLine("格式错误。正确：D 1");
+                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "D 1"));
                     continue;
                 }
                 DeleteFeed(did, dbPath);
@@ -87,7 +107,7 @@ while (true)
             {
                 if (!int.TryParse(input[1..].Trim(), out int displayNum))
                 {
-                    Console.WriteLine("格式错误。正确：U 1");
+                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "U 1"));
                     continue;
                 }
                 await UpdateFeed(displayNum, dbPath);
@@ -96,12 +116,12 @@ while (true)
             {
                 if (!int.TryParse(input[1..].Trim(), out int lNum))
                 {
-                    Console.WriteLine("格式错误。正确：L 1");
+                    Console.WriteLine(Lang.T("格式错误。正确：{0}", "L 1"));
                     continue;
                 }
                 // L 进入文章管理子循环
                 int feedRealId = GetRealId(lNum, dbPath);
-                if (feedRealId == 0) { Console.WriteLine("没找到这个编号"); continue; }
+                if (feedRealId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); continue; }
                 ManageArticles(feedRealId, lNum, dbPath);
             }
             else
@@ -116,7 +136,7 @@ while (true)
     else if (a == "B")
     {
         // B → 输入一个 RSS 链接，下载并存入数据库
-        Console.WriteLine("请输入 RSS 链接：");
+        Console.WriteLine(Lang.T("请输入 RSS 链接："));
         string url = Console.ReadLine()!;
 
         try
@@ -125,32 +145,32 @@ while (true)
             await DownloadAndSaveToDb(url, dbPath);
         }
         // 下面是三种不同类型的错误，分别处理
-        catch (TaskCanceledException cancelEx)  // 超时了
+        catch (TaskCanceledException cancelEx)  // 超时
         {
-            Console.WriteLine($"下太久了 是不是下错了？ {cancelEx.Message}");
+            Console.WriteLine(Lang.T("下太久了 是不是下错了？{0}", cancelEx.Message));
         }
         catch (HttpRequestException httpEx)  // 网络本身的问题
         {
-            Console.WriteLine($"网络错误：{httpEx.Message}");
+            Console.WriteLine(Lang.T("网络错误：{0}", httpEx.Message));
         }
         catch (Exception ex)  // 兜底：所有上面没列出的错误
         {
-            Console.WriteLine($"发生错误：{ex.Message}");
+            Console.WriteLine(Lang.T("发生错误：{0}", ex.Message));
         }
     }
     else
     {
         // 输入了 A/B 以外的字符
-        Console.WriteLine("怪东西 爬");
+        Console.WriteLine(Lang.T("怪东西！"));
         return 0;
     }
 }
 
-// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // 以下是所有方法，按调用顺序排列
-// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 
-// ═══════════ CLI 参数处理 ═══════════
+// ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
     var cmd = args[0].ToLower();
@@ -163,11 +183,22 @@ async Task RunCli(string[] args, string dbPath)
 
     if (cmd is "-l" or "--list")
     {
-        ListFeedsFromDb(dbPath);
+        if (args.Length >= 2)
+        {
+            // -l 后面带编号 → 列出该源的文章
+            if (!int.TryParse(args[1], out int lNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            int feedRealId = GetRealId(lNum, dbPath);
+            if (feedRealId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+            ListArticlesFromDb(feedRealId, lNum, dbPath);
+        }
+        else
+        {
+            ListFeedsFromDb(dbPath);
+        }
         return;
     }
 
-    // ═══════════ AI 无参数/自定义参数命令（不要求 args.Length >= 2）═══════════
+    // ══════════ AI 无参数命令（注意不能用 args.Length >= 2 判断）═══════════
     switch (cmd)
     {
         case "--init":
@@ -187,42 +218,46 @@ async Task RunCli(string[] args, string dbPath)
             return;
     }
 
+    // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
+    bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
+                    or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary";
     if (args.Length < 2)
     {
-        Console.WriteLine($"缺少参数。用法: rssreader {cmd} <值>");
+        if (!needsArg) { Console.WriteLine(Lang.T("未知命令: {0}", cmd)); PrintHelp(); return; }
+        Console.WriteLine(Lang.T("缺少参数。用法: rssreader {0} <参数>", cmd));
         return;
     }
 
     switch (cmd)
     {
         case "-u" or "--update":
-            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine("编号必须是数字"); return; }
+            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
             UpdateFeed(aNum, dbPath).Wait();
             break;
         case "-d" or "--download":
             DownloadCli(args[1], dbPath);
             break;
         case "-a" or "--archive":
-            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine("编号必须是数字"); return; }
+            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
             AddTimestamp(tNum, dbPath);
             break;
         case "-una" or "--unarchive":
-            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine("编号必须是数字"); return; }
+            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
             RemoveTimestamp(uNum, dbPath);
             break;
         case "-r" or "--remove":
-            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine("编号必须是数字"); return; }
+            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
             DeleteFeed(dNum, dbPath);
             break;
         case "--search":
-            if (args.Length < 2) { Console.WriteLine("用法: rssreader --search <查询> [--feed 编号] [--threshold 0.7] [--json]"); return; }
+            if (args.Length < 2) { Console.WriteLine(Lang.T("用法: rssreader --search <查询> [--feed 编号] [--threshold 0.7] [--json]")); return; }
             SearchCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--summary":
             SummaryCli(args[1], dbPath).Wait();
             break;
         default:
-            Console.WriteLine($"未知命令: {cmd}");
+            Console.WriteLine(Lang.T("未知命令: {0}", cmd));
             PrintHelp();
             break;
     }
@@ -230,48 +265,49 @@ async Task RunCli(string[] args, string dbPath)
 
 void PrintHelp()
 {
-    Console.WriteLine(@"
-用法: rssreader <命令> [参数]
-
-命令:
-  -l, --list       列出所有订阅源
-  -u, --update     更新指定订阅源（编号）
-  -d, --download   下载新的 RSS 源（URL）
-  -a, --archive    归档（加时间戳）
-  -una, --unarchive 去归档
-  -r, --remove     删除订阅源
-  -h, --help       显示此帮助
-
-AI 命令:
-  --init           首次配置 AI（模型 + API Key）
-  --config         查看/修改 AI 配置
-  --index          对文章做 Embedding 向量化（交互式选择）
-  --reindex        更换 Embedding 模型后重新向量化
-  --search <查询>   [--feed 编号] [--threshold 0.7] [--json] 语义搜索
-  --summary <编号>  为文章生成摘要（保存到数据库）；可传 feed:<编号> 为该源全部文章生成
-  --summary-all    为所有未生成摘要的文章生成摘要
-
-示例:
-  rssreader -l
-  rssreader -d https://example.com/rss
-  rssreader -u 1
-  rssreader -a 1
-  rssreader --search ""LLM Agent"" --feed 1 --json
-  rssreader --summary 12
-  rssreader --summary feed:3
-");
-    Console.WriteLine(@"
-安全提示:
-  API Key 存储在操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），
-  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。
-");
+    Console.WriteLine(Lang.T("用法: rssreader <命令> [参数]"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("命令:"));
+    Console.WriteLine(Lang.T("  -l, --list       列出所有订阅源"));
+    Console.WriteLine(Lang.T("  -u, --update     更新指定订阅源（编号）"));
+    Console.WriteLine(Lang.T("  -d, --download   下载新的 RSS 源（URL）"));
+    Console.WriteLine(Lang.T("  -a, --archive    归档（加时间戳）"));
+    Console.WriteLine(Lang.T("  -una, --unarchive 去归档"));
+    Console.WriteLine(Lang.T("  -r, --remove     删除订阅源"));
+    Console.WriteLine(Lang.T("  -h, --help       显示此帮助"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("AI 命令:"));
+    Console.WriteLine(Lang.T("  --init           首次配置 AI（模型 + API Key）"));
+    Console.WriteLine(Lang.T("  --config         查看/修改 AI 配置"));
+    Console.WriteLine(Lang.T("  --index          对文章做 Embedding 向量化（交互式选择）"));
+    Console.WriteLine(Lang.T("  --reindex        更换 Embedding 模型后重新向量化"));
+    Console.WriteLine(Lang.T("  --search <查询>   [--feed 编号] [--threshold 0.7] [--json] 语义搜索（不带 --feed 时搜索全部源）"));
+    Console.WriteLine(Lang.T("  --summary <编号>  为文章生成摘要（保存到数据库）；可传 feed:<编号> 为该源全部文章生成"));
+    Console.WriteLine(Lang.T("  --summary-all    为所有未生成摘要的文章生成摘要"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("示例:"));
+    Console.WriteLine(Lang.T("  rssreader -l"));
+    Console.WriteLine(Lang.T("  rssreader -d https://example.com/rss"));
+    Console.WriteLine(Lang.T("  rssreader -u 1"));
+    Console.WriteLine(Lang.T("  rssreader -a 1"));
+    Console.WriteLine(Lang.T("  rssreader --search \"LLM Agent\" --feed 1 --json"));
+    Console.WriteLine(Lang.T("  rssreader --summary 12"));
+    Console.WriteLine(Lang.T("  rssreader --summary feed:3"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("全局选项:"));
+    Console.WriteLine(Lang.T("  --ignoresafeannouncement   跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 调用）"));
+    Console.WriteLine(Lang.T("  --lang <代码>              指定语言文件（如 zh-CN / en-US，默认 zh-CN）"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("安全提示:"));
+    Console.WriteLine(Lang.T("  API Key 存储在操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），"));
+    Console.WriteLine(Lang.T("  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。"));
 }
 
-// ═══════════ 更新指定订阅源（A 菜单和 CLI 共用）═══════════
+// ══════════ 更新指定订阅源（A 菜单和 CLI 共用）═══════════
 async Task UpdateFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -284,25 +320,25 @@ async Task UpdateFeed(int displayNum, string dbPath)
     string url = r.GetString(1);
     r.Close();
 
-    if (IsArchived(title)) { Console.WriteLine($" {title} 已归档，不能更新"); return; }
+    if (IsArchived(title)) { Console.WriteLine(Lang.T("{0} 已归档，不能更新", title)); return; }
 
-    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine("更新完成"); }
-    catch (TaskCanceledException) { Console.WriteLine("下载超时，请检查网络或链接是否有效"); }
-    catch (HttpRequestException) { Console.WriteLine("网络请求失败，链接可能已失效"); }
-    catch (SqliteException ex) { Console.WriteLine($"数据库出错：{ex.Message}"); }
-    catch (Exception ex) { Console.WriteLine($"未知错误：{ex.Message}"); }
+    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine(Lang.T("更新完成")); }
+    catch (TaskCanceledException) { Console.WriteLine(Lang.T("下载超时，请检查网络或链接是否有效")); }
+    catch (HttpRequestException) { Console.WriteLine(Lang.T("网络请求失败，链接可能已失效")); }
+    catch (SqliteException ex) { Console.WriteLine(Lang.T("数据库出错：{0}", ex.Message)); }
+    catch (Exception ex) { Console.WriteLine(Lang.T("未知错误：{0}", ex.Message)); }
 }
 
 // CLI 模式下载（同步等待异步方法）
 void DownloadCli(string url, string dbPath)
 {
-    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine("下载完成"); }
-    catch (Exception ex) { Console.WriteLine($"出错: {ex.Message}"); }
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine(Lang.T("下载完成")); }
+    catch (Exception ex) { Console.WriteLine(Lang.T("出错: {0}", ex.Message)); }
 }
 
-// ═══════════ 建表方法 ═══════════
-// 只在程序启动时调用一次。IF NOT EXISTS 保证不会覆盖已有数据。
-// 两张表的关系：Feeds 是"班级"，Items 是"学生"，FeedId 就是学生属于哪个班级。
+// ══════════ 建表方法 ══════════
+// 只在程序启动时调用一次。IF NOT EXISTS 保证不会覆盖已有数据库
+// 两张表的关系：Feeds 是"班级"，Items 是"学生"，FeedId 就是学生属于哪个班级
 void InitDatabase(string dbPath)
 {
     // $ 开头是"字符串插值"：把 {dbPath} 替换成实际路径
@@ -310,7 +346,7 @@ void InitDatabase(string dbPath)
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();  // 打开连接
 
-    var cmd = conn.CreateCommand();  // 创建一个"命令对象"
+    var cmd = conn.CreateCommand();  // 创建一个命令对象
     // 先开外键约束 + WAL 模式（允许多进程并发读，写只阻塞写），再建表
     cmd.CommandText = "PRAGMA foreign_keys = ON;";
     cmd.ExecuteNonQuery();
@@ -349,17 +385,19 @@ void InitDatabase(string dbPath)
             ModelType   TEXT    NOT NULL,   -- 'embedding' / 'llm'
             Provider    TEXT    NOT NULL,   -- 'ollama' / 'openai' / 'deepseek'
             ModelName   TEXT    NOT NULL,   -- 模型名
-            Dimensions  INTEGER,            -- 向量维度（仅 embedding）
+            Dimensions  INTEGER,            -- 向量维度（仅 embedding 用）
             IsCurrent   INTEGER DEFAULT 0,  -- 是否为当前使用的 embedding 模型
             CreatedAt   TEXT
         );
 
         CREATE TABLE IF NOT EXISTS Vectors ( --文章向量索引
             Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            FeedId      INTEGER NOT NULL,   -- 所属源 Id（删除源时整组清除）
             ItemId      INTEGER NOT NULL,   -- 关联文章 Id
             ModelId     INTEGER NOT NULL,   -- 关联模型 Id
-            Vector      BLOB    NOT NULL,   -- 向量二进制（float[]）
+            Vector      BLOB    NOT NULL,   -- 向量二进制（float[] 序列化）
             CreatedAt   TEXT,
+            FOREIGN KEY (FeedId) REFERENCES Feeds(Id),
             FOREIGN KEY (ItemId) REFERENCES Items(Id),
             FOREIGN KEY (ModelId) REFERENCES Models(Id)
         );
@@ -381,22 +419,35 @@ void InitDatabase(string dbPath)
         cmd.ExecuteNonQuery();
     }
     catch (SqliteException) { /* 字段已存在则忽略 */ }
+    // 旧库迁移：给 Vectors 加 FeedId 列并回填（按 Items 的归属源补上）
+    try
+    {
+        cmd.CommandText = "ALTER TABLE Vectors ADD COLUMN FeedId INTEGER";
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = @"
+            UPDATE Vectors SET FeedId = (
+                SELECT Items.FeedId FROM Items WHERE Items.Id = Vectors.ItemId
+            )
+        ";
+        cmd.ExecuteNonQuery();
+    }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
 }
-// ═══════════ 文章管理子循环 ═══════════
+// ══════════ 文章管理子循环 ══════════
 void ManageArticles(int feedRealId, int feedDisplayNum, string dbPath)
 {
     while (true)
     {
         ListArticlesFromDb(feedRealId, feedDisplayNum, dbPath);
 
-        Console.Write("  D 编号=删除文章 | Q=返回上级：");
+        Console.Write(Lang.T("  D 编号=删除文章 | Q=返回上级"));
         string input = Console.ReadLine()!;
 
         if (input.StartsWith("D", StringComparison.OrdinalIgnoreCase))
         {
             if (!int.TryParse(input[1..].Trim(), out int artNum))
             {
-                Console.WriteLine("格式错误。正确：D 1");
+                Console.WriteLine(Lang.T("格式错误。正确：{0}", "D 1"));
                 continue;
             }
             DeleteArticle(feedRealId, artNum, dbPath);
@@ -407,12 +458,12 @@ void ManageArticles(int feedRealId, int feedDisplayNum, string dbPath)
         }
         else
         {
-            Console.WriteLine("未知命令，D=删除 Q=返回");
+            Console.WriteLine(Lang.T("未知命令，D=删除 Q=返回"));
         }
     }
 }
 
-// ═══════════ 列出指定源的所有文章（含 ROW_NUMBER 显示编号） ═══════════
+// ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
 void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -423,7 +474,7 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     titleCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
     titleCmd.Parameters.AddWithValue("@id", feedRealId);
     string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
-    Console.WriteLine($"── [{feedDisplayNum}] {feedTitle} 的文章列表 ──");
+    Console.WriteLine(Lang.T("── [{0}] {1} 的文章列表──", feedDisplayNum, feedTitle));
 
     // 用 ROW_NUMBER 给文章编显示号（删后自动继位）
     var cmd = conn.CreateCommand();
@@ -438,28 +489,28 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
     {
-        Console.WriteLine("  这个源还没有文章");
+        Console.WriteLine(Lang.T("  这个源还没有文章"));
         return;
     }
     while (reader.Read())
     {
-        int displayNum = reader.GetInt32(5);    // 第5列 DisplayNum
-        string status  = reader.GetString(3);   // 第3列 Status
-        string title   = reader.GetString(2);   // 第2列 Title
-        int version    = reader.GetInt32(4);    // 第4列 Version
+        int displayNum = reader.GetInt32(5);    // 第 5 列 DisplayNum
+        string status  = reader.GetString(3);   // 第 3 列 Status
+        string title   = reader.GetString(2);   // 第 2 列 Title
+        int version    = reader.GetInt32(4);    // 第 4 列 Version
 
         string tag = status switch
         {
-            "active"   => "[现]",
-            "archived" => "[旧]",
-            "deleted"  => "[删]",
+            "active"   => Lang.T("[现]"),
+            "archived" => Lang.T("[旧]"),
+            "deleted"  => Lang.T("[删]"),
             _          => "[?]"
         };
         Console.WriteLine($"  [{displayNum}] {tag} v{version} | {title}");
     }
 }
 
-// ═══════════ 删文章 ═══════════
+// ══════════ 删文章 ══════════
 void DeleteArticle(int feedRealId, int articleDisplayNum, string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -476,24 +527,27 @@ void DeleteArticle(int feedRealId, int articleDisplayNum, string dbPath)
     cmd.Parameters.AddWithValue("@fid", feedRealId);
     cmd.Parameters.AddWithValue("@n", articleDisplayNum);
     using var reader = cmd.ExecuteReader();
-    if (!reader.Read()) { Console.WriteLine("没找到这篇文章"); return; }
+    if (!reader.Read()) { Console.WriteLine(Lang.T("没找到这篇文章")); return; }
     long artRealId = reader.GetInt64(0);
     string artTitle = reader.GetString(1);
     reader.Close();
 
-    Console.Write($"确定永久删除《{artTitle}》？此操作不可恢复！(y/n)：");
-    if (Console.ReadLine()!.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+    Console.Write(Lang.T("确定永久删除《{0}》？此操作不可恢复！(y/n)", artTitle));
+    if (Console.ReadLine()!.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
 
-    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+    cmd.CommandText = "DELETE FROM Vectors WHERE ItemId = @id";
     cmd.Parameters.AddWithValue("@id", artRealId);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"《{artTitle}》已永久删除");
+    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+    cmd.ExecuteNonQuery();
+
+    Console.WriteLine(Lang.T("《{0}》已永久删除", artTitle));
 }
 
-// ═══════════ 列表方法：显示数据库中所有订阅源 ═══════════
-// ROW_NUMBER() 保证显示出来永远是 1, 2, 3 连续编号（不管中间有没有删过）
-// 但操作（更新/时间戳/删除）仍然用真实的 Id，因为 Items 表靠它关联
+// ══════════ 列表方法：显示数据库中所有订阅源 ══════════
+// ROW_NUMBER() 保证显示出来永远是 1, 2, 3 连续编号（不管中间有没有删过源）
+// 但操作（更新/时间戳/删除）仍然用真实 Id，因为 Items 表靠它关联
 void ListFeedsFromDb(string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -507,12 +561,12 @@ void ListFeedsFromDb(string dbPath)
                ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
         FROM Feeds
     ";
-    // 六列：[真实Id, 标题, 活跃数, 旧版数, 已删数, 显示编号]
+    // 六列：[真实Id, 标题, 活跃数, 旧版本数, 已删除数, 显示编号]
 
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
     {
-        Console.WriteLine("数据库里还没有订阅源");
+        Console.WriteLine(Lang.T("数据库里还没有订阅源"));
         return;
     }
 
@@ -524,24 +578,45 @@ void ListFeedsFromDb(string dbPath)
 
         // 拼出显示文本：只显示非零的状态
         var parts = new List<string>();
-        if (active > 0)  parts.Add($"现存{active+deleted}篇");
-        if (archive > 0) parts.Add($"其中有{archive} 篇发生了更改");
-        if (deleted > 0) parts.Add($"{deleted} 篇被作者删掉了，但是我们已经帮你存档了");
+        if (active > 0)  parts.Add(Lang.T("现存{0}篇", active + deleted));
+        if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
+        if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
         string stats = string.Join(", ", parts);
 
-        Console.WriteLine($"[{reader.GetInt32(5)}] {reader.GetString(1)} — {stats}");
+        Console.WriteLine($"[{reader.GetInt32(5)}] {reader.GetString(1)} {stats}");
     }
 }
 
-// ═══════════ 核心方法：下载 RSS → 解析 → 去重 → 写入数据库 ═══════════
+// ══════════ 核心方法：下载 RSS → 解析 → 去重 → 写入数据库 ══════════
 async Task DownloadAndSaveToDb(string url, string dbPath)
 {
+    // 用户可能忘记 https:// 或 http:// 前缀，自动补全；
+    // 若补全的 https 连不上（站点只提供 http），再回退 http 重试一次
+    string raw = url.Trim();
+    bool wasAutoPrefixed = !(raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                             raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                             raw.StartsWith("//", StringComparison.OrdinalIgnoreCase));
+    url = EnsureUrlScheme(raw);
+
     // --- 第 1 步：下载 RSS 原始 XML ---
     // 不加 User-Agent 有些服务器会返回 403 拒绝
     using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
     client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-    Console.WriteLine("正在下载...");
-    string rawXml = await client.GetStringAsync(url);
+    Console.WriteLine(Lang.T("正在下载..."));
+
+    string rawXml;
+    try
+    {
+        rawXml = await client.GetStringAsync(url);
+    }
+    catch (HttpRequestException) when (wasAutoPrefixed && url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+    {
+        // https 失败 → 站点可能只支持 http，重试一次
+        string httpUrl = "http://" + url["https://".Length..];
+        Console.WriteLine(Lang.T("https:// 连接失败，改用 http://{0} 重试...", httpUrl["http://".Length..]));
+        rawXml = await client.GetStringAsync(httpUrl);
+        url = httpUrl;  // 后续用有效的 http 地址写入 / 更新
+    }
 
     // --- 第 2 步：解析 ---
     var feed = FeedReader.ReadFromString(rawXml);
@@ -561,7 +636,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
     {
         // 同名未归档源存在！先用文本 diff 比对 Feed 级别变化
         isNewFeed = false;
-        Console.WriteLine($"订阅源{feed.Title}已存在，正在比对...");
+        Console.WriteLine(Lang.T("订阅源{0}已存在，正在比对...", feed.Title));
         bool hasChanges = ShowFeedXmlDiff(oldXml, rawXml);
 
         if (hasChanges)
@@ -575,11 +650,11 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
             updateCmd.Parameters.AddWithValue("@fetched", DateTime.Now.ToString("O"));
             updateCmd.Parameters.AddWithValue("@title", feed.Title);
             updateCmd.ExecuteNonQuery();
-            Console.WriteLine("内容有变化，已更新订阅源。");
+            Console.WriteLine(Lang.T("内容有变化，已更新订阅源"));
         }
         else
         {
-            Console.WriteLine("内容无变化，跳过更新。");
+            Console.WriteLine(Lang.T("内容无变化，跳过更新"));
         }
 
         var idCmd = conn.CreateCommand();
@@ -612,10 +687,83 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
     // 新源 → 全量插入不过滤；旧源 → 逐篇比对
     ShowDiff(feed, feedId, conn, isNewFeed);
 
-    Console.WriteLine($"{feed.Title} 写入完成");
+    Console.WriteLine(Lang.T("{0} 写入完成", feed.Title));
+
+    // --- 第 6 步：若已初始化 AI，询问是否把该源未向量化的文章加入 embedding ---
+    await MaybeIndexNewArticles(feedId, dbPath);
 }
 
-// ═══════════ 辅助方法：按标题查未归档源的旧 RawXml ═══════════
+// ══════════ 辅助方法：下载/更新后询问是否对新文章做向量化 ══════════
+// 仅当已执行过 --init（存在 ai_config.json）时才会询问，避免打扰未配置 AI 的用户
+async Task MaybeIndexNewArticles(long feedId, string dbPath)
+{
+    if (!File.Exists(ConfigPath(dbPath))) return;
+
+    var cfg = LoadConfig(dbPath);
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT COUNT(*) FROM Items i
+        WHERE i.FeedId = @fid AND i.Status = 'active'
+        AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = i.Id)
+    ";
+    cmd.Parameters.AddWithValue("@fid", feedId);
+    long pending = (long)cmd.ExecuteScalar()!;
+    if (pending == 0) return;
+
+    Console.WriteLine(Lang.T("这个源有 {0} 篇新文章还未向量化，是否加入语义搜索（{1}）？(y/n)", pending, cfg.Embedding.Model));
+    if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("已跳过，需要时可用 rssreader --index 补上")); return; }
+
+    cmd.CommandText = "SELECT Id, Title FROM Items WHERE FeedId = @fid AND Status = 'active' AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = Items.Id)";
+    using var r = cmd.ExecuteReader();
+    var articles = new List<(int Id, string Title)>();
+    while (r.Read()) articles.Add((r.GetInt32(0), r.GetString(1)));
+    r.Close();
+
+    int modelId = EnsureModel(dbPath, cfg.Embedding);
+    int ok = 0, fail = 0;
+    foreach (var a in articles)
+    {
+        var vec = await SafeEmbed(a.Title, cfg);
+        if (vec == null) { fail++; continue; }
+        if (vec.Length != cfg.Embedding.Dimensions)
+        {
+            cfg.Embedding.Dimensions = vec.Length;
+            SaveConfig(dbPath, cfg);
+        }
+        SaveVector(dbPath, (int)feedId, a.Id, modelId, vec);
+        ok++;
+    }
+    Console.WriteLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
+}
+
+// ══════════ 辅助方法：补全 URL 协议前缀 ══════════
+// 用户可能直接输入 "example.com/rss" 而忘记 https:// 或 http://
+// 无协议时默认补 https://（GET 失败会由调用方捕获提示）
+string EnsureUrlScheme(string url)
+{
+    string trimmed = url.Trim();
+    if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+        trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        return trimmed;
+    if (trimmed.StartsWith("//", StringComparison.OrdinalIgnoreCase))
+        return "https:" + trimmed;
+    Console.WriteLine(Lang.T("检测到链接缺少协议前缀，已自动补全为 https://{0}", trimmed));
+    return "https://" + trimmed;
+}
+
+// ══════════ 辅助方法：规范化 OpenAI 兼容端点 ══════════
+// 用户常只填 "http://host:11434"，这里补上 "/v1"（OpenAI 兼容路径）
+string EnsureV1Endpoint(string ep)
+{
+    string e = ep.Trim().TrimEnd('/');
+    if (e.Length == 0 || e.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+        return e;
+    return e + "/v1";
+}
+
+// ══════════ 辅助方法：按标题查未归档源的 RawXml ══════════
 // 只匹配无时间戳后缀的源，已归档的（带 _yyyymmdd_hhmmss）不参与比对
 // 返回 null = 没找到或全是归档源 → 当作新源处理
 string? GetActiveRawXml(string title, SqliteConnection conn)
@@ -635,14 +783,14 @@ string? GetActiveRawXml(string title, SqliteConnection conn)
     return null;  // 没找到或全是归档源
 }
 
-// ═══════════ 判断标题是否有时间戳后缀（即是否已被归档） ═══════════
+// ══════════ 判断标题是否有时间戳后缀（即是否已被归档）═══════════
 bool IsArchived(string title)
 {
     return Regex.IsMatch(title, @"_\d{8}_\d{6}$");
 }
 
 
-// ═══════════ 显示编号 → 真实 Id ═══════════
+// ══════════ 显示编号 → 真实 Id ══════════
 // 列表显示用了 ROW_NUMBER()，用户输入的是显示编号（1,2,3...）
 // 这个方法把显示编号转换成数据库里真实的 Id（可能是 1,3,5...有断档）
 // 返回 0 表示找不到
@@ -662,11 +810,11 @@ int GetRealId(int displayNum, string dbPath)
     return result is null ? 0 : Convert.ToInt32(result);
 }
 
-// ═══════════ 删除订阅源 + 它的所有文章 ═══════════
+// ══════════ 删除订阅源 + 它的所有文章 ══════════
 void DeleteFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -684,14 +832,16 @@ void DeleteFeed(int displayNum, string dbPath)
     int itemCount = reader.GetInt32(1);
     reader.Close();
 
-    Console.Write($"确定删除 {title} 及其 {itemCount} 篇文章？(y/n)：");
+    Console.Write(Lang.T("确定删除 {0} 及其 {1} 篇文章？(y/n)", title, itemCount));
     if (Console.ReadLine()!.ToLower() != "y")
     {
-        Console.WriteLine("已取消");
+        Console.WriteLine(Lang.T("已取消"));
         return;
     }
 
-    // 2. 先删文章
+    // 2. 先删该源的向量和文章
+    cmd.CommandText = "DELETE FROM Vectors WHERE FeedId = @id";
+    cmd.ExecuteNonQuery();
     cmd.CommandText = "DELETE FROM Items WHERE FeedId = @id";
     cmd.ExecuteNonQuery();
 
@@ -699,16 +849,16 @@ void DeleteFeed(int displayNum, string dbPath)
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"{title}已删除");
+    Console.WriteLine(Lang.T("{0}已删除", title));
 }
 
-// ═══════════ 加时间戳：标题 + _20260712_143000 ═══════════
+// ══════════ 加时间戳：标题 + _20260712_143000 ══════════
 // 加完后标题变了，下次下载同名源时 GetOldRawXml 找不到，
 // 就会被当作新订阅源处理，不会触发去重
 void AddTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -722,7 +872,7 @@ void AddTimestamp(int displayNum, string dbPath)
     // 2. 已经归档的不能再归档
     if (IsArchived(oldTitle))
     {
-        Console.WriteLine($" {oldTitle} 已被归档，无需重复操作");
+        Console.WriteLine(Lang.T("{0} 已被归档，无需重复操作", oldTitle));
         return;
     }
 
@@ -734,15 +884,15 @@ void AddTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", newTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"标题已变更：{oldTitle} → {newTitle} ");
+    Console.WriteLine(Lang.T("标题已变更：{0} → {1} ", oldTitle, newTitle));
 }
 
-// ═══════════ 去时间戳：去掉 _yyyymmdd_hhmmss 后缀 ═══════════
+// ══════════ 去时间戳：去掉 _yyyymmdd_hhmmss 后缀 ══════════
 // 去掉之前检查原始标题是否已存在，防止冲突
 void RemoveTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine("没找到这个编号"); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -758,7 +908,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
 
     if (plainTitle == title)
     {
-        Console.WriteLine($" {title} 未归档化欸");
+        Console.WriteLine(Lang.T("{0} 未归档", title));
         return;
     }
 
@@ -768,7 +918,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
     long conflict = (long)cmd.ExecuteScalar()!;
     if (conflict > 0)
     {
-        Console.WriteLine($"冲突！已存在另一个名为 {plainTitle} 的我，无法去除时间戳");
+        Console.WriteLine(Lang.T("冲突！已存在另一个名称为 {0} 的源，无法去除时间戳", plainTitle));
         return;
     }
 
@@ -777,14 +927,14 @@ void RemoveTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", plainTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine($"时间戳已去除： {title} → {plainTitle} ");
+    Console.WriteLine(Lang.T("时间戳已去除：{0} → {1} ", title, plainTitle));
 }
 
 // ════════════════════════════════════════════════════════
 // 下面是 ShowDiff 的两个版本
 // ════════════════════════════════════════════════════════
 
-// ═══════════ 辅助方法：插入一篇新文章到 Items 表 ═══════════
+// ══════════ 辅助方法：插入一篇新文章到 Items 表 ══════════
 // 统一管理 INSERT SQL，避免三处重复写同样的代码
 void InsertNewItem(SqliteConnection conn, long feedId, FeedItem item, string guid, int version)
 {
@@ -805,7 +955,7 @@ void InsertNewItem(SqliteConnection conn, long feedId, FeedItem item, string gui
     cmd.ExecuteNonQuery();
 }
 
-// ═══════════ ShowDiff（文章级别）：检测新增/修改/删除 + 输出 + 执行 ═══════════
+// ══════════ ShowDiff（文章级别）：检测新增/修改/删除 + 输出 + 执行 ══════════
 // isNewFeed=true  → 新订阅源，全量插入 + 跳过删除检测
 // isNewFeed=false → 已有源，逐篇比对：新增/修改/删除
 void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed = false)
@@ -861,7 +1011,7 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
             // 插入新版本
             InsertNewItem(conn, feedId, item, guid, version: oldVersion + 1);
 
-            Console.WriteLine($"  [已归档] {item.Title} 作者修改了内容，旧版已保留");
+            Console.WriteLine(Lang.T("  [已归档] {0} 作者修改了内容，旧版已保留", item.Title));
             modifyCount++;
         }
         else
@@ -876,11 +1026,11 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
     // 新源跳过删除检测（没有旧数据可比）
     if (isNewFeed)
     {
-        Console.WriteLine($"  新增 {newCount} 篇");
+        Console.WriteLine(Lang.T("  新增 {0} 篇", newCount));
         return;
     }
 
-    // --- 检测被删文章：数据库里 Status='active' 但 Guid 不在新 RSS 列表里 → 作者删了 ---
+    // --- 检测被删文章：数据库里 Status='active' 的 Guid 不在新 RSS 列表里 → 作者删了 ---
     var delCmd = conn.CreateCommand();
     delCmd.CommandText = "SELECT Id, Guid, Title FROM Items WHERE FeedId = @fid AND Status = 'active'";
     delCmd.Parameters.AddWithValue("@fid", feedId);
@@ -893,13 +1043,13 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
         {
             if (!newGuids.Contains(delReader.GetString(1)))  // Guid 不在新列表 → 被删
             {
-                deletedIds.Add(delReader.GetInt64(0));       // 记下第0列：真实 Id
-                Console.WriteLine($"  [已删除] {delReader.GetString(2)} 作者删除了此文");
+                deletedIds.Add(delReader.GetInt64(0));       // 记下第 0 列：真实 Id
+                Console.WriteLine(Lang.T("  [已删除] {0} 作者删除了此文", delReader.GetString(2)));
             }
         }
-        delReader.Close();  // 关掉 reader 才能做 UPDATE
+        delReader.Close();  // 关掉 reader 才能再 UPDATE
 
-        // 批量标记为 deleted
+        // 批量标记成 deleted
         foreach (long delId in deletedIds)
         {
             var markCmd = conn.CreateCommand();
@@ -913,10 +1063,10 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
     }
 
     // 汇总输出
-    Console.WriteLine($"  新增 {newCount} 篇，修改 {modifyCount} 篇，删除 {deleteCount} 篇");
+    Console.WriteLine(Lang.T("  新增 {0} 篇，修改 {1} 篇，删除 {2} 篇", newCount, modifyCount, deleteCount));
 }
 
-// ═══════════ ShowDiff（Feed 级别）：纯文本比对，看旧 XML 和新 XML 有无差异 ═══════════
+// ══════════ ShowDiff（Feed 级别）：纯文本比对，看旧 XML 和新 XML 有无差异 ══════════
 // 只负责输出和返回 bool，不做任何数据库操作
 bool ShowFeedXmlDiff(string oldRaw, string newRaw)
 {
@@ -953,27 +1103,27 @@ bool ShowFeedXmlDiff(string oldRaw, string newRaw)
         }
 
         if (!hasChanges)  // 一个变化都没有
-            Console.WriteLine("新旧 RSS 完全相同，无新增、删除或修改。");
+            Console.WriteLine(Lang.T("新旧 RSS 完全相同，无新增、删除或修改"));
 
         return hasChanges;  // 把结果返回给调用方，让它决定是否更新
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"比较条目差异时出错：{ex.Message}");
+        Console.WriteLine(Lang.T("比较条目差异时出错：{0}", ex.Message));
         return false;  // 出错了保守处理：不用旧数据覆盖，当作没变化
     }
 }
 
-// ═══════════ GetItemSummary：生成文章摘要行，供文本 diff 显示用 ═══════════
+// ══════════ GetItemSummary：生成文章摘要行，供文本 diff 显示用 ══════════
 string GetItemSummary(FeedItem item)
 {
-    string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? "未知";
+    string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? Lang.T("未知");
     return $"[{id}] {item.Title}";
 }
 
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 // AI 相关功能：配置、凭据、Embedding、向量、搜索、摘要
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 // （配置类 AiConfig / EmbeddingCfg / LlmCfg / SearchHit / AiException 见文件末尾类型区）
 
 string ConfigPath(string dbPath) => Path.Combine(Path.GetDirectoryName(dbPath) ?? ".", "ai_config.json");
@@ -995,11 +1145,11 @@ void SaveConfig(string dbPath, AiConfig cfg)
     File.WriteAllText(ConfigPath(dbPath), JsonSerializer.Serialize(cfg, opts));
 }
 
-// ═══════════ 凭据存储（系统原生凭据管理器）═══════════
+// ══════════ 凭据存储（系统原生凭据管理器）═══════════
 // 服务标识：固定字符串，用于在系统凭据库中区分本应用的条目
 void CredSet(string key, string value)
 {
-    var store = CredentialStoreFactory.CreateDefault("hahaRSSReader");
+    var store = CredentialStoreFactory.CreateDefault("hotsoupreader");
     var cache = new ktsu.CredentialCache.CredentialCache(store);
     cache.AddOrReplace(new PersonaGUID { WeakString = key }, new CredentialWithToken { Token = new CredentialToken { WeakString = value } });
 }
@@ -1008,7 +1158,7 @@ string? CredGet(string key)
 {
     try
     {
-        var store = CredentialStoreFactory.CreateDefault("hahaRSSReader");
+        var store = CredentialStoreFactory.CreateDefault("hotsoupreader");
         var cache = new ktsu.CredentialCache.CredentialCache(store);
         if (cache.TryGet(new PersonaGUID { WeakString = key }, out var cred) && cred is CredentialWithToken ct)
             return ct.Token.WeakString;
@@ -1019,23 +1169,25 @@ string? CredGet(string key)
 
 bool CredHas(string key) => CredGet(key) != null;
 
-// ═══════════ 安全提醒（首次调用 AI 功能时输出）═══════════
+// ══════════ 安全提醒（首次调用 AI 功能时输出）═══════════
+// 传了 --ignoresafeannouncement 则不输出（供脚本/AI Agent 使用，避免多余内容）
 void EnsureAiPrompted()
 {
     if (AiState.Warned) return;
     AiState.Warned = true;
-    Console.WriteLine("╔═══════════════════════════════════════════════════════════╗");
-    Console.WriteLine("║  🔐 安全提醒                                                  ║");
-    Console.WriteLine("║  你的 API Key 存储在操作系统原生凭据库                        ║");
-    Console.WriteLine("║  （Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service） ║");
-    Console.WriteLine("║  不会写入任何项目文件。请注意：                               ║");
-    Console.WriteLine("║  1. 不要将 API Key 分享/发给他人                             ║");
-    Console.WriteLine("║  2. 不要截图或上传含密钥的界面                               ║");
-    Console.WriteLine("║  3. 如怀疑泄露，请立即更换密钥                               ║");
-    Console.WriteLine("╚═══════════════════════════════════════════════════════════╝");
+    if (AiState.IgnoreAnnouncement) return;
+    Console.WriteLine(Lang.T("════════════════════════════════════════════════════"));
+    Console.WriteLine(Lang.T("🔐 安全提醒"));
+    Console.WriteLine(Lang.T("你的 API Key 存储在操作系统原生凭据库"));
+    Console.WriteLine(Lang.T("（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service）"));
+    Console.WriteLine(Lang.T("不会写入任何项目文件。请注意保密："));
+    Console.WriteLine(Lang.T("1. 不要把 API Key 分享/发给他人"));
+    Console.WriteLine(Lang.T("2. 不要截图或上传含密钥的界面"));
+    Console.WriteLine(Lang.T("3. 如怀疑泄露，请立即更换密钥"));
+    Console.WriteLine(Lang.T("════════════════════════════════════════════════════"));
 }
 
-// ═══════════ JSON 输出辅助 ═══════════
+// ══════════ JSON 输出辅助 ══════════
 void JsonOut(object obj) => Console.WriteLine(JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true }));
 
 // 自然语言报错 + JSON 双格式
@@ -1047,50 +1199,39 @@ void ReportError(string code, string message, string? suggestion = null, string?
     }
     else
     {
-        Console.WriteLine($"错误 [{code}] {message}");
-        if (suggestion != null) Console.WriteLine($"建议：{suggestion}");
-        if (details != null) Console.WriteLine($"详情：{details}");
+        Console.WriteLine(Lang.T("错误 [{0}] {1}", code, message));
+        if (suggestion != null) Console.WriteLine(Lang.T("建议：{0}", suggestion));
+        if (details != null) Console.WriteLine(Lang.T("详情：{0}", details));
     }
 }
 
-// ═══════════ Embedding 服务（支持 ollama / openai，可扩展）═══════════
+// ══════════ Embedding 服务（OpenAI 兼容格式，端点可自定义）═══════════
+// 统一走 POST {endpoint}/embeddings：Ollama(/v1)、DeepSeek、OpenAI 及任何
+// 兼容服务均可；API Key 可选（本地 Ollama 不需要，填了才带 Bearer 头）
 async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
 {
     using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-    switch (cfg.Embedding.Provider.ToLower())
+    string? key = CredGet("embedding_api_key");
+    if (!string.IsNullOrEmpty(key))
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+
+    var body = new { model = cfg.Embedding.Model, input = text };
+    var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
+        new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+    if (!resp.IsSuccessStatusCode)
+        throw new AiException("MODEL_UNAVAILABLE", Lang.T("Embedding 请求失败（HTTP {0}）", (int)resp.StatusCode),
+            Lang.T("请确认端点/端口/模型名正确；Ollama 可先执行 ollama list / ollama pull 拉取模型"), await resp.Content.ReadAsStringAsync());
+    try
     {
-        case "ollama":
-        {
-            var req = new { model = cfg.Embedding.Model, input = text };
-            var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/api/embed",
-                new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json"));
-            if (!resp.IsSuccessStatusCode)
-                throw new AiException("MODEL_UNAVAILABLE", $"Ollama 服务不可用（HTTP {(int)resp.StatusCode}）",
-                    "请确认 Ollama 已启动，或检查端点和模型名", await resp.Content.ReadAsStringAsync());
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-            var emb = doc.RootElement.GetProperty("embeddings")[0];
-            return emb.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-        }
-        case "openai":
-        {
-            string? key = CredGet("embedding_api_key");
-            if (string.IsNullOrEmpty(key))
-                throw new AiException("API_KEY_MISSING", "缺少 OpenAI Embedding API Key",
-                    "请执行 rssreader --init 配置 OpenAI API Key");
-            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
-            var body = new { model = cfg.Embedding.Model, input = text };
-            var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
-                new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
-            if (!resp.IsSuccessStatusCode)
-                throw new AiException("API_KEY_INVALID", $"OpenAI Embedding 请求失败（HTTP {(int)resp.StatusCode}）",
-                    "请检查 API Key 是否正确，或检查模型名", await resp.Content.ReadAsStringAsync());
-            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-            var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
-            return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-        }
-        default:
-            throw new AiException("UNSUPPORTED_PROVIDER", $"不支持的 Embedding 提供商：{cfg.Embedding.Provider}",
-                "支持 ollama / openai");
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
+        return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
+    }
+    catch (JsonException)
+    {
+        // 返回的不是 JSON（比如端点缺少 /v1 返回的 HTML），给出友好提示而非崩溃
+        throw new AiException("INVALID_RESPONSE", Lang.T("Embedding 服务返回的不是 JSON"),
+            Lang.T("请检查端点是否缺少 /v1（正确形式 http://host:端口/v1）"));
     }
 }
 
@@ -1104,8 +1245,8 @@ async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false)
     }
     catch (HttpRequestException ex)
     {
-        ReportError("NETWORK_ERROR", "网络错误，无法连接到 Embedding 服务",
-            "请检查网络连接，或检查 API 端点地址", ex.Message, json);
+        ReportError("NETWORK_ERROR", Lang.T("网络错误，无法连接到 Embedding 服务"),
+            Lang.T("请检查网络连接，或检查 API 端点地址"), ex.Message, json);
         return null;
     }
     catch (AiException ex)
@@ -1115,7 +1256,7 @@ async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false)
     }
 }
 
-// ═══════════ 向量存储与相似度 ═══════════
+// ══════════ 向量存储与相似度 ══════════
 byte[] VectorToBytes(float[] v)
 {
     var bytes = new byte[v.Length * sizeof(float)];
@@ -1186,22 +1327,24 @@ string? CheckDimensionMismatch(string dbPath, EmbeddingCfg emb)
         string oldName = r.GetString(0);
         int oldDim = r.IsDBNull(1) ? 0 : r.GetInt32(1);
         if (oldName != emb.Model && oldDim != emb.Dimensions)
-            return $"检测到 Embedding 模型维度变化（旧模型 {oldName} {oldDim} 维 → 新模型 {emb.Model} {emb.Dimensions} 维），旧向量已无法使用，请执行 rssreader --reindex 重新向量化。";
+            return Lang.T("检测到 Embedding 模型维度变化（旧模型 {0} {1} 维 → 新模型 {2} {3} 维），旧向量已无法使用，请执行 rssreader --reindex 重新向量化",
+                oldName, oldDim, emb.Model, emb.Dimensions);
     }
     return null;
 }
 
-// 保存向量（幂等：同文章+同模型只留一条）
-void SaveVector(string dbPath, int itemId, int modelId, float[] vector)
+// 保存向量（幂等：同文章 + 同模型只留一条）
+void SaveVector(string dbPath, int feedId, int itemId, int modelId, float[] vector)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        INSERT INTO Vectors (ItemId, ModelId, Vector, CreatedAt)
-        VALUES (@i, @m, @v, @now)
-        ON CONFLICT(ItemId, ModelId) DO UPDATE SET Vector = excluded.Vector, CreatedAt = excluded.CreatedAt
+        INSERT INTO Vectors (FeedId, ItemId, ModelId, Vector, CreatedAt)
+        VALUES (@f, @i, @m, @v, @now)
+        ON CONFLICT(ItemId, ModelId) DO UPDATE SET FeedId = excluded.FeedId, Vector = excluded.Vector, CreatedAt = excluded.CreatedAt
     ";
+    cmd.Parameters.AddWithValue("@f", feedId);
     cmd.Parameters.AddWithValue("@i", itemId);
     cmd.Parameters.AddWithValue("@m", modelId);
     cmd.Parameters.AddWithValue("@v", VectorToBytes(vector));
@@ -1209,7 +1352,7 @@ void SaveVector(string dbPath, int itemId, int modelId, float[] vector)
     cmd.ExecuteNonQuery();
 }
 
-// ═══════════ 交互式选择文章进行向量化 ═══════════
+// ══════════ 交互式选择文章进行向量化 ══════════
 async Task IndexArticlesCli(string[] extraArgs, string dbPath)
 {
     EnsureAiPrompted();
@@ -1218,7 +1361,7 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     // 默认全选模式；也可支持 --all
     ListFeedsFromDb(dbPath);
     Console.WriteLine();
-    Console.Write("请输入要向量化的订阅源编号（逗号分隔多个，输入 all 表示全部）：");
+    Console.Write(Lang.T("请输入要向量化的订阅源编号（逗号分隔多个，输入 all 表示全部）："));
     string input = Console.ReadLine()?.Trim() ?? "";
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -1243,23 +1386,23 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
         }
     }
 
-    if (feedIds.Count == 0) { Console.WriteLine("未选择任何订阅源，已取消"); return; }
+    if (feedIds.Count == 0) { Console.WriteLine(Lang.T("未选择任何订阅源，已取消")); return; }
 
     // 收集未向量化的 active 文章
-    var articles = new List<(int Id, string Title)>();
+    var articles = new List<(int Id, int FeedId, string Title)>();
     var cmd2 = conn.CreateCommand();
     cmd2.CommandText = @"
-        SELECT i.Id, i.Title FROM Items i
+        SELECT i.Id, i.FeedId, i.Title FROM Items i
         WHERE i.Status = 'active' AND i.FeedId IN (" + string.Join(",", feedIds) + @")
         AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = i.Id)
     ";
     using var r2 = cmd2.ExecuteReader();
-    while (r2.Read()) articles.Add((r2.GetInt32(0), r2.GetString(1)));
+    while (r2.Read()) articles.Add((r2.GetInt32(0), r2.GetInt32(1), r2.GetString(2)));
 
-    if (articles.Count == 0) { Console.WriteLine("所选订阅源的文章都已向量化，无需处理"); return; }
+    if (articles.Count == 0) { Console.WriteLine(Lang.T("所选订阅源的文章都已向量化，无需处理")); return; }
 
-    Console.WriteLine($"将向量化 {articles.Count} 篇文章，确认？(y/n)：");
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+    Console.WriteLine(Lang.T("将向量化 {0} 篇文章，确认？(y/n)", articles.Count));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
 
     int modelId = EnsureModel(dbPath, cfg.Embedding);
     int ok = 0, fail = 0;
@@ -1267,21 +1410,21 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     {
         var a = articles[i];
         var vec = await SafeEmbed(a.Title, cfg);
-        if (vec == null) { fail++; Console.WriteLine($"  [{i + 1}/{articles.Count}] 失败：{a.Title}"); continue; }
+        if (vec == null) { fail++; Console.WriteLine(Lang.T("  [{0}/{1}] 失败：{2}", i + 1, articles.Count, a.Title)); continue; }
         if (vec.Length != cfg.Embedding.Dimensions)
         {
             // 自动校正维度（以实际为准）
             cfg.Embedding.Dimensions = vec.Length;
             SaveConfig(dbPath, cfg);
         }
-        SaveVector(dbPath, a.Id, modelId, vec);
+        SaveVector(dbPath, a.FeedId, a.Id, modelId, vec);
         ok++;
-        if (ok % 10 == 0) Console.WriteLine($"  已处理 {ok + fail}/{articles.Count}");
+        if (ok % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, articles.Count));
     }
-    Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+    Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
 }
 
-// 重新向量化（更换模型后）：清空旧向量并重建
+// 重新向量化（更换模型后）：清空旧向量并重来
 async Task ReindexCli(string dbPath)
 {
     EnsureAiPrompted();
@@ -1293,17 +1436,17 @@ async Task ReindexCli(string dbPath)
     cmd.CommandText = "SELECT COUNT(*) FROM Items WHERE Status = 'active'";
     long total = (long)cmd.ExecuteScalar()!;
 
-    Console.Write($"将删除现有向量并重新向量化全部 {total} 篇 active 文章，确认？(y/n)：");
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+    Console.Write(Lang.T("将删除现有向量并重新向量化全部 {0} 篇 active 文章，确认？(y/n)", total));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
 
     cmd.CommandText = "DELETE FROM Vectors";
     cmd.ExecuteNonQuery();
 
     int modelId = EnsureModel(dbPath, cfg.Embedding);
-    cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active'";
+    cmd.CommandText = "SELECT Id, FeedId, Title FROM Items WHERE Status = 'active'";
     using var r = cmd.ExecuteReader();
-    var items = new List<(int Id, string Title)>();
-    while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
+    var items = new List<(int Id, int FeedId, string Title)>();
+    while (r.Read()) items.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2)));
     r.Close();
 
     int ok = 0, fail = 0;
@@ -1311,14 +1454,14 @@ async Task ReindexCli(string dbPath)
     {
         var vec = await SafeEmbed(item.Title, cfg);
         if (vec == null) { fail++; continue; }
-        SaveVector(dbPath, item.Id, modelId, vec);
+        SaveVector(dbPath, item.FeedId, item.Id, modelId, vec);
         ok++;
-        if ((ok + fail) % 10 == 0) Console.WriteLine($"  已处理 {ok + fail}/{items.Count}");
+        if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, items.Count));
     }
-    Console.WriteLine($"重新索引完成：成功 {ok}，失败 {fail}");
+    Console.WriteLine(Lang.T("重新索引完成：成功 {0}，失败 {1}", ok, fail));
 }
 
-// ═══════════ 语义搜索 ═══════════
+// ══════════ 语义搜索 ══════════
 void SearchCli(string[] args, string dbPath)
 {
     EnsureAiPrompted();
@@ -1339,7 +1482,7 @@ void SearchCli(string[] args, string dbPath)
                 {
                     feedDisplay = f;
                     feedReal = GetRealId(f, dbPath);
-                    if (feedReal == 0) { ReportError("FEED_NOT_FOUND", $"没有找到编号 {f} 的订阅源", json: json); return; }
+                    if (feedReal == 0) { ReportError("FEED_NOT_FOUND", Lang.T("没有找到编号 {0} 的订阅源", f), json: json); return; }
                 }
                 break;
             case "--threshold":
@@ -1356,7 +1499,7 @@ void SearchCli(string[] args, string dbPath)
     }
 
     string query = string.Join(" ", queryParts);
-    if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", "请输入搜索查询", json: json); return; }
+    if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", Lang.T("请输入搜索查询"), json: json); return; }
 
     var vec = SafeEmbed(query, cfg, json).GetAwaiter().GetResult();
     if (vec == null) return;
@@ -1367,14 +1510,14 @@ void SearchCli(string[] args, string dbPath)
     var modelCmd = conn.CreateCommand();
     modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
     var modelObj = modelCmd.ExecuteScalar();
-    if (modelObj == null) { ReportError("NO_INDEX", "尚无向量索引，请先执行 rssreader --index", json: json); return; }
+    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("尚无向量索引，请先执行 rssreader --index"), json: json); return; }
     int modelId = Convert.ToInt32(modelObj);
 
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
     cmd.Parameters.AddWithValue("@m", modelId);
     long count = (long)cmd.ExecuteScalar()!;
-    if (count == 0) { ReportError("NO_INDEX", "当前模型尚无向量索引，请先执行 rssreader --index", json: json); return; }
+    if (count == 0) { ReportError("NO_INDEX", Lang.T("当前模型尚无向量索引，请先执行 rssreader --index"), json: json); return; }
 
     cmd.Parameters.Clear();
     cmd.CommandText = @"
@@ -1439,27 +1582,26 @@ void SearchCli(string[] args, string dbPath)
     }
     else
     {
-        Console.WriteLine($"搜索结果（查询：{query}，阈值：{threshold}，共 {results.Count} 条）");
+        Console.WriteLine(Lang.T("搜索结果（查询：{0}，阈值：{1}，共 {2} 条）", query, threshold, results.Count));
         foreach (var h in results)
         {
             Console.WriteLine($"  [{h.ItemId}] {h.Title}");
-            Console.WriteLine($"      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
+            Console.WriteLine(Lang.T("      来源：{0} | 相似度：{1:P1}", h.FeedTitle, h.Score));
             if (!string.IsNullOrEmpty(h.Description) && h.Description.Length > 80)
-                Console.WriteLine($"      摘要：{h.Description[..80]}...");
+                Console.WriteLine(Lang.T("      摘要：{0}...", h.Description[..80]));
         }
     }
 }
 
 // （SearchHit 类见文件末尾类型区）
-// ═══════════ LLM 摘要服务（DeepSeek，OpenAI 兼容）═══════════
+// ══════════ LLM 摘要服务（OpenAI 兼容，端点可自定义）═══════════
 async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
 {
     string? key = CredGet("llm_api_key");
-    if (string.IsNullOrEmpty(key))
-        throw new AiException("API_KEY_MISSING", "缺少 LLM API Key", "请执行 rssreader --init 配置 LLM API Key");
 
     using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
-    client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+    if (!string.IsNullOrEmpty(key))
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
     var body = new
     {
         model = cfg.Llm.Model,
@@ -1469,13 +1611,21 @@ async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
     var resp = await client.PostAsync($"{cfg.Llm.ApiEndpoint}/chat/completions",
         new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
     if (!resp.IsSuccessStatusCode)
-        throw new AiException("API_KEY_INVALID", $"LLM 请求失败（HTTP {(int)resp.StatusCode}）",
-            "请检查 API Key / 模型名 / 端点配置", await resp.Content.ReadAsStringAsync());
-    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-    return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        throw new AiException("API_KEY_INVALID", Lang.T("LLM 请求失败（HTTP {0}）", (int)resp.StatusCode),
+            Lang.T("请检查 API Key / 模型名 / 端点配置"), await resp.Content.ReadAsStringAsync());
+    try
+    {
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+    }
+    catch (JsonException)
+    {
+        throw new AiException("INVALID_JSON", Lang.T("LLM 服务返回的不是 JSON"),
+            Lang.T("请检查端点是否缺少 /v1（如 https://api.deepseek.com/v1）"));
+    }
 }
 
-// 生成单篇文章摘要并保存到 rss.db（与文章同在）
+// 生成单篇文章摘要并保存到 rss.db（与文章同在库中）
 async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
 {
     var cfg = LoadConfig(dbPath);
@@ -1485,7 +1635,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     cmd.CommandText = "SELECT Title, Content, Description, Summary FROM Items WHERE Id = @id AND Status = 'active'";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", $"没有找到文章 {itemId}", json: json); return false; }
+    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("没有找到文章 {0}", itemId), json: json); return false; }
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
     string desc = r.IsDBNull(2) ? "" : r.GetString(2);
@@ -1494,7 +1644,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
 
     if (!string.IsNullOrEmpty(existing))
     {
-        Console.WriteLine($"文章 [{itemId}] {title} 已有摘要，跳过（如想重新生成请先删除）。");
+        Console.WriteLine(Lang.T("文章 [{0}] {1} 已有摘要，跳过（如想重新生成请先删除）", itemId, title));
         return true;
     }
 
@@ -1506,7 +1656,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     {
         EnsureAiPrompted();
         var summary = await CallLlmAsync(prompt, cfg);
-        if (summary == null) throw new AiException("EMPTY_RESPONSE", "LLM 返回为空", "请重试或检查模型配置");
+        if (summary == null) throw new AiException("EMPTY_RESPONSE", Lang.T("LLM 返回为空"), Lang.T("请重试或检查模型配置"));
 
         var upd = conn.CreateCommand();
         upd.CommandText = "UPDATE Items SET Summary = @s, SummaryAt = @now WHERE Id = @id";
@@ -1514,13 +1664,13 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
         upd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
         upd.Parameters.AddWithValue("@id", itemId);
         upd.ExecuteNonQuery();
-        Console.WriteLine($"已生成摘要：[{itemId}] {title}");
+        Console.WriteLine(Lang.T("已生成摘要：[{0}] {1}", itemId, title));
         if (json) JsonOut(new { success = true, itemId, title, summary = summary.Trim() });
         return true;
     }
     catch (HttpRequestException ex)
     {
-        ReportError("NETWORK_ERROR", "网络错误，无法连接 LLM 服务", "请检查网络连接", ex.Message, json);
+        ReportError("NETWORK_ERROR", Lang.T("网络错误，无法连接 LLM 服务"), Lang.T("请检查网络连接"), ex.Message, json);
         return false;
     }
     catch (AiException ex)
@@ -1530,7 +1680,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     }
 }
 
-// 单篇/整源摘要 CLI；支持 '12' 或 'feed:3'
+// 单篇/整源摘要 CLI；支持 '12' 和 'feed:3'
 async Task SummaryCli(string arg, string dbPath)
 {
     EnsureAiPrompted();
@@ -1540,11 +1690,11 @@ async Task SummaryCli(string arg, string dbPath)
     {
         if (!int.TryParse(arg["feed:".Length..].Trim(), out int feedDisplay))
         {
-            Console.WriteLine("格式错误。正确：--summary feed:3");
+            Console.WriteLine(Lang.T("格式错误。正确：{0}", "--summary feed:3"));
             return;
         }
         int feedReal = GetRealId(feedDisplay, dbPath);
-        if (feedReal == 0) { Console.WriteLine($"没有找到编号 {feedDisplay} 的订阅源"); return; }
+        if (feedReal == 0) { Console.WriteLine(Lang.T("没有找到编号 {0} 的订阅源", feedDisplay)); return; }
 
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
@@ -1556,22 +1706,22 @@ async Task SummaryCli(string arg, string dbPath)
         while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
         r.Close();
 
-        if (items.Count == 0) { Console.WriteLine($"订阅源 {feedDisplay} 的所有 active 文章都已有摘要"); return; }
-        Console.WriteLine($"将为订阅源 {feedDisplay} 的 {items.Count} 篇文章生成摘要，确认？(y/n)：");
-        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+        if (items.Count == 0) { Console.WriteLine(Lang.T("订阅源 {0} 的所有 active 文章都已有摘要", feedDisplay)); return; }
+        Console.WriteLine(Lang.T("将为订阅源 {0} 的 {1} 篇文章生成摘要，确认？(y/n)", feedDisplay, items.Count));
+        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
 
         int ok = 0, fail = 0;
         foreach (var it in items)
         {
             if (await SummarizeItem(dbPath, it.Id, json: false)) ok++; else fail++;
-            Console.WriteLine($"  进度：{ok + fail}/{items.Count}");
+            Console.WriteLine(Lang.T("  进度：{0}/{1}", ok + fail, items.Count));
         }
-        Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+        Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
         return;
     }
 
     // 单篇文章
-    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine("用法: rssreader --summary <文章编号 或 feed:编号>"); return; }
+    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine(Lang.T("用法: rssreader --summary <文章编号 | feed:编号>")); return; }
     await SummarizeItem(dbPath, sumId);
 }
 
@@ -1588,84 +1738,75 @@ async Task SummaryAllCli(string dbPath)
     while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
     r.Close();
 
-    if (items.Count == 0) { Console.WriteLine("所有 active 文章都已有摘要"); return; }
-    Console.WriteLine($"将为 {items.Count} 篇文章生成摘要，确认？(y/n)：");
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine("已取消"); return; }
+    if (items.Count == 0) { Console.WriteLine(Lang.T("所有 active 文章都已有摘要")); return; }
+    Console.WriteLine(Lang.T("将为 {0} 篇文章生成摘要，确认？(y/n)", items.Count));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
 
     int ok = 0, fail = 0;
     foreach (var it in items)
     {
         if (await SummarizeItem(dbPath, it.Id)) ok++; else fail++;
-        Console.WriteLine($"  进度：{ok + fail}/{items.Count}");
+        Console.WriteLine(Lang.T("  进度：{0}/{1}", ok + fail, items.Count));
     }
-    Console.WriteLine($"完成：成功 {ok}，失败 {fail}");
+    Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
 }
 
-// ═══════════ 交互式配置向导 ═══════════
+// ══════════ 交互式配置向导 ══════════
 void InitAiConfigInteractive(string dbPath)
 {
     EnsureAiPrompted();
-    Console.WriteLine("===== RSS Reader AI 配置向导 =====");
+    Console.WriteLine(Lang.T("===== RSS Reader AI 配置向导 ====="));
+    Console.WriteLine(Lang.T("所有服务均使用 OpenAI 兼容格式（Ollama / DeepSeek / OpenAI / 任意兼容服务均可），端点与端口可自由指定。"));
     var cfg = LoadConfig(dbPath);
 
-    // --- Embedding ---
-    Console.WriteLine("\n[1/4] Embedding 提供商（用于语义搜索的文本向量化）：");
-    Console.WriteLine("  1) Ollama（本地，免费，需安装 Ollama）");
-    Console.WriteLine("  2) OpenAI（云端，需 API Key）");
-    Console.Write($"当前：{cfg.Embedding.Provider}，选择 (1/2)：");
-    string embChoice = Console.ReadLine()?.Trim() ?? "";
-    if (embChoice == "2")
+// --- Embedding ---
+    Console.WriteLine(Lang.T("\n[1/3] Embedding 服务（语义搜索用，OpenAI 兼容格式）："));
+    Console.Write(Lang.T("  端点（只需 http://host:端口 或 https://域名，自动补全 /v1）〔当前：{0}〕：", cfg.Embedding.ApiEndpoint));
+    string embEndpoint = Console.ReadLine()?.Trim() ?? "";
+    if (!string.IsNullOrEmpty(embEndpoint))
     {
-        cfg.Embedding.Provider = "openai";
-        cfg.Embedding.Model = "text-embedding-3-small";
-        cfg.Embedding.Dimensions = 1536;
-        cfg.Embedding.ApiEndpoint = "https://api.openai.com/v1";
-    }
-    else
-    {
-        cfg.Embedding.Provider = "ollama";
-        cfg.Embedding.Model = "nomic-embed-text";
-        cfg.Embedding.Dimensions = 768;
-        cfg.Embedding.ApiEndpoint = "http://localhost:11434";
+        cfg.Embedding.ApiEndpoint = EnsureV1Endpoint(embEndpoint);
+        Console.WriteLine(Lang.T("  → 最终端点：{0}", cfg.Embedding.ApiEndpoint));
     }
 
-    // --- Embedding API Key（openai 需要）---
-    if (cfg.Embedding.Provider == "openai")
-    {
-        Console.Write("[2/4] 输入 OpenAI Embedding API Key（存储在系统凭据库）：");
-        var key = ReadSecret();
-        if (!string.IsNullOrEmpty(key)) CredSet("embedding_api_key", key);
-    }
+    Console.Write(Lang.T("  模型名（如 nomic-embed-text / bge-m3 / text-embedding-3-small）〔当前：{0}〕：", cfg.Embedding.Model));
+    string embModel = Console.ReadLine()?.Trim() ?? "";
+    if (!string.IsNullOrEmpty(embModel)) cfg.Embedding.Model = embModel;
+
+    Console.Write(Lang.T("  向量维度（如 768/1024/1536，不确定可回车后由程序自动探测）〔当前：{0}〕：", cfg.Embedding.Dimensions));
+    if (int.TryParse(Console.ReadLine()?.Trim(), out int embDim) && embDim > 0)
+        cfg.Embedding.Dimensions = embDim;
+
+    Console.Write(Lang.T("  Embedding API Key（本地 Ollama 等无需 Key 可回车跳过；输入时不会显示，仅存系统凭据库）〔当前：{0}〕：",
+        CredHas("embedding_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
+    var embKey = ReadSecret();
+    if (!string.IsNullOrEmpty(embKey)) CredSet("embedding_api_key", embKey);
 
     // --- LLM ---
-    Console.WriteLine("\n[3/4] LLM 提供商（用于生成文章摘要）：");
-    Console.WriteLine("  1) DeepSeek（云端）");
-    Console.WriteLine("  2) OpenAI（云端）");
-    Console.Write($"当前：{cfg.Llm.Provider}，选择 (1/2)：");
-    string llmChoice = Console.ReadLine()?.Trim() ?? "";
-    if (llmChoice == "2")
+    Console.WriteLine(Lang.T("\n[2/3] LLM 服务（生成摘要用，OpenAI 兼容格式）："));
+    Console.Write(Lang.T("  端点（只需 https://host[:端口] 或 http://host:端口，自动补全 /v1）〔当前：{0}〕：", cfg.Llm.ApiEndpoint));
+    string llmEndpoint = Console.ReadLine()?.Trim() ?? "";
+    if (!string.IsNullOrEmpty(llmEndpoint))
     {
-        cfg.Llm.Provider = "openai";
-        cfg.Llm.Model = "gpt-4o-mini";
-        cfg.Llm.ApiEndpoint = "https://api.openai.com/v1";
-    }
-    else
-    {
-        cfg.Llm.Provider = "deepseek";
-        cfg.Llm.Model = "deepseek-chat";
-        cfg.Llm.ApiEndpoint = "https://api.deepseek.com/v1";
+        cfg.Llm.ApiEndpoint = EnsureV1Endpoint(llmEndpoint);
+        Console.WriteLine(Lang.T("  → 最终端点：{0}", cfg.Llm.ApiEndpoint));
     }
 
-    Console.Write("[4/4] 输入 LLM API Key（存储在系统凭据库）：");
+    Console.Write(Lang.T("  模型名（如 deepseek-chat / gpt-4o-mini / qwen2.5）〔当前：{0}〕：", cfg.Llm.Model));
+    string llmModel = Console.ReadLine()?.Trim() ?? "";
+    if (!string.IsNullOrEmpty(llmModel)) cfg.Llm.Model = llmModel;
+
+    Console.Write(Lang.T("  LLM API Key（输入时不会显示，仅存系统凭据库，回车跳过）："));
     var llmKey = ReadSecret();
     if (!string.IsNullOrEmpty(llmKey)) CredSet("llm_api_key", llmKey);
 
-    Console.Write("默认搜索相似度阈值（0-1，建议 0.7）：");
-    if (float.TryParse(Console.ReadLine(), out float thr)) cfg.Embedding.SearchThreshold = thr;
+    // --- 通用 ---
+    Console.Write(Lang.T("\n[3/3] 默认搜索相似度阈值（0-1，建议 0.7，本地 bge-m3 建议 0.5）〔当前：{0}〕：", cfg.Embedding.SearchThreshold));
+    if (float.TryParse(Console.ReadLine()?.Trim(), out float thr)) cfg.Embedding.SearchThreshold = thr;
 
     SaveConfig(dbPath, cfg);
-    Console.WriteLine("\n配置已保存。你可以修改 ai_config.json 调整模型，API Key 已在系统凭据库中。");
-    Console.WriteLine("注意：更换 Embedding 模型后需执行 rssreader --reindex 重新向量化。");
+    Console.WriteLine(Lang.T("\n配置已保存。你可以修改 ai_config.json 调整模型，API Key 已在系统凭据库中。"));
+    Console.WriteLine(Lang.T("注意：更换 Embedding 模型后需执行 rssreader --reindex 重新向量化。"));
 }
 
 // 读取密码（不回显）——跨平台简易实现
@@ -1691,31 +1832,85 @@ string ReadSecret()
 void ShowConfig(string dbPath)
 {
     var cfg = LoadConfig(dbPath);
-    Console.WriteLine("===== AI 配置 =====");
-    Console.WriteLine($"Embedding：{cfg.Embedding.Provider} / {cfg.Embedding.Model} ({cfg.Embedding.Dimensions} 维)");
-    Console.WriteLine($"  端点：{cfg.Embedding.ApiEndpoint}");
-    Console.WriteLine($"  默认搜索阈值：{cfg.Embedding.SearchThreshold}");
-    Console.WriteLine($"  API Key：{(CredHas("embedding_api_key") ? "已设置" : "未设置")}");
-    Console.WriteLine($"LLM：{cfg.Llm.Provider} / {cfg.Llm.Model}");
-    Console.WriteLine($"  端点：{cfg.Llm.ApiEndpoint}");
-    Console.WriteLine($"  API Key：{(CredHas("llm_api_key") ? "已设置" : "未设置")}");
-    Console.WriteLine($"配置文件：{ConfigPath(dbPath)}");
+    Console.WriteLine(Lang.T("===== AI 配置 ====="));
+    Console.WriteLine(Lang.T("Embedding：{0} / {1} ({2} 维)", cfg.Embedding.Provider, cfg.Embedding.Model, cfg.Embedding.Dimensions));
+    Console.WriteLine(Lang.T("  端点：{0}", cfg.Embedding.ApiEndpoint));
+    Console.WriteLine(Lang.T("  默认搜索阈值：{0}", cfg.Embedding.SearchThreshold));
+    Console.WriteLine(Lang.T("  API Key：{0}", CredHas("embedding_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
+    Console.WriteLine(Lang.T("LLM：{0} / {1}", cfg.Llm.Provider, cfg.Llm.Model));
+    Console.WriteLine(Lang.T("  端点：{0}", cfg.Llm.ApiEndpoint));
+    Console.WriteLine(Lang.T("  API Key：{0}", CredHas("llm_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
+    Console.WriteLine(Lang.T("配置文件：{0}", ConfigPath(dbPath)));
 
     var warn = CheckDimensionMismatch(dbPath, cfg.Embedding);
     if (warn != null) Console.WriteLine($"\n{warn}");
 }
 
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 // 以下为类型定义（必须位于所有顶级语句/局部函数之后）
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 
-// 进程级 AI 状态
+// 进程内 AI 状态
 static class AiState
 {
     public static bool Warned = false;
+    public static bool IgnoreAnnouncement = false;  // --ignoresafeannouncement：跳过安全横幅等多余输出
 }
 
-// ═══════════ AI 配置模型（ai_config.json，非敏感信息）═══════════
+// ══════════ 语言 / 本地化支持 ══════════
+// 用法：Lang.T("你好") / Lang.T("共有 {0} 篇", n)
+// 查找顺序：languages/<代码>.json（可定制翻译）→ 内置中文默认值 → 原样返回
+// 语言文件格式（JSON 字典，键为原文，值为译文）：
+//   { "你好": "Hello", "共有 {0} 篇": "Total {0} articles" }
+static class Lang
+{
+    public static string Code { get; private set; } = "zh-CN";
+
+    private static readonly Dictionary<string, string> _custom = new();
+    private static bool _loaded;
+
+    public static void Init(string workDir, string? requested)
+    {
+        string code = requested ?? "";
+        if (string.IsNullOrEmpty(code))
+            code = Environment.GetEnvironmentVariable("LANG") ?? "zh-CN";
+        Code = code;
+
+        string path = Path.Combine(workDir, "languages", code + ".json");
+        if (!File.Exists(path)) return;
+
+        try
+        {
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+            if (loaded != null)
+            {
+                _custom.Clear();
+                foreach (var kv in loaded) _custom[kv.Key] = kv.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"加载语言文件失败：{ex.Message}");
+        }
+        _loaded = true;
+    }
+
+    public static string T(string key)
+    {
+        if (_loaded && _custom.TryGetValue(key, out var v) && !string.IsNullOrEmpty(v))
+            return v;
+        return key;
+    }
+
+    public static string T(string key, params object[] args)
+    {
+        string s = T(key);
+        try { return string.Format(s, args); }
+        catch (FormatException) { return s; }
+    }
+}
+
+// ══════════ AI 配置模型（ai_config.json，非敏感信息）═══════════
 class AiConfig
 {
     public EmbeddingCfg Embedding { get; set; } = new();
@@ -1724,16 +1919,16 @@ class AiConfig
 
 class EmbeddingCfg
 {
-    public string Provider { get; set; } = "ollama";   // ollama / openai
+    public string Provider { get; set; } = "openai-compatible";  // 备注字段（兼容服务名）
     public string Model { get; set; } = "nomic-embed-text";
     public int Dimensions { get; set; } = 768;          // 向量维度
-    public string ApiEndpoint { get; set; } = "http://localhost:11434";
+    public string ApiEndpoint { get; set; } = "http://localhost:11434/v1";  // 兼容服务端点
     public float SearchThreshold { get; set; } = 0.7f;  // 默认相似度阈值
 }
 
 class LlmCfg
 {
-    public string Provider { get; set; } = "deepseek"; // deepseek / openai
+    public string Provider { get; set; } = "openai-compatible";  // 备注字段（兼容服务名）
     public string Model { get; set; } = "deepseek-chat";
     public string ApiEndpoint { get; set; } = "https://api.deepseek.com/v1";
 }
@@ -1750,7 +1945,7 @@ class SearchHit
     public float Score { get; set; }
 }
 
-// ═══════════ 自定义异常 ═══════════
+// ══════════ 自定义异常 ══════════
 class AiException : Exception
 {
     public string Code { get; }

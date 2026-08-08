@@ -90,6 +90,8 @@ rssreader --summary-all                   # 为所有未生成摘要的文章生
 - **Embedding 切换**：更换模型后维度变化会使旧向量失效，需执行 `--reindex`，程序会提醒
 - **安全提醒**：首次调用 AI 功能时输出安全提示，提醒妥善保管 API Key
 
+> 全局选项 `--ignoresafeannouncement`：加在任何 CLI 调用末尾，跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 使用），例如 `rssreader --search "AI" --json --ignoresafeannouncement`。
+
 #### 配置与密钥存储
 
 | 内容 | 存储位置 | 说明 |

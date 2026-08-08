@@ -5,17 +5,25 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>sip</AssemblyName>
+    <RootNamespace>Sip</RootNamespace>
     <DebugSymbols>false</DebugSymbols>
     <DebugType>none</DebugType>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="languages\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="CodeHollow.FeedReader" Version="1.2.6" />
     <PackageReference Include="DiffPlex" Version="1.7.2" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
     <PackageReference Include="ktsu.CredentialCache" Version="1.3.19" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0-preview.3.25171.6" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="SQLitePCLRaw.core" Version="3.0.3" />
+    <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 
 </Project>
