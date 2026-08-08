@@ -1414,12 +1414,10 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
 {
     int newCount = 0;
     int modifyCount = 0;
-    var newGuids = new List<string>();
 
     foreach (var item in newFeed.Items)
     {
         string guid = item.Id ?? item.Link ?? "";
-        newGuids.Add(guid);
 
         if (isNewFeed)
         {
@@ -1475,47 +1473,16 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
         }
     }
 
-    // 新源跳过删除检测（没有旧数据可比）
+    // 新源跳过修改检测（没有旧数据可比）
     if (isNewFeed)
     {
         Console.WriteLine(Lang.T("  新增 {0} 篇", newCount));
         return;
     }
 
-    // --- 检测被删文章：数据库里 Status='active' 的 Guid 不在新 RSS 列表里 → 作者删了 ---
-    var delCmd = conn.CreateCommand();
-    delCmd.CommandText = "SELECT Id, Guid, Title FROM Items WHERE FeedId = @fid AND Status = 'active'";
-    delCmd.Parameters.AddWithValue("@fid", feedId);
-
-    int deleteCount = 0;  // 被删计数
-    using (var delReader = delCmd.ExecuteReader())
-    {
-        var deletedIds = new List<long>();  // 先记下要标记的 Id
-        while (delReader.Read())
-        {
-            if (!newGuids.Contains(delReader.GetString(1)))  // Guid 不在新列表 → 被删
-            {
-                deletedIds.Add(delReader.GetInt64(0));       // 记下第 0 列：真实 Id
-                Console.WriteLine(Lang.T("  [已删除] {0} 作者删除了此文", delReader.GetString(2)));
-            }
-        }
-        delReader.Close();  // 关掉 reader 才能再 UPDATE
-
-        // 批量标记成 deleted
-        foreach (long delId in deletedIds)
-        {
-            var markCmd = conn.CreateCommand();
-            markCmd.CommandText = "UPDATE Items SET Status = 'deleted', ArchivedAt = @now WHERE Id = @id";
-            markCmd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
-            markCmd.Parameters.AddWithValue("@id", delId);
-            markCmd.ExecuteNonQuery();
-        }
-
-        deleteCount = deletedIds.Count;
-    }
-
-    // 汇总输出
-    Console.WriteLine(Lang.T("  新增 {0} 篇，修改 {1} 篇，删除 {2} 篇", newCount, modifyCount, deleteCount));
+    // 不检测删除：很多站点 RSS 只推最近 N 篇，老文章不在列表里不代表被删，
+    // 因此只跟踪新增与修改，避免把正常下架的文章误标为 deleted
+    Console.WriteLine(Lang.T("  新增 {0} 篇，修改 {1} 篇", newCount, modifyCount));
 }
 
 // ══════════ ShowDiff（Feed 级别）：纯文本比对，看旧 XML 和新 XML 有无差异 ══════════

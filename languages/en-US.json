@@ -86,6 +86,7 @@
   "时间戳已去除：{0} → {1} ": "Timestamp removed: {0} → {1} ",
   "  [已归档] {0} 作者修改了内容，旧版已保留": "  [archived] {0} author changed content, old version kept",
   "  新增 {0} 篇": "  {0} new",
+  "  新增 {0} 篇，修改 {1} 篇": "  {0} new, {1} modified",
   "  [已删除] {0} 作者删除了此文": "  [deleted] {0} author removed this article",
   "  新增 {0} 篇，修改 {1} 篇，删除 {2} 篇": "  {0} new, {1} modified, {2} deleted",
   "新旧 RSS 完全相同，无新增、删除或修改": "New and old RSS are identical, no changes",
