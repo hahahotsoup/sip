@@ -219,6 +219,7 @@
   "Y          生成文章摘要": "Y          summarize article",
   "H          显示本帮助": "H          show this help",
   "Q          退出": "Q          quit",
-  "→ / 空格    展开/收起订阅源": "→ / Space   expand/collapse feed",
-  "Enter      打开文章正文": "Enter      open article content"
+  "Enter      源:折叠/展开; 文章:打开正文": "Enter      feed: collapse/expand; article: open",
+  "← / →      切换树/正文": "← / →      switch tree/content",
+  "PageUp/Dn  上下翻页": "PageUp/Dn  page up/down"
 }

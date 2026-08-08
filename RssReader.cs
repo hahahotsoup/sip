@@ -22,6 +22,7 @@ using ktsu.CredentialCache;
 using ktsu.CredentialCache.Storage;
 using Terminal.Gui;
 using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
 using Terminal.Gui.Views;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Input;
@@ -200,7 +201,8 @@ void PrintHelp()
 
 // ══════════ TUI（Terminal.Gui 文件夹视图）═══════════
 // 布局：左侧订阅源+文章树（源为父节点，展开即见文章）/ 右侧正文预览 / 底部状态栏
-// 操作：↑↓ 选择，←→ 展开/收起，Enter 打开文章正文，F5 更新当前源，T 归档，R 去归档，D 删除源，Q 退出
+// 操作：↑↓ 选择，Enter 折叠/展开源或打开文章，←→ 切换树/正文，PageUp/PageDown 翻页，
+//       U 更新当前源，F6 全部更新，A 归档，R 去归档，X 删除，D 加源，S 搜索，Y 摘要，H 帮助，Q 退出
 #pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
 async Task<int> RunTui(string dbPath)
 {
@@ -495,8 +497,9 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("Y          生成文章摘要"),
                 Lang.T("H          显示本帮助"),
                 Lang.T("Q          退出"),
-                Lang.T("→ / 空格    展开/收起订阅源"),
-                Lang.T("Enter      打开文章正文"));
+                Lang.T("Enter      源:折叠/展开; 文章:打开正文"),
+                Lang.T("← / →      切换树/正文"),
+                Lang.T("PageUp/Dn  上下翻页"));
             var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -512,6 +515,42 @@ async Task<int> RunTui(string dbPath)
 
         // —— 事件绑定 ——
         tree.SelectionChanged += (s, e) => ShowSelectedContent();
+
+        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页
+        tree.KeyDown += (s, e) =>
+        {
+            var n = tree.SelectedObject;
+            if (e.KeyCode == KeyCode.Enter)
+            {
+                if (n != null && n.IsFeed) tree.Toggle(n);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.CursorRight)
+            {
+                if (n is { IsFeed: false }) contentView.SetFocus();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.PageUp)
+            {
+                tree.MovePageUp(false);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.PageDown)
+            {
+                tree.MovePageDown(false);
+                e.Handled = true;
+            }
+        };
+
+        // 正文栏：← 返回树
+        contentView.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == KeyCode.CursorLeft)
+            {
+                tree.SetFocus();
+                e.Handled = true;
+            }
+        };
 
         RebuildTree();
         tree.ExpandAll();
