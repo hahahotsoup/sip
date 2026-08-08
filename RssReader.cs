@@ -1285,7 +1285,7 @@ void DeleteFeed(int displayNum, string dbPath)
     reader.Close();
 
     Console.Write(Lang.T("确定删除 {0} 及其 {1} 篇文章？(y/n)", title, itemCount));
-    if (Console.ReadLine()!.ToLower() != "y")
+    if (!"y".Equals(Console.ReadLine()?.Trim().ToLower()))
     {
         Console.WriteLine(Lang.T("已取消"));
         return;
