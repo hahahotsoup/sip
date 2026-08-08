@@ -325,6 +325,7 @@ async Task<int> RunTui(string dbPath)
         var statusBar = new StatusBar(new Shortcut[]
         {
             new Shortcut(Key.H, Lang.T("帮助"), () => ShowHelpDialog(), Lang.T("查看全部快捷键")),
+            new Shortcut(Key.F2, Lang.T("关于"), () => ShowAboutDialog(), Lang.T("关于 sip")),
             new Shortcut(Key.U, Lang.T("更新"), () => RefreshSelectedFeed(), Lang.T("下载更新当前源 (同 CLI -u)")),
             new Shortcut(Key.F6, Lang.T("全部更新"), () => RefreshAllFeeds(), Lang.T("下载更新所有源")),
             new Shortcut(Key.A, Lang.T("归档"), () => ArchiveSelectedFeed(), Lang.T("给当前源加时间戳 (同 CLI -a)")),
@@ -650,6 +651,39 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("PageUp/Dn  上下翻页"),
                 "",
                 Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / g / y / q"));
+            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
+            var about = new Button { Text = Lang.T("关于"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
+            dlg.Add(txt, ok, about);
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            about.Accepted += (s, e) => { dlg.RequestStop(); ShowAboutDialog(); };
+            Application.Run(dlg);
+        }
+
+        void ShowAboutDialog()
+        {
+            var dlg = new Dialog { Title = " " + Lang.T("关于") + " ", Width = 60, Height = 18 };
+            var txt = new TextView
+            {
+                X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
+                ReadOnly = true, WordWrap = true
+            };
+            txt.Text = string.Join("\n",
+                "🍲 sip",
+                "",
+                "——「品，你细品。」",
+                "",
+                "一个让你站着把信息喝了的 RSS 阅读器核心。",
+                "",
+                "功能：文件夹视图 TUI + 全功能 CLI",
+                "      · 全文搜索  --grep / 语义搜索 --search",
+                "      · 版本追踪 / 快照归档 / AI 摘要",
+                "      · 多语言（languages/*.json）",
+                "",
+                "作者：hahahotsoup with ❤",
+                "thanks to deepseek + opencode",
+                "",
+                "博客：https://blog.hotsouprealm.top/atom.xml",
+                "关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾");
             var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();

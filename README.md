@@ -76,6 +76,7 @@ dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 | `Y` | 给当前文章生成摘要（同 CLI `--summary`） |
 | `G` | 切换「完整正文 / 文章概要」（概要含 RSS 摘要 + AI 摘要） |
 | `H` | 快捷键帮助 |
+| `F2` | 关于页（About，含项目介绍与博客链接） |
 | `Esc` | 唤出底部命令行，输入指令后 `Enter` 执行、再按 `Esc` 关闭 |
 | `Ctrl+O` | 正文栏进入/退出「链接导航模式」，`Tab`/`Shift+Tab` 或 `↑↓` 切换链接，`Enter` 打开，`Esc` 退出 |
 | `Q` | 退出程序 |
