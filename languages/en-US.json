@@ -254,5 +254,11 @@
   "打开": "Open",
   "打开链接失败：{0}": "Failed to open link: {0}",
   "当前文章没有可打开的链接": "This article has no openable links",
-  "图片": "Image"
+  "图片": "Image",
+  "AI 摘要": "AI Summary",
+  "RSS 摘要": "RSS Summary",
+  "概要": "Overview",
+  "切换正文/概要": "Toggle content/overview",
+  "（无摘要，按 G 查看完整正文）": "(No summary, press G for full content)",
+  "G          切换正文/概要": "G          toggle content/overview"
 }

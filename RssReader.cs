@@ -312,6 +312,11 @@ async Task<int> RunTui(string dbPath)
             Height = Dim.Fill(),
         };
 
+        // 正文/概要模式 + 链接导航状态（供状态栏快捷键引用）
+        bool contentMode = true;     // true=完整正文，false=文章概要
+        bool linkNavMode = false;
+        int linkNavIndex = 0;
+
         // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
         var statusBar = new StatusBar(new Shortcut[]
         {
@@ -324,6 +329,7 @@ async Task<int> RunTui(string dbPath)
             new Shortcut(Key.D, Lang.T("加源"), () => AddFeedDialog(), Lang.T("添加新订阅源 (同 CLI -d)")),
             new Shortcut(Key.S, Lang.T("搜索"), () => SearchDialog(), Lang.T("语义搜索 (同 CLI --search)")),
             new Shortcut(Key.Y, Lang.T("摘要"), () => SummarizeSelected(), Lang.T("给当前文章生成摘要 (同 CLI --summary)")),
+            new Shortcut(Key.G, Lang.T("概要"), () => ToggleContentMode(), Lang.T("切换正文/概要")),
             new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
         });
 
@@ -369,7 +375,7 @@ async Task<int> RunTui(string dbPath)
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate FROM Items WHERE Id = @id";
+            cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate, Summary FROM Items WHERE Id = @id";
             cmd.Parameters.AddWithValue("@id", n.ItemId);
             using var r = cmd.ExecuteReader();
             if (r.Read())
@@ -379,9 +385,8 @@ async Task<int> RunTui(string dbPath)
                 string desc = r.IsDBNull(2) ? "" : r.GetString(2);
                 string link = r.IsDBNull(3) ? "" : r.GetString(3);
                 string pub = r.IsDBNull(4) ? "" : r.GetString(4);
-                string body = string.IsNullOrWhiteSpace(content) ? desc : content;
-                body = HtmlToMarkdown(body, contentView.GetContentWidth());
-                // 标题加粗高对比，标题下紧跟分隔线，元信息用斜体
+                string aiSummary = r.IsDBNull(5) ? "" : r.GetString(5);
+
                 var md = new StringBuilder();
                 md.AppendLine($"# **{EscapeMd(title)}**");
                 md.AppendLine();
@@ -395,7 +400,37 @@ async Task<int> RunTui(string dbPath)
                     md.AppendLine("---");
                     md.AppendLine();
                 }
-                md.Append(body);
+
+                if (contentMode)
+                {
+                    // 完整正文模式
+                    string body = string.IsNullOrWhiteSpace(content) ? desc : content;
+                    body = HtmlToMarkdown(body, contentView.GetContentWidth());
+                    md.Append(body);
+                }
+                else
+                {
+                    // 概要模式：AI 摘要 + RSS 摘要
+                    if (!string.IsNullOrWhiteSpace(aiSummary))
+                    {
+                        md.AppendLine("## " + Lang.T("AI 摘要"));
+                        md.AppendLine();
+                        md.AppendLine(EscapeMd(aiSummary));
+                        md.AppendLine();
+                        md.AppendLine("---");
+                        md.AppendLine();
+                    }
+                    if (!string.IsNullOrWhiteSpace(desc))
+                    {
+                        md.AppendLine("## " + Lang.T("RSS 摘要"));
+                        md.AppendLine();
+                        md.Append(HtmlToMarkdown(desc, contentView.GetContentWidth()));
+                    }
+                    else
+                    {
+                        md.Append(Lang.T("（无摘要，按 G 查看完整正文）"));
+                    }
+                }
                 contentView.Text = md.ToString();
             }
         }
@@ -608,6 +643,7 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("D          添加新订阅源"),
                 Lang.T("S          语义搜索"),
                 Lang.T("Y          生成文章摘要"),
+                Lang.T("G          切换正文/概要"),
                 Lang.T("Esc        唤出命令行"),
                 Lang.T("H          显示本帮助"),
                 Lang.T("Q          退出"),
@@ -628,10 +664,6 @@ async Task<int> RunTui(string dbPath)
             var btns = buttons.Length > 0 ? buttons : new[] { Lang.T("确定") };
             return MessageBox.Query(Application.Instance, Lang.T("提示"), message, btns) ?? 0;
         }
-
-        // 链接导航状态
-        bool linkNavMode = false;
-        int linkNavIndex = 0;
 
         // 在浏览器/默认程序中打开链接
         void OpenUrl(string url)
@@ -670,7 +702,16 @@ async Task<int> RunTui(string dbPath)
             string extra = linkNavMode && TuiMdState.Links.Count > 0
                 ? $"  [ {linkNavIndex + 1}/{TuiMdState.Links.Count} ]  {TuiMdState.Links[linkNavIndex].Text}"
                 : "";
-            contentView.Title = " " + Lang.T("正文") + (linkNavMode ? " (链接模式)" : "") + extra + " ";
+            string modeTag = contentMode ? Lang.T("正文") : Lang.T("概要");
+            contentView.Title = " " + modeTag + (linkNavMode ? " (链接模式)" : "") + extra + " ";
+        }
+
+        void ToggleContentMode()
+        {
+            contentMode = !contentMode;
+            UpdateLinkNavTitle();
+            ShowSelectedContent();
+            contentView.SetFocus();
         }
 
         void OpenCurrentLink()
@@ -768,6 +809,13 @@ async Task<int> RunTui(string dbPath)
                     else if (e.IsCtrl && e.KeyCode == (KeyCode.Tab | KeyCode.CtrlMask))
                     {
                         if (linkNavMode) CycleLink(1);
+                        e.Handled = true;
+                    }
+                    else if (e.KeyCode == KeyCode.G && !e.IsCtrl)
+                    {
+                        // G：切换「完整正文 / 文章概要」
+                        contentMode = !contentMode;
+                        ShowSelectedContent();
                         e.Handled = true;
                     }
                     break;
