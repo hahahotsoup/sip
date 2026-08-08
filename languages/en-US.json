@@ -248,5 +248,11 @@
   "没有需要向量化的文章": "No articles to embed",
   "命令行指令: init / index / reindex / u / d / a / r / s / y / q": "Commands: init / index / reindex / u / d / a / r / s / y / q",
   "正在向量化 {0} 篇文章...": "Embedding {0} articles...",
-  "正在重新向量化 {0} 篇文章...": "Re-embedding {0} articles..."
+  "正在重新向量化 {0} 篇文章...": "Re-embedding {0} articles...",
+  "【加载失败】": "[Load failed]",
+  "打开链接？\n{0}\n{1}": "Open link?\n{0}\n{1}",
+  "打开": "Open",
+  "打开链接失败：{0}": "Failed to open link: {0}",
+  "当前文章没有可打开的链接": "This article has no openable links",
+  "图片": "Image"
 }

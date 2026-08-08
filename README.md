@@ -1,6 +1,6 @@
 # sip（hahahotsoup's rss reader）
 
-一个本地 RSS 订阅源管理工具，支持**版本追踪**、**快照归档**和**文章变化检测**，提供**三栏 TUI 界面**和**全功能 CLI**两种用法，并支持**多语言（语言文件可定制翻译）**。
+一个本地 RSS 订阅源管理工具，支持**版本追踪**、**快照归档**和**文章变化检测**，提供**文件夹视图 TUI** 和**全功能 CLI**两种用法，并支持**多语言（语言文件可定制翻译）**。
 
 ## 功能
 
@@ -51,7 +51,7 @@ dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 └──────────────────────────────────────────────┘
 ```
 
-左侧是**订阅源 + 文章合并的树形视图**：订阅源是父节点，`→`/空格展开后即可看到该源的所有文章，像浏览文件夹一样。选中文章时右侧显示正文预览。
+左侧是**订阅源 + 文章合并的树形视图**：订阅源是父节点（`▶`/`▼` 展开收起），展开后看到该源的所有文章，像浏览文件夹一样。选中文章时右侧**用 Markdown 渲染正文**——HTML 自动转为 Markdown，标题/粗体/斜体/删除线/分隔线/列表/链接/代码块都能正确显示样式。
 
 | 操作 | 说明 |
 |------|------|
@@ -69,7 +69,10 @@ dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 | `Y` | 给当前文章生成摘要（同 CLI `--summary`） |
 | `H` | 快捷键帮助 |
 | `Esc` | 唤出底部命令行，输入指令后 `Enter` 执行、再按 `Esc` 关闭 |
+| `Ctrl+O` | 正文栏进入/退出「链接导航模式」，`Tab`/`Shift+Tab` 或 `↑↓` 切换链接，`Enter` 打开，`Esc` 退出 |
 | `Q` | 退出程序 |
+
+> 正文区用 **Markdown 渲染**：HTML 自动转成 Markdown，标题/粗体/斜体/删除线/分隔线/列表/链接/代码都带真实样式；`<br>` 正确换行，代码块保留缩进（段落不做自动缩进，避免与原文排版打架）。图片（`<img>`）会转成可点击链接 `[🖼️ 图片](url)`（Windows Terminal 不支持终端内嵌图片，可用链接导航或鼠标点击在浏览器打开）；鼠标点击正文中的链接，或按 `Ctrl+O` 进入链接导航模式后按 `Enter`，即可在浏览器中打开。
 
 **底部命令行**：按 `Esc` 唤出（平时隐藏），可直接输入与 CLI 相同的命令，例如：
 
@@ -232,7 +235,7 @@ CLI 会输出文章差异（新增/修改），并把源与文章写入数据库
 - [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite)
 - [CodeHollow.FeedReader](https://github.com/arminreiter/FeedReader)（RSS/Atom 解析）
 - [DiffPlex](https://github.com/mmanela/diffplex)（文本差异比较）
-- [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui)（三栏 TUI 界面）
+- [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui)（文件夹视图 TUI）
 - [HtmlAgilityPack](https://html-agility-pack.net/)（正文 HTML → 纯文本）
 - [ktsu.CredentialCache](https://www.nuget.org/packages/ktsu.CredentialCache)（系统原生凭据库存取 API Key）
 - Embedding / LLM：兼容 OpenAI 接口（本地 Ollama、DeepSeek、OpenAI 等）

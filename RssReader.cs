@@ -216,7 +216,7 @@ async Task<int> RunTui(string dbPath)
             X = 0,
             Y = 0,
             Width = Dim.Percent(30),
-            Height = Dim.Fill() - 2,
+            Height = Dim.Fill() - 3,
             CanFocus = true,
             BorderStyle = LineStyle.Single,
             Title = " " + Lang.T("订阅源") + " "
@@ -226,21 +226,60 @@ async Task<int> RunTui(string dbPath)
             canExpand: n => n.IsFeed
         );
         tree.AspectGetter = n => n.Title;
-
-        // —— 右侧：正文预览（占满剩余空间）——
-        var contentView = new TextView
+        // 树样式：展开/收起图标 + 分支线
+        tree.Style = new TreeStyle
         {
-            X = Pos.Right(tree),
+            ExpandableSymbol = new Rune('▶'),
+            CollapseableSymbol = new Rune('▼'),
+            ShowBranchLines = true,
+            InvertExpandSymbolColors = true
+        };
+
+        // —— 中间垂直分隔线 ——
+        var vDivider = new Line
+        {
+            Orientation = Orientation.Vertical,
+            Style = LineStyle.Single,
+            X = Pos.Right(tree) + 1,
+            Y = 0,
+            Height = Dim.Fill() - 3
+        };
+
+        // —— 右侧：正文预览（Markdown 渲染：标题/粗体/斜体/删除线/分隔线/列表/图片）——
+        var contentView = new Markdown
+        {
+            X = Pos.Right(tree) + 2,
             Y = 0,
             Width = Dim.Fill(),
-            Height = Dim.Fill() - 2,
+            Height = Dim.Fill() - 3,
             CanFocus = true,
-            ReadOnly = true,
-            WordWrap = true,
-            ScrollBars = true,
             BorderStyle = LineStyle.Single,
-            Title = " " + Lang.T("正文") + " "
+            Title = " " + Lang.T("正文") + " ",
+            ShowHeadingPrefix = false,
+            UseThemeBackground = true,
+            EnableSixelImages = true,
+            ImageLoader = MarkdownImageLoader
         };
+        // 高对比配色：标题/强调用亮黄，正文白色，标签用亮青
+        contentView.SetScheme(new Scheme
+        {
+            Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+            HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
+            Active = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
+            HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
+            Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
+            HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.DarkBlue),
+            Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            ReadOnly = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+            Code = new Terminal.Gui.Drawing.Attribute(StandardColor.Green, StandardColor.Black),
+            CodeString = new Terminal.Gui.Drawing.Attribute(StandardColor.Yellow, StandardColor.Black),
+            CodeComment = new Terminal.Gui.Drawing.Attribute(StandardColor.Gray, StandardColor.Black)
+        });
+        // 软换行当硬换行 + 启用删除线（~~ 需要 UseEmphasisExtras）
+        var pipeBuilder = new Markdig.MarkdownPipelineBuilder();
+        Markdig.MarkdownExtensions.UseSoftlineBreakAsHardlineBreak(pipeBuilder);
+        Markdig.MarkdownExtensions.UseEmphasisExtras(pipeBuilder, Markdig.Extensions.EmphasisExtras.EmphasisExtraOptions.Strikethrough);
+        contentView.MarkdownPipeline = pipeBuilder.Build();
 
         // 底部命令行：平时隐藏，按 Esc 唤出，Enter 执行后隐藏，再按 Esc 隐藏
         var cmdBar = new TextField
@@ -341,8 +380,23 @@ async Task<int> RunTui(string dbPath)
                 string link = r.IsDBNull(3) ? "" : r.GetString(3);
                 string pub = r.IsDBNull(4) ? "" : r.GetString(4);
                 string body = string.IsNullOrWhiteSpace(content) ? desc : content;
-                body = StripHtml(body);
-                contentView.Text = $"{title}\n\n{link}\n{pub}\n\n{body}";
+                body = HtmlToMarkdown(body, contentView.GetContentWidth());
+                // 标题加粗高对比，标题下紧跟分隔线，元信息用斜体
+                var md = new StringBuilder();
+                md.AppendLine($"# **{EscapeMd(title)}**");
+                md.AppendLine();
+                md.AppendLine("---");
+                md.AppendLine();
+                if (!string.IsNullOrWhiteSpace(link)) md.AppendLine($"*{EscapeMd(link)}*");
+                if (!string.IsNullOrWhiteSpace(pub)) md.AppendLine($"*{EscapeMd(pub)}*");
+                if (!string.IsNullOrWhiteSpace(link) || !string.IsNullOrWhiteSpace(pub))
+                {
+                    md.AppendLine();
+                    md.AppendLine("---");
+                    md.AppendLine();
+                }
+                md.Append(body);
+                contentView.Text = md.ToString();
             }
         }
 
@@ -575,8 +629,67 @@ async Task<int> RunTui(string dbPath)
             return MessageBox.Query(Application.Instance, Lang.T("提示"), message, btns) ?? 0;
         }
 
+        // 链接导航状态
+        bool linkNavMode = false;
+        int linkNavIndex = 0;
+
+        // 在浏览器/默认程序中打开链接
+        void OpenUrl(string url)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true
+                };
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                Ask(Lang.T("打开链接失败：{0}", ex.Message), Lang.T("确定"));
+            }
+        }
+
+        // 进入/退出链接导航模式
+        void ToggleLinkNav()
+        {
+            if (TuiMdState.Links.Count == 0)
+            {
+                Ask(Lang.T("当前文章没有可打开的链接"), Lang.T("确定"));
+                return;
+            }
+            linkNavMode = !linkNavMode;
+            linkNavIndex = 0;
+            UpdateLinkNavTitle();
+            if (linkNavMode) contentView.SetFocus();
+        }
+
+        void UpdateLinkNavTitle()
+        {
+            string extra = linkNavMode && TuiMdState.Links.Count > 0
+                ? $"  [ {linkNavIndex + 1}/{TuiMdState.Links.Count} ]  {TuiMdState.Links[linkNavIndex].Text}"
+                : "";
+            contentView.Title = " " + Lang.T("正文") + (linkNavMode ? " (链接模式)" : "") + extra + " ";
+        }
+
+        void OpenCurrentLink()
+        {
+            if (!linkNavMode || TuiMdState.Links.Count == 0) return;
+            var (text, url) = TuiMdState.Links[linkNavIndex];
+            int ans = Ask(Lang.T("打开链接？\n{0}\n{1}", text, url), Lang.T("打开"), Lang.T("取消"));
+            if (ans == 0) OpenUrl(url);
+        }
+
         // —— 事件绑定 ——
         tree.SelectionChanged += (s, e) => ShowSelectedContent();
+
+        // 鼠标点击正文中的链接直接打开
+        contentView.LinkClicked += (s, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(e.Url)) OpenUrl(e.Url);
+            e.Handled = true;
+        };
 
         // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；Esc 唤出命令行
         tree.KeyDown += (s, e) =>
@@ -609,21 +722,24 @@ async Task<int> RunTui(string dbPath)
             }
         };
 
-        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；Esc 唤出命令行
+        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；Esc 唤出命令行；
+        // 链接导航：Ctrl+O 进入/退出，Tab/Shift+Tab 切换链接，Enter 打开当前链接
         contentView.KeyDown += (s, e) =>
         {
             switch (e.KeyCode)
             {
                 case KeyCode.CursorLeft:
-                    tree.SetFocus();
+                    if (!linkNavMode) { tree.SetFocus(); }
                     e.Handled = true;
                     break;
                 case KeyCode.CursorUp:
-                    contentView.ScrollVertical(-1);
+                    if (linkNavMode) { CycleLink(-1); }
+                    else contentView.ScrollVertical(-1);
                     e.Handled = true;
                     break;
                 case KeyCode.CursorDown:
-                    contentView.ScrollVertical(1);
+                    if (linkNavMode) { CycleLink(1); }
+                    else contentView.ScrollVertical(1);
                     e.Handled = true;
                     break;
                 case KeyCode.PageUp:
@@ -634,12 +750,36 @@ async Task<int> RunTui(string dbPath)
                     contentView.ScrollVertical(6);
                     e.Handled = true;
                     break;
-                case KeyCode.Esc:
-                    ShowCmdBar();
+                case KeyCode.Enter:
+                    if (linkNavMode) OpenCurrentLink();
                     e.Handled = true;
+                    break;
+                case KeyCode.Esc:
+                    if (linkNavMode) { linkNavMode = false; UpdateLinkNavTitle(); }
+                    else ShowCmdBar();
+                    e.Handled = true;
+                    break;
+                default:
+                    if (e.IsCtrl && e.KeyCode == (KeyCode.O | KeyCode.CtrlMask))
+                    {
+                        ToggleLinkNav();
+                        e.Handled = true;
+                    }
+                    else if (e.IsCtrl && e.KeyCode == (KeyCode.Tab | KeyCode.CtrlMask))
+                    {
+                        if (linkNavMode) CycleLink(1);
+                        e.Handled = true;
+                    }
                     break;
             }
         };
+
+        void CycleLink(int dir)
+        {
+            if (TuiMdState.Links.Count == 0) return;
+            linkNavIndex = (linkNavIndex + dir + TuiMdState.Links.Count) % TuiMdState.Links.Count;
+            UpdateLinkNavTitle();
+        }
 
         void ShowCmdBar()
         {
@@ -941,11 +1081,172 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
             "deleted" => Lang.T("[删]"),
             _ => "[?]"
         };
-        nodes.Add(new TuiNode { IsFeed = false, FeedId = feedId, ItemId = id, Title = $"{tag} v{version} | {title}" });
+        nodes.Add(new TuiNode { IsFeed = false, FeedId = feedId, ItemId = id, Status = status, Title = $"{tag} v{version} | {title}" });
     }
     return nodes;
 }
 
+
+// 从 URL 加载图片字节供 Markdown 渲染（带简单内存缓存，失败返回 null）
+byte[]? MarkdownImageLoader(string url)
+{
+    try
+    {
+        if (TuiImageCache.Map.TryGetValue(url, out var cached)) return cached;
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        var bytes = client.GetByteArrayAsync(url).GetAwaiter().GetResult();
+        if (bytes.Length == 0) return null;
+        TuiImageCache.Map[url] = bytes;
+        return bytes;
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+// HTML 正文转 Markdown（保留标题/粗体/斜体/删除线/分隔线/列表/代码/图片，供 TUI Markdown 渲染）
+string HtmlToMarkdown(string html, int imageWidth = 80)
+{
+    TuiMdState.Links.Clear();
+    TuiMdState.ImageWidth = imageWidth;
+    if (string.IsNullOrWhiteSpace(html)) return "";
+    try
+    {
+        var doc = new HtmlAgilityPack.HtmlDocument();
+        doc.LoadHtml(html);
+        var sb = new StringBuilder();
+        WalkHtml(doc.DocumentNode, sb, 0);
+        var text = sb.ToString();
+        text = Regex.Replace(text, @"[ \t]{2,}", " ");
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
+        // 只去掉首尾换行（不 Trim 空白，保留原文空格）
+        return System.Net.WebUtility.HtmlDecode(text).Trim('\n', '\r');
+    }
+    catch
+    {
+        return StripHtml(html);
+    }
+}
+
+void WalkHtml(HtmlAgilityPack.HtmlNode node, StringBuilder sb, int listDepth)
+{
+    if (node.NodeType == HtmlAgilityPack.HtmlNodeType.Text)
+    {
+        sb.Append(node.InnerText);
+        return;
+    }
+    string name = node.Name;
+    switch (name)
+    {
+        case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
+            int level = name[1] - '0';
+            sb.Append('\n').Append(new string('#', level)).Append(' ');
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append('\n');
+            return;
+        case "p":
+            // 段落不做首行缩进（博客原文通常没有缩进，避免格式打架）
+            sb.Append('\n');
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("\n\n");
+            return;
+        case "div": case "section": case "article":
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("\n\n");
+            return;
+        case "blockquote":
+            // 引用块也不加缩进（与段落一致）
+            sb.Append('\n');
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("\n\n");
+            return;
+        case "br":
+            // 保持单换行：依赖 UseSoftlineBreakAsHardlineBreak 管道渲染为硬换行，
+            // 避免 \n\n 切断跨 <br> 的删除线/加粗标记、丢失段内缩进
+            sb.Append('\n');
+            return;
+        case "hr":
+            sb.Append("\n---\n");
+            return;
+        case "strong": case "b":
+            sb.Append("**");
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("**");
+            return;
+        case "em": case "i":
+            sb.Append('*');
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append('*');
+            return;
+        case "del": case "s": case "strike":
+            sb.Append("~~");
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("~~");
+            return;
+        case "u":
+            sb.Append("__");
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append("__");
+            return;
+        case "code":
+            sb.Append('`').Append(node.InnerText).Append('`');
+            return;
+        case "pre":
+            sb.Append("\n```\n").Append(node.InnerText).Append("\n```\n");
+            return;
+        case "a":
+            string href = node.GetAttributeValue("href", "");
+            var linkText = new StringBuilder();
+            foreach (var c in node.ChildNodes) WalkHtml(c, linkText, listDepth);
+            string ltxt = System.Net.WebUtility.HtmlDecode(linkText.ToString().Trim());
+            if (!string.IsNullOrWhiteSpace(ltxt) && !string.IsNullOrWhiteSpace(href))
+                TuiMdState.Links.Add((ltxt, href));
+            sb.Append('[').Append(linkText).Append(']').Append('(').Append(EscapeMdUrl(href)).Append(')');
+            return;
+        case "img":
+            string alt2 = node.GetAttributeValue("alt", "");
+            string src2 = node.GetAttributeValue("src", "");
+            if (!string.IsNullOrWhiteSpace(src2))
+            {
+                // Windows Terminal 等终端不支持 Sixel/kitty 内嵌图片，
+                // 统一转成可点击链接，用链接导航模式/Ctrl+O 或鼠标点击在浏览器打开
+                string label = string.IsNullOrWhiteSpace(alt2) ? Lang.T("图片") : alt2;
+                sb.Append('[').Append("🖼️ ").Append(label).Append(']').Append('(').Append(EscapeMdUrl(src2)).Append(')');
+            }
+            return;
+        case "ul": case "ol":
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth + 1);
+            sb.Append('\n');
+            return;
+        case "li":
+            sb.Append('\n').Append(new string(' ', listDepth * 2)).Append("- ");
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            return;
+        case "tr":
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append('\n');
+            return;
+        case "td": case "th":
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append(" | ");
+            return;
+        case "table":
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            sb.Append('\n');
+            return;
+        case "script": case "style": case "head": case "nav": case "footer": case "aside":
+            return;  // 丢弃
+        default:
+            foreach (var c in node.ChildNodes) WalkHtml(c, sb, listDepth);
+            return;
+    }
+}
+
+// Markdown 转义标题/链接文本里的特殊字符
+string EscapeMd(string s) => s.Replace("\\", "\\\\").Replace("*", "\\*").Replace("#", "\\#").Replace("[", "\\[").Replace("]", "\\]").Replace("|", "\\|");
+
+string EscapeMdUrl(string s) => s.Replace(" ", "%20").Replace("(", "%28").Replace(")", "%29");
 
 // HTML 正文转纯文本（去标签、解实体，保留段落/换行）
 string StripHtml(string html)
@@ -2519,6 +2820,19 @@ static class AiState
     public static bool IgnoreAnnouncement = false;  // --ignoresafeannouncement：跳过安全横幅等多余输出
 }
 
+// TUI 图片缓存（URL → 字节）
+static class TuiImageCache
+{
+    public static readonly Dictionary<string, byte[]> Map = new();
+}
+
+// TUI Markdown 渲染过程状态（链接收集、图片宽度）
+static class TuiMdState
+{
+    public static List<(string Text, string Url)> Links = new();
+    public static int ImageWidth = 80;
+}
+
 // ══════════ 语言 / 本地化支持 ══════════
 // 用法：Lang.T("你好") / Lang.T("共有 {0} 篇", n)
 // 查找顺序：languages/<代码>.json（可定制翻译）→ 内置中文默认值 → 原样返回
@@ -2601,6 +2915,7 @@ class TuiNode
     public bool IsFeed { get; set; }    // true=订阅源父节点，false=文章叶子
     public int FeedId { get; set; }     // 归属源 Id（文章节点也带，便于操作）
     public long ItemId { get; set; }    // 文章 Id（源节点为 0）
+    public string Status { get; set; } = "active";  // 文章状态：active/archived/deleted
     public string Title { get; set; } = "";
 }
 
