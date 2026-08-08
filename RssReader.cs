@@ -505,7 +505,7 @@ async Task<int> RunTui(string dbPath)
 
         void ShowHelpDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " " };
+            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 18 };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
