@@ -240,5 +240,13 @@
   "向量维度:": "Vector dims: ",
   "正在向量化 {0} 篇文章，请稍候...": "Embedding {0} articles, please wait...",
   ":init      配置 AI": ":init      configure AI",
-  ":index     向量化当前源": ":index     embed current feed"
+  ":index     向量化当前源": ":index     embed current feed",
+  "处理中": "Working",
+  "  失败：{0}": "  failed: {0}",
+  "Esc        唤出命令行": "Esc        open command line",
+  "将删除现有全部向量并重新向量化所有 active 文章，确认？": "Delete all vectors and re-embed all active articles?",
+  "没有需要向量化的文章": "No articles to embed",
+  "命令行指令: init / index / reindex / u / d / a / r / s / y / q": "Commands: init / index / reindex / u / d / a / r / s / y / q",
+  "正在向量化 {0} 篇文章...": "Embedding {0} articles...",
+  "正在重新向量化 {0} 篇文章...": "Re-embedding {0} articles..."
 }

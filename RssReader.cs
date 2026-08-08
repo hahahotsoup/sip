@@ -242,7 +242,7 @@ async Task<int> RunTui(string dbPath)
             Title = " " + Lang.T("正文") + " "
         };
 
-        // 底部命令行（按 : 聚焦，Enter 执行，Esc 取消）
+        // 底部命令行：平时隐藏，按 Esc 唤出，Enter 执行后隐藏，再按 Esc 隐藏
         var cmdBar = new TextField
         {
             X = 1,
@@ -251,14 +251,16 @@ async Task<int> RunTui(string dbPath)
             Height = 1,
             CanFocus = true,
             Text = "",
-            Secret = false
+            Secret = false,
+            Visible = false
         };
         var cmdLabel = new Label
         {
             Text = ":",
             X = 0,
             Y = Pos.AnchorEnd(2),
-            CanFocus = false
+            CanFocus = false,
+            Visible = false
         };
 
         // 主窗口
@@ -418,12 +420,48 @@ async Task<int> RunTui(string dbPath)
             });
         }
 
-        // 网络操作阻塞 TUI 时显示提示，结束后重建树
+        // 网络/耗时操作：弹出居中进度对话框，把 Console 输出重定向到对话框内实时显示，
+        // 完成后自动关闭并重建树（不污染正文区）
         void RunNetworkOp(Action op)
         {
-            contentView.Text = Lang.T("处理中，请稍候...");
-            op();
-            contentView.Text = "";
+            var sb = new StringBuilder();
+            var outTxt = new TextView
+            {
+                X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
+                ReadOnly = true, WordWrap = true, ScrollBars = true
+            };
+            var dlg = new Dialog { Title = " " + Lang.T("处理中") + " ", Width = 64, Height = 18 };
+            dlg.Add(outTxt);
+
+            TextWriter oldOut = Console.Out;
+            var writer = new StringWriter(sb);
+            Console.SetOut(writer);
+            object lockObj = new();
+            bool done = false;
+
+            // 后台线程执行操作，避免卡住 UI 刷新
+            Task.Run(() =>
+            {
+                try { op(); }
+                catch (Exception ex) { lock (lockObj) sb.AppendLine(Lang.T("出错: {0}", ex.Message)); }
+                finally { lock (lockObj) { done = true; sb.AppendLine(); } }
+            });
+
+            // 定时把缓冲内容刷到对话框；完成后自动关闭
+            Application.AddTimeout(TimeSpan.FromMilliseconds(120), () =>
+            {
+                lock (lockObj) outTxt.Text = sb.ToString();
+                if (done)
+                {
+                    Console.SetOut(oldOut);
+                    dlg.RequestStop();
+                    return false;  // 停止定时器
+                }
+                return true;
+            });
+
+            Application.Run(dlg);  // 等后台完成
+            Console.SetOut(oldOut);
             RebuildTree();
         }
 
@@ -445,11 +483,7 @@ async Task<int> RunTui(string dbPath)
             Application.Run(dlg);
             string url = input.Text.Trim();
             if (string.IsNullOrWhiteSpace(url)) return;
-            RunNetworkOp(() =>
-            {
-                try { DownloadAndSaveToDb(url, dbPath).Wait(); }
-                catch (Exception ex) { contentView.Text = Lang.T("出错: {0}", ex.Message); }
-            });
+            RunNetworkOp(() => { DownloadAndSaveToDb(url, dbPath).Wait(); });
         }
 
         void SearchDialog()
@@ -498,14 +532,14 @@ async Task<int> RunTui(string dbPath)
                 Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
                 return;
             }
-            contentView.Text = Lang.T("正在生成摘要，请稍候...");
-            SummarizeItem(dbPath, (int)n.ItemId).Wait();
+            long itemId = n.ItemId;
+            RunNetworkOp(() => SummarizeItem(dbPath, (int)itemId).Wait());
             ShowSelectedContent();
         }
 
         void ShowHelpDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 20 };
+            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 22 };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
@@ -520,13 +554,14 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("D          添加新订阅源"),
                 Lang.T("S          语义搜索"),
                 Lang.T("Y          生成文章摘要"),
-                Lang.T(":init      配置 AI"),
-                Lang.T(":index     向量化当前源"),
+                Lang.T("Esc        唤出命令行"),
                 Lang.T("H          显示本帮助"),
                 Lang.T("Q          退出"),
                 Lang.T("Enter      源:折叠/展开; 文章:打开正文"),
                 Lang.T("← / →      切换树/正文"),
-                Lang.T("PageUp/Dn  上下翻页"));
+                Lang.T("PageUp/Dn  上下翻页"),
+                "",
+                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / y / q"));
             var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -543,7 +578,7 @@ async Task<int> RunTui(string dbPath)
         // —— 事件绑定 ——
         tree.SelectionChanged += (s, e) => ShowSelectedContent();
 
-        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；: 打开命令行
+        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；Esc 唤出命令行
         tree.KeyDown += (s, e) =>
         {
             var n = tree.SelectedObject;
@@ -567,14 +602,14 @@ async Task<int> RunTui(string dbPath)
                 tree.MovePageDown(false);
                 e.Handled = true;
             }
-            else if (e.AsRune.Value == ':')
+            else if (e.KeyCode == KeyCode.Esc)
             {
-                cmdBar.SetFocus();
+                ShowCmdBar();
                 e.Handled = true;
             }
         };
 
-        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；: 打开命令行
+        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；Esc 唤出命令行
         contentView.KeyDown += (s, e) =>
         {
             switch (e.KeyCode)
@@ -599,31 +634,43 @@ async Task<int> RunTui(string dbPath)
                     contentView.ScrollVertical(6);
                     e.Handled = true;
                     break;
-                default:
-                    if (e.AsRune.Value == ':')
-                    {
-                        cmdBar.SetFocus();
-                        e.Handled = true;
-                    }
+                case KeyCode.Esc:
+                    ShowCmdBar();
+                    e.Handled = true;
                     break;
             }
         };
 
-        // 命令行：Enter 执行，Esc 返回树
+        void ShowCmdBar()
+        {
+            cmdBar.Visible = true;
+            cmdLabel.Visible = true;
+            cmdBar.Text = "";
+            cmdBar.SetFocus();
+        }
+
+        void HideCmdBar()
+        {
+            cmdBar.Visible = false;
+            cmdLabel.Visible = false;
+            cmdBar.Text = "";
+            tree.SetFocus();
+        }
+
+        // 命令行：Enter 执行，Esc 隐藏
         cmdBar.KeyDown += (s, e) =>
         {
             if (e.KeyCode == KeyCode.Enter)
             {
                 string input = cmdBar.Text.Trim();
                 cmdBar.Text = "";
-                tree.SetFocus();
+                HideCmdBar();
                 if (input.Length > 0) RunCommand(input);
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.Esc)
             {
-                cmdBar.Text = "";
-                tree.SetFocus();
+                HideCmdBar();
                 e.Handled = true;
             }
         };
@@ -677,6 +724,9 @@ async Task<int> RunTui(string dbPath)
                     return;
                 case "index" or "--index":
                     IndexSelectedFeed();
+                    return;
+                case "reindex" or "--reindex":
+                    ReindexAll();
                     return;
                 default:
                     Ask(Lang.T("未知命令: {0}，按 H 查看帮助", cmd), Lang.T("确定"));
@@ -784,25 +834,72 @@ async Task<int> RunTui(string dbPath)
 
             if (articles.Count == 0) { Ask(Lang.T("该源的文章都已向量化"), Lang.T("确定")); return; }
 
-            contentView.Text = Lang.T("正在向量化 {0} 篇文章，请稍候...", articles.Count);
-            int modelId = EnsureModel(dbPath, cfg.Embedding);
-            int ok = 0, fail = 0;
-            var sb = new StringBuilder();
-            foreach (var a in articles)
+            Console.WriteLine(Lang.T("正在向量化 {0} 篇文章...", articles.Count));
+            RunNetworkOp(() =>
             {
-                var vec = SafeEmbed(a.Title, cfg).GetAwaiter().GetResult();
-                if (vec == null) { fail++; continue; }
-                if (vec.Length != cfg.Embedding.Dimensions)
+                int modelId = EnsureModel(dbPath, cfg.Embedding);
+                int ok = 0, fail = 0;
+                foreach (var a in articles)
                 {
-                    cfg.Embedding.Dimensions = vec.Length;
-                    SaveConfig(dbPath, cfg);
+                    var vec = SafeEmbed(a.Title, cfg).GetAwaiter().GetResult();
+                    if (vec == null) { fail++; Console.WriteLine(Lang.T("  失败：{0}", a.Title)); continue; }
+                    if (vec.Length != cfg.Embedding.Dimensions)
+                    {
+                        cfg.Embedding.Dimensions = vec.Length;
+                        SaveConfig(dbPath, cfg);
+                    }
+                    SaveVector(dbPath, realId, a.Id, modelId, vec);
+                    ok++;
+                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, articles.Count));
                 }
-                SaveVector(dbPath, realId, a.Id, modelId, vec);
-                ok++;
+                Console.WriteLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
+            });
+        }
+
+        // TUI 内重新向量化全部（等价 CLI --reindex）：清空所有向量后重建
+        void ReindexAll()
+        {
+            if (!File.Exists(ConfigPath(dbPath)))
+            {
+                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                return;
             }
-            sb.AppendLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
-            contentView.Text = sb.ToString();
-            RebuildTree();
+            int ans = Ask(Lang.T("将删除现有全部向量并重新向量化所有 active 文章，确认？"), Lang.T("确定"), Lang.T("取消"));
+            if (ans != 0) return;
+
+            var cfg = LoadConfig(dbPath);
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM Vectors";
+            cmd.ExecuteNonQuery();
+            cmd.CommandText = "SELECT Id, FeedId, Title FROM Items WHERE Status = 'active'";
+            using var r = cmd.ExecuteReader();
+            var items = new List<(int Id, int FeedId, string Title)>();
+            while (r.Read()) items.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2)));
+
+            if (items.Count == 0) { Ask(Lang.T("没有需要向量化的文章"), Lang.T("确定")); return; }
+
+            Console.WriteLine(Lang.T("正在重新向量化 {0} 篇文章...", items.Count));
+            RunNetworkOp(() =>
+            {
+                int modelId = EnsureModel(dbPath, cfg.Embedding);
+                int ok = 0, fail = 0;
+                foreach (var it in items)
+                {
+                    var vec = SafeEmbed(it.Title, cfg).GetAwaiter().GetResult();
+                    if (vec == null) { fail++; continue; }
+                    if (vec.Length != cfg.Embedding.Dimensions)
+                    {
+                        cfg.Embedding.Dimensions = vec.Length;
+                        SaveConfig(dbPath, cfg);
+                    }
+                    SaveVector(dbPath, it.FeedId, it.Id, modelId, vec);
+                    ok++;
+                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, items.Count));
+                }
+                Console.WriteLine(Lang.T("重新索引完成：成功 {0}，失败 {1}", ok, fail));
+            });
         }
 
         RebuildTree();
