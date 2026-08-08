@@ -1,16 +1,16 @@
-# hahahotsoup's rss reader
+# sip（hahahotsoup's rss reader）
 
-一个本地 RSS 订阅源管理工具，支持**版本追踪**、**快照归档**和**文章变化检测**。
-
-服务于 hahahotsoup's rssreader，可以快速管理自己的 RSS 订阅源并归档化。
+一个本地 RSS 订阅源管理工具，支持**版本追踪**、**快照归档**和**文章变化检测**，提供**三栏 TUI 界面**和**全功能 CLI**两种用法，并支持**多语言（语言文件可定制翻译）**。
 
 ## 功能
 
+- **TUI 三栏界面**：左侧订阅源列表 / 右上文章列表 / 右下正文预览，底部状态栏一键操作
+- **CLI 全功能**：订阅、更新、归档、删除、AI 语义搜索与摘要全部支持命令行调用
 - **订阅管理**：添加、更新、删除 RSS 订阅源，所有数据存储在本地 SQLite 数据库中
 - **文章追踪**：自动检测文章的新增、修改和删除，修改/删除的文章会保留历史版本（带时间戳归档标记），不会丢失
-- **文章管理**：查看指定源的所有文章，支持永久删除（物理删除，不可恢复）
 - **快照归档**：对订阅源加时间戳归档，保留某一时刻的完整快照，归档后的源不会被后续更新覆盖
-- **CLI 参数**：支持命令行参数一键操作，也支持交互式菜单
+- **AI 能力**：Embedding 语义搜索（RAG）与 LLM 文章摘要，OpenAI 兼容接口（Ollama / DeepSeek / OpenAI 等）
+- **多语言**：用户界面文案全部外置到 `languages/*.json`，用 `--lang <代码>` 或 `LANG` 环境变量切换，可自行定制/翻译
 - **跨平台**：基于 .NET，数据存储为单个 `.db` 文件，Mac/Linux/Windows 均可运行
 
 ## 快速开始
@@ -24,50 +24,90 @@
 ```bash
 git clone https://github.com/hahahotsoup/rssreader-core.git
 cd rssreader-core
-dotnet build
-dotnet run
+dotnet build -c Release
+dotnet bin/Release/net10.0/sip.dll          # 进入 TUI 界面
+dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 ```
 
+程序名已从 `rssreader` 更名为 **`sip`**（输出为 `sip.exe`）。
+
 ## 使用说明
+
+### TUI 模式（无参数启动）
+
+直接运行 `sip`（不带任何参数）进入三栏 TUI：
+
+```
+┌───────────────┬──────────────────────────────┐
+│  订阅源        │  文章                        │
+│  Hacker News  │  [现] v1 | Apple Introduces…  │
+│  BBC 科技      │  [现] v1 | New Data Center…  │
+│               │                              │
+│               ├──────────────────────────────┤
+│               │  正文                        │
+│               │  …文章内容纯文本预览…          │
+├───────────────┴──────────────────────────────┤
+│  F5 更新 | T 归档 | R 去归档 | D 删除 | Q 退出 │
+└──────────────────────────────────────────────┘
+```
+
+| 操作 | 说明 |
+|------|------|
+| `↑` / `↓` | 在列表中选择（`Tab` / 方向键切换左右焦点） |
+| `Enter` | 选中订阅源 → 右侧显示其文章；选中文章 → 下方显示正文 |
+| `F5` | 下载更新当前选中的订阅源 |
+| `T` | 归档当前源（标题加时间戳） |
+| `R` | 去归档（去掉时间戳） |
+| `D` | 删除当前订阅源及其全部文章与向量 |
+| `Q` | 退出程序 |
 
 ### CLI 模式
 
 ```bash
-rssreader -l                  # 列出所有订阅源
-rssreader -d https://xxx/rss  # 下载新 RSS 源
-rssreader -u 1                # 更新第 1 个源
-rssreader -a 1                # 归档（加时间戳）
-rssreader -una 1              # 去归档
-rssreader -r 1                # 删除订阅源
-rssreader -h                  # 帮助
+sip -l                  # 列出所有订阅源
+sip -l 1                # 列出 1 号源的文章
+sip -d https://xxx/rss  # 下载新 RSS 源
+sip -u 1                # 更新第 1 个源
+sip -a 1                # 归档（加时间戳）
+sip -una 1              # 去归档
+sip -r 1                # 删除订阅源
+sip -h                  # 帮助
+sip --lang en-US -l     # 切换英文界面
 ```
 
 | 短参数 | 长参数 | 说明 |
 |--------|--------|------|
-| `-l` | `--list` | 列出所有订阅源 |
-| `-d` | `--download` | 下载新的 RSS 源 |
+| `-l` | `--list` | 列出所有订阅源；带编号则列出该源的文章（如 `-l 1`） |
+| `-d` | `--download` | 下载新的 RSS 源（URL 可省略 http/https 前缀，自动补全） |
 | `-u` | `--update` | 更新指定订阅源（编号） |
 | `-a` | `--archive` | 归档当前快照（加时间戳） |
 | `-una` | `--unarchive` | 去归档（检查同名冲突） |
-| `-r` | `--remove` | 删除订阅源及其全部文章 |
+| `-r` | `--remove` | 删除订阅源及其全部文章与向量 |
 | `-h` | `--help` | 显示帮助 |
 
-不带参数运行时进入交互式菜单（在菜单内输入订阅源编号即可查看该源的文章列表）。
+### 多语言（语言文件）
+
+所有用户可见文案都从 `languages/<代码>.json` 读取，键为中文原文、值为译文，缺失时回退原文。
+
+- 选择方式：`--lang <代码>` 参数 > `LANG` 环境变量 > 默认 `zh-CN`
+- 已内置：`languages/zh-CN.json`（中文）、`languages/en-US.json`（英文）
+- **定制翻译**：复制任意语言文件改名为 `languages/你的代码.json`，把值改成你的语言即可，例如 `languages/fr-FR.json` 用 `--lang fr-FR` 加载
+- 语言文件需与可执行文件同目录下的 `languages/` 文件夹（编译时自动复制）
 
 ### AI 命令（语义搜索 / 智能摘要）
 
 内置 AI 能力：**Embedding 向量化 + 语义搜索**（RAG）与 **LLM 文章摘要**，供 AI Agent 或人类通过同一套 CLI 使用。
 
 ```bash
-rssreader --init                          # 首次配置 AI（模型 + API Key，交互式）
-rssreader --config                        # 查看/修改 AI 配置
-rssreader --index                         # 对文章做 Embedding 向量化（交互式选择源）
-rssreader --reindex                       # 更换 Embedding 模型后重新向量化
-rssreader --search "LLM Agent"            # 语义搜索（返回命中文章 + 相似度）
-rssreader --search "RAG" --feed 1 --json  # 限定订阅源搜索，JSON 输出
-rssreader --summary 12                    # 为文章 12 生成摘要（保存到数据库）
-rssreader --summary feed:3                # 为订阅源 3 的全部文章生成摘要
-rssreader --summary-all                   # 为所有未生成摘要的文章生成摘要
+sip --init                          # 首次配置 AI（模型 + API Key，交互式）
+sip --config                        # 查看/修改 AI 配置
+sip --index                         # 对文章做 Embedding 向量化（交互式选择源）
+sip --reindex                       # 更换 Embedding 模型后重新向量化
+sip --search "LLM Agent"            # 语义搜索（返回命中文章 + 相似度）
+sip --search "RAG" --feed 1 --json  # 限定订阅源搜索，JSON 输出
+sip --summary 12                    # 为文章 12 生成摘要（保存到数据库）
+sip --summary feed:3                # 为订阅源 3 的全部文章生成摘要
+sip --summary-all                   # 为所有未生成摘要的文章生成摘要
 ```
 
 #### AI 命令详解
@@ -90,7 +130,7 @@ rssreader --summary-all                   # 为所有未生成摘要的文章生
 - **Embedding 切换**：更换模型后维度变化会使旧向量失效，需执行 `--reindex`，程序会提醒
 - **安全提醒**：首次调用 AI 功能时输出安全提示，提醒妥善保管 API Key
 
-> 全局选项 `--ignoresafeannouncement`：加在任何 CLI 调用末尾，跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 使用），例如 `rssreader --search "AI" --json --ignoresafeannouncement`。
+> 全局选项 `--ignoresafeannouncement`：加在任何 CLI 调用末尾，跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 使用），例如 `sip --search "AI" --json --ignoresafeannouncement`。
 
 #### 配置与密钥存储
 
@@ -119,47 +159,17 @@ rssreader --summary-all                   # 为所有未生成摘要的文章生
 | 摘要报「缺少 LLM API Key」 | 先 `--init` 录入密钥（存系统凭据库），或检查 `--config` |
 | 想让某篇重新摘要 | 清空该行 `Summary` 字段后再执行 `--summary` |
 
-### 交互模式
+### 下载新源
 
-启动后显示主菜单：
+TUI 模式下先用 `Q` 退出，再通过 CLI 添加订阅源：
 
-```
-A 看看已有订阅 | B 下载新RSS源 | Q 退出
-```
-
-#### 订阅管理（A 菜单）
-
-| 命令 | 示例 | 说明 |
-|------|------|------|
-| 输入编号 | `2` | 更新该订阅源，检测文章变化 |
-| `T 编号` | `T 1` | 归档当前快照（加时间戳） |
-| `R 编号` | `R 1` | 去归档（检查同名冲突） |
-| `D 编号` | `D 2` | 删除订阅源及其全部文章 |
-| `L 编号` | `L 1` | 查看订阅源的所有文章 |
-
-#### 文章管理（L 子菜单）
-
-进入后会列出该源所有文章，每篇有显示编号和状态标签：
-
-```
-── [1] xxx 的文章列表 ──
-  [1] [现] v1 | 如何学习 C#
-  [2] [旧] v1 | SQLite 入门指南
-  [3] [删] v1 | 已删除的文章
+```bash
+sip -d https://example.com/rss
 ```
 
-| 命令 | 示例 | 说明 |
-|------|------|------|
-| `D 编号` | `D 2` | 删除指定文章 |
-| `Q` | `Q` | 返回 A 菜单 |
+CLI 会输出文章差异（新增/修改/删除），并把源与文章写入数据库。URL 可省略 `http(s)://` 前缀，程序会自动补全；若补全的 https 连不上，会自动回退 http 重试一次。
 
-注意：
-- 文章编号在删除后**自动继位**（删掉 #2 后原来的 #3 变成 #2）
-- **物理删除不可恢复**，作者自动标记的 `[删]` 文章（软删除）也会被一并清掉
-
-#### 下载新源（B 菜单）
-
-直接输入 RSS 链接，自动下载、解析、存入数据库。
+下载/更新后若已配置 AI，会询问是否把该源的新文章加入语义搜索（可用 `sip --index` 稍后补做）。
 
 ### 文章归档机制
 
@@ -192,15 +202,20 @@ A 看看已有订阅 | B 下载新RSS源 | Q 退出
 - [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite)
 - [CodeHollow.FeedReader](https://github.com/arminreiter/FeedReader)（RSS/Atom 解析）
 - [DiffPlex](https://github.com/mmanela/diffplex)（文本差异比较）
+- [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui)（三栏 TUI 界面）
+- [HtmlAgilityPack](https://html-agility-pack.net/)（正文 HTML → 纯文本）
 - [ktsu.CredentialCache](https://www.nuget.org/packages/ktsu.CredentialCache)（系统原生凭据库存取 API Key）
 - Embedding / LLM：兼容 OpenAI 接口（本地 Ollama、DeepSeek、OpenAI 等）
 
 ## 项目结构
 
 ```
-├── Hahahotsoup.RssReader.Core.csproj
-├── RssReader.cs          # 全部代码（单文件）
-├── ai_config.json        # AI 非敏感配置（运行时生成）
+├── sip.csproj          # 项目文件（程序名 sip）
+├── RssReader.cs        # 全部代码（单文件）
+├── languages/          # 语言文件（zh-CN.json / en-US.json，可加自己的）
+│   ├── zh-CN.json
+│   └── en-US.json
+├── ai_config.json      # AI 非敏感配置（运行时生成）
 └── README.md
 ```
 
