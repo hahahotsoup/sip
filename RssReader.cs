@@ -257,7 +257,7 @@ async Task<int> RunTui(string dbPath)
             Title = " " + Lang.T("正文") + " ",
             ShowHeadingPrefix = false,
             UseThemeBackground = true,
-            EnableSixelImages = true,
+            EnableSixelImages = false,   // 图片已转链接，关闭 Sixel 管线避免重绘卡顿
             ImageLoader = MarkdownImageLoader
         };
         // 高对比配色：标题/强调用亮黄，正文白色，标签用亮青
