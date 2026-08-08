@@ -548,13 +548,31 @@ async Task<int> RunTui(string dbPath)
             }
         };
 
-        // 正文栏：← 返回树
+        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页
         contentView.KeyDown += (s, e) =>
         {
-            if (e.KeyCode == KeyCode.CursorLeft)
+            switch (e.KeyCode)
             {
-                tree.SetFocus();
-                e.Handled = true;
+                case KeyCode.CursorLeft:
+                    tree.SetFocus();
+                    e.Handled = true;
+                    break;
+                case KeyCode.CursorUp:
+                    contentView.ScrollVertical(-1);
+                    e.Handled = true;
+                    break;
+                case KeyCode.CursorDown:
+                    contentView.ScrollVertical(1);
+                    e.Handled = true;
+                    break;
+                case KeyCode.PageUp:
+                    contentView.ScrollVertical(-6);
+                    e.Handled = true;
+                    break;
+                case KeyCode.PageDown:
+                    contentView.ScrollVertical(6);
+                    e.Handled = true;
+                    break;
             }
         };
 
