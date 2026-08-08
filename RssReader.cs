@@ -216,7 +216,7 @@ async Task<int> RunTui(string dbPath)
             X = 0,
             Y = 0,
             Width = Dim.Percent(30),
-            Height = Dim.Fill() - 1,
+            Height = Dim.Fill() - 2,
             CanFocus = true,
             BorderStyle = LineStyle.Single,
             Title = " " + Lang.T("订阅源") + " "
@@ -233,13 +233,32 @@ async Task<int> RunTui(string dbPath)
             X = Pos.Right(tree),
             Y = 0,
             Width = Dim.Fill(),
-            Height = Dim.Fill() - 1,
+            Height = Dim.Fill() - 2,
             CanFocus = true,
             ReadOnly = true,
             WordWrap = true,
             ScrollBars = true,
             BorderStyle = LineStyle.Single,
             Title = " " + Lang.T("正文") + " "
+        };
+
+        // 底部命令行（按 : 聚焦，Enter 执行，Esc 取消）
+        var cmdBar = new TextField
+        {
+            X = 1,
+            Y = Pos.AnchorEnd(2),
+            Width = Dim.Fill(1),
+            Height = 1,
+            CanFocus = true,
+            Text = "",
+            Secret = false
+        };
+        var cmdLabel = new Label
+        {
+            Text = ":",
+            X = 0,
+            Y = Pos.AnchorEnd(2),
+            CanFocus = false
         };
 
         // 主窗口
@@ -267,7 +286,7 @@ async Task<int> RunTui(string dbPath)
             new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
         });
 
-        top.Add(tree, contentView, statusBar);
+        top.Add(tree, contentView, cmdLabel, cmdBar, statusBar);
 
         void RebuildTree()
         {
@@ -522,7 +541,7 @@ async Task<int> RunTui(string dbPath)
         // —— 事件绑定 ——
         tree.SelectionChanged += (s, e) => ShowSelectedContent();
 
-        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页
+        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；: 打开命令行
         tree.KeyDown += (s, e) =>
         {
             var n = tree.SelectedObject;
@@ -546,9 +565,14 @@ async Task<int> RunTui(string dbPath)
                 tree.MovePageDown(false);
                 e.Handled = true;
             }
+            else if (e.AsRune.Value == ':')
+            {
+                cmdBar.SetFocus();
+                e.Handled = true;
+            }
         };
 
-        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页
+        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；: 打开命令行
         contentView.KeyDown += (s, e) =>
         {
             switch (e.KeyCode)
@@ -573,8 +597,102 @@ async Task<int> RunTui(string dbPath)
                     contentView.ScrollVertical(6);
                     e.Handled = true;
                     break;
+                default:
+                    if (e.AsRune.Value == ':')
+                    {
+                        cmdBar.SetFocus();
+                        e.Handled = true;
+                    }
+                    break;
             }
         };
+
+        // 命令行：Enter 执行，Esc 返回树
+        cmdBar.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == KeyCode.Enter)
+            {
+                string input = cmdBar.Text.Trim();
+                cmdBar.Text = "";
+                tree.SetFocus();
+                if (input.Length > 0) RunCommand(input);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.Esc)
+            {
+                cmdBar.Text = "";
+                tree.SetFocus();
+                e.Handled = true;
+            }
+        };
+
+        // 执行命令行输入（复用 CLI 命令语法）
+        void RunCommand(string input)
+        {
+            var parts = input.Split(' ', 2);
+            string cmd = parts[0].ToLowerInvariant();
+            string arg = parts.Length > 1 ? parts[1].Trim() : "";
+
+            switch (cmd)
+            {
+                case "q" or "quit" or "exit":
+                    top.RequestStop();
+                    return;
+                case "h" or "help":
+                    ShowHelpDialog();
+                    return;
+                case "u" or "-u" or "--update":
+                    if (int.TryParse(arg, out int unum))
+                        RunNetworkOp(() => RefreshOneFeed(unum, dbPath));
+                    else RefreshSelectedFeed();
+                    return;
+                case "a" or "-a" or "--archive":
+                    if (int.TryParse(arg, out int anum)) { AddTimestampForRealId(anum, dbPath); RebuildTree(); }
+                    else ArchiveSelectedFeed();
+                    return;
+                case "r" or "una" or "-r" or "-una" or "--remove" or "--unarchive":
+                    if (int.TryParse(arg, out int rnum)) { RemoveTimestampForRealId(rnum, dbPath); RebuildTree(); }
+                    else UnarchiveSelectedFeed();
+                    return;
+                case "x" or "--delete":
+                    DeleteSelected();
+                    return;
+                case "d" or "-d" or "--download":
+                    if (string.IsNullOrWhiteSpace(arg))
+                        AddFeedDialog();
+                    else
+                        RunNetworkOp(() => { try { DownloadAndSaveToDb(arg, dbPath).Wait(); } catch { } });
+                    return;
+                case "s" or "--search":
+                    if (string.IsNullOrWhiteSpace(arg)) { SearchDialog(); return; }
+                    DoTuiSearch(arg);
+                    return;
+                case "y" or "--summary":
+                    SummarizeSelected();
+                    return;
+                default:
+                    Ask(Lang.T("未知命令: {0}，按 H 查看帮助", cmd), Lang.T("确定"));
+                    return;
+            }
+        }
+
+        // TUI 内语义搜索并显示到正文区
+        void DoTuiSearch(string query)
+        {
+            if (!File.Exists(ConfigPath(dbPath)))
+            {
+                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                return;
+            }
+            contentView.Text = Lang.T("正在搜索，请稍候...");
+            var results = DoSearch(query, dbPath);
+            if (results == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            var sb = new StringBuilder();
+            sb.AppendLine(Lang.T("搜索结果（查询：{0}，共 {1} 条）", query, results.Count));
+            foreach (var h in results)
+                sb.AppendLine($"  [{h.ItemId}] {h.Title}\n      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
+            contentView.Text = sb.ToString();
+        }
 
         RebuildTree();
         tree.ExpandAll();

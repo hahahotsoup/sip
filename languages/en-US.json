@@ -221,5 +221,7 @@
   "Q          退出": "Q          quit",
   "Enter      源:折叠/展开; 文章:打开正文": "Enter      feed: collapse/expand; article: open",
   "← / →      切换树/正文": "← / →      switch tree/content",
-  "PageUp/Dn  上下翻页": "PageUp/Dn  page up/down"
+  "PageUp/Dn  上下翻页": "PageUp/Dn  page up/down",
+  "未知命令: {0}，按 H 查看帮助": "Unknown command: {0}. Press H for help",
+  "正在搜索，请稍候...": "Searching, please wait..."
 }
