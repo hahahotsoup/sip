@@ -505,7 +505,7 @@ async Task<int> RunTui(string dbPath)
 
         void ShowHelpDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 18 };
+            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 20 };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
@@ -520,6 +520,8 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("D          添加新订阅源"),
                 Lang.T("S          语义搜索"),
                 Lang.T("Y          生成文章摘要"),
+                Lang.T(":init      配置 AI"),
+                Lang.T(":index     向量化当前源"),
                 Lang.T("H          显示本帮助"),
                 Lang.T("Q          退出"),
                 Lang.T("Enter      源:折叠/展开; 文章:打开正文"),
@@ -670,6 +672,12 @@ async Task<int> RunTui(string dbPath)
                 case "y" or "--summary":
                     SummarizeSelected();
                     return;
+                case "init" or "--init":
+                    InitConfigDialog();
+                    return;
+                case "index" or "--index":
+                    IndexSelectedFeed();
+                    return;
                 default:
                     Ask(Lang.T("未知命令: {0}，按 H 查看帮助", cmd), Lang.T("确定"));
                     return;
@@ -692,6 +700,109 @@ async Task<int> RunTui(string dbPath)
             foreach (var h in results)
                 sb.AppendLine($"  [{h.ItemId}] {h.Title}\n      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
             contentView.Text = sb.ToString();
+        }
+
+        // TUI 内 AI 配置向导（对话框版，等价 CLI --init）
+        void InitConfigDialog()
+        {
+            var cfg = LoadConfig(dbPath);
+            int y = 0;
+            var embEp = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.ApiEndpoint };
+            var embEpL = new Label { Text = Lang.T("Embedding 端点:"), X = 1, Y = y };
+            y++;
+            var embM = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.Model };
+            var embML = new Label { Text = Lang.T("Embedding 模型:"), X = 1, Y = y };
+            y++;
+            var embD = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.Dimensions.ToString() };
+            var embDL = new Label { Text = Lang.T("向量维度:"), X = 1, Y = y };
+            y++;
+            var llmEp = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Llm.ApiEndpoint };
+            var llmEpL = new Label { Text = Lang.T("LLM 端点:"), X = 1, Y = y };
+            y++;
+            var llmM = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Llm.Model };
+            var llmML = new Label { Text = Lang.T("LLM 模型:"), X = 1, Y = y };
+            y++;
+            var embKey = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = "", Secret = true };
+            var embKeyL = new Label { Text = Lang.T("Embedding Key:"), X = 1, Y = y };
+            y++;
+            var llmKey = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = "", Secret = true };
+            var llmKeyL = new Label { Text = Lang.T("LLM Key:"), X = 1, Y = y };
+            y++;
+            var thr = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.SearchThreshold.ToString() };
+            var thrL = new Label { Text = Lang.T("搜索阈值:"), X = 1, Y = y };
+            y++;
+            var ok = new Button { Text = Lang.T("保存"), IsDefault = true, X = 1, Y = y };
+            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = y };
+            var dlg = new Dialog { Title = " " + Lang.T("AI 配置") + " ", Width = 64, Height = y + 3 };
+            dlg.Add(embEpL, embEp, embML, embM, embDL, embD, llmEpL, llmEp, llmML, llmM,
+                    embKeyL, embKey, llmKeyL, llmKey, thrL, thr, ok, cancel);
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            cancel.Accepted += (s, e) => { cfg = null!; dlg.RequestStop(); };
+
+            Application.Run(dlg);
+            if (cfg == null) return;  // 用户取消
+
+            // 保存非敏感配置
+            if (embEp.Text.Trim().Length > 0) cfg.Embedding.ApiEndpoint = EnsureV1Endpoint(embEp.Text.Trim());
+            if (embM.Text.Trim().Length > 0) cfg.Embedding.Model = embM.Text.Trim();
+            if (int.TryParse(embD.Text.Trim(), out int dim) && dim > 0) cfg.Embedding.Dimensions = dim;
+            if (llmEp.Text.Trim().Length > 0) cfg.Llm.ApiEndpoint = EnsureV1Endpoint(llmEp.Text.Trim());
+            if (llmM.Text.Trim().Length > 0) cfg.Llm.Model = llmM.Text.Trim();
+            if (float.TryParse(thr.Text.Trim(), out float t)) cfg.Embedding.SearchThreshold = t;
+            SaveConfig(dbPath, cfg);
+
+            // Key 存系统凭据库
+            if (!string.IsNullOrEmpty(embKey.Text)) CredSet("embedding_api_key", embKey.Text);
+            if (!string.IsNullOrEmpty(llmKey.Text)) CredSet("llm_api_key", llmKey.Text);
+
+            Ask(Lang.T("AI 配置已保存。更换 Embedding 模型后需执行 reindex 重新向量化。"), Lang.T("确定"));
+        }
+
+        // TUI 内对当前选中源做向量化（等价 CLI --index，作用于当前源）
+        void IndexSelectedFeed()
+        {
+            int realId = GetSelectedFeedId();
+            if (realId == 0) { Ask(Lang.T("请先选中一个订阅源"), Lang.T("确定")); return; }
+            if (!File.Exists(ConfigPath(dbPath)))
+            {
+                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                return;
+            }
+            var cfg = LoadConfig(dbPath);
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT i.Id, i.Title FROM Items i
+                WHERE i.FeedId = @fid AND i.Status = 'active'
+                AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = i.Id)
+            ";
+            cmd.Parameters.AddWithValue("@fid", realId);
+            using var r = cmd.ExecuteReader();
+            var articles = new List<(int Id, string Title)>();
+            while (r.Read()) articles.Add((r.GetInt32(0), r.GetString(1)));
+
+            if (articles.Count == 0) { Ask(Lang.T("该源的文章都已向量化"), Lang.T("确定")); return; }
+
+            contentView.Text = Lang.T("正在向量化 {0} 篇文章，请稍候...", articles.Count);
+            int modelId = EnsureModel(dbPath, cfg.Embedding);
+            int ok = 0, fail = 0;
+            var sb = new StringBuilder();
+            foreach (var a in articles)
+            {
+                var vec = SafeEmbed(a.Title, cfg).GetAwaiter().GetResult();
+                if (vec == null) { fail++; continue; }
+                if (vec.Length != cfg.Embedding.Dimensions)
+                {
+                    cfg.Embedding.Dimensions = vec.Length;
+                    SaveConfig(dbPath, cfg);
+                }
+                SaveVector(dbPath, realId, a.Id, modelId, vec);
+                ok++;
+            }
+            sb.AppendLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
+            contentView.Text = sb.ToString();
+            RebuildTree();
         }
 
         RebuildTree();

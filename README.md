@@ -80,6 +80,8 @@ dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 :r 2             # 去归档 2 号源
 :s 关键词          # 语义搜索
 :y               # 给当前选中文章生成摘要
+:init            # AI 配置向导（对话框版）
+:index           # 向量化当前选中源
 :q               # 退出
 ```
 

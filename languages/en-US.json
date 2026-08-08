@@ -224,5 +224,21 @@
   "← / →      切换树/正文": "← / →      switch tree/content",
   "PageUp/Dn  上下翻页": "PageUp/Dn  page up/down",
   "未知命令: {0}，按 H 查看帮助": "Unknown command: {0}. Press H for help",
-  "正在搜索，请稍候...": "Searching, please wait..."
+  "正在搜索，请稍候...": "Searching, please wait...",
+  "AI 配置": "AI config",
+  "AI 配置已保存。更换 Embedding 模型后需执行 reindex 重新向量化。": "AI config saved. Run reindex after changing the Embedding model.",
+  "Embedding Key:": "Embedding Key: ",
+  "Embedding 端点:": "Embedding endpoint: ",
+  "Embedding 模型:": "Embedding model: ",
+  "LLM Key:": "LLM Key: ",
+  "LLM 端点:": "LLM endpoint: ",
+  "LLM 模型:": "LLM model: ",
+  "保存": "Save",
+  "该源的文章都已向量化": "All articles of this feed are already embedded",
+  "请先选中一个订阅源": "Select a feed first",
+  "搜索阈值:": "Search threshold: ",
+  "向量维度:": "Vector dims: ",
+  "正在向量化 {0} 篇文章，请稍候...": "Embedding {0} articles, please wait...",
+  ":init      配置 AI": ":init      configure AI",
+  ":index     向量化当前源": ":index     embed current feed"
 }
