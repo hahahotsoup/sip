@@ -90,6 +90,7 @@ d https://xxx   # 下载添加新源
 a 2             # 归档 2 号源
 r 2             # 去归档 2 号源
 s 关键词          # 语义搜索
+g 关键词          # 全文搜索（不依赖 AI）
 y               # 给当前选中文章生成摘要
 init            # AI 配置向导（对话框版）
 index           # 向量化当前选中源
@@ -145,6 +146,7 @@ sip --index                         # 对文章做 Embedding 向量化（交互�
 sip --reindex                       # 更换 Embedding 模型后重新向量化
 sip --search "LLM Agent"            # 语义搜索（返回命中文章 + 相似度）
 sip --search "RAG" --feed 1 --json  # 限定订阅源搜索，JSON 输出
+sip --grep "关键词"                  # 全文搜索（标题/正文/摘要，不依赖 AI）
 sip --summary 12                    # 为文章 12 生成摘要（保存到数据库）
 sip --summary feed:3                # 为订阅源 3 的全部文章生成摘要
 sip --summary-all                   # 为所有未生成摘要的文章生成摘要
@@ -159,6 +161,7 @@ sip --summary-all                   # 为所有未生成摘要的文章生成摘
 | `--index` | 为选中订阅源的文章批量生成 Embedding 向量，写入 SQLite 的 `Vectors` 表 |
 | `--reindex` | 更换 Embedding 模型（维度变化）后，清除旧向量并全量重建 |
 | `--search <查询>` | 对查询做 Embedding，与库中向量计算余弦相似度，按阈值过滤并排序输出；可选 `--feed 编号`、`--threshold 0.7`、`--json` |
+| `--grep <关键词>` | 全文搜索：在标题/正文/摘要做关键字匹配（SQL LIKE），不依赖 AI，适合精确查找与兜底 |
 | `--summary <编号>` | 为单篇文章调用 LLM 生成摘要；`feed:<编号>` 为该源全部文章逐个生成 |
 | `--summary-all` | 为所有 `Summary` 为空的文章生成摘要 |
 
@@ -256,6 +259,8 @@ CLI 会输出文章差异（新增/修改），并把源与文章写入数据库
 ├── languages/          # 语言文件（zh-CN.json / en-US.json，可加自己的）
 │   ├── zh-CN.json
 │   └── en-US.json
+├── .opencode/skills/   # AI Agent 使用 CLI 的 skill（教 AI 调用 sip）
+│   └── sip-rss/SKILL.md
 ├── ai_config.json      # AI 非敏感配置（运行时生成）
 └── README.md
 ```

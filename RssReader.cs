@@ -117,7 +117,7 @@ async Task RunCli(string[] args, string dbPath)
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
     bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
-                    or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary";
+                    or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep";
     if (args.Length < 2)
     {
         if (!needsArg) { Console.WriteLine(Lang.T("未知命令: {0}", cmd)); PrintHelp(); return; }
@@ -150,6 +150,9 @@ async Task RunCli(string[] args, string dbPath)
             if (args.Length < 2) { Console.WriteLine(Lang.T("用法: rssreader --search <查询> [--feed 编号] [--threshold 0.7] [--json]")); return; }
             SearchCli(args.Skip(1).ToArray(), dbPath);
             break;
+        case "--grep":
+            GrepCli(args[1], dbPath);
+            break;
         case "--summary":
             SummaryCli(args[1], dbPath).Wait();
             break;
@@ -179,6 +182,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --index          对文章做 Embedding 向量化（交互式选择）"));
     Console.WriteLine(Lang.T("  --reindex        更换 Embedding 模型后重新向量化"));
     Console.WriteLine(Lang.T("  --search <查询>   [--feed 编号] [--threshold 0.7] [--json] 语义搜索（不带 --feed 时搜索全部源）"));
+    Console.WriteLine(Lang.T("  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）"));
     Console.WriteLine(Lang.T("  --summary <编号>  为文章生成摘要（保存到数据库）；可传 feed:<编号> 为该源全部文章生成"));
     Console.WriteLine(Lang.T("  --summary-all    为所有未生成摘要的文章生成摘要"));
     Console.WriteLine();
@@ -598,14 +602,8 @@ async Task<int> RunTui(string dbPath)
             string q = input.Text.Trim();
             if (string.IsNullOrWhiteSpace(q)) return;
 
-            // 复用 CLI 的搜索逻辑，把结果展示到正文区
-            var results = DoSearch(q, dbPath);
-            if (results == null) { contentView.Text = Lang.T("搜索失败"); return; }
-            var sb = new StringBuilder();
-            sb.AppendLine(Lang.T("搜索结果（查询：{0}，共 {1} 条）", q, results.Count));
-            foreach (var h in results)
-                sb.AppendLine($"  [{h.ItemId}] {h.Title}\n      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
-            contentView.Text = sb.ToString();
+            // 复用语义搜索，渲染带链接的结果
+            DoTuiSearch(q);
         }
 
         void SummarizeSelected()
@@ -651,7 +649,7 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("← / →      切换树/正文"),
                 Lang.T("PageUp/Dn  上下翻页"),
                 "",
-                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / y / q"));
+                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / g / y / q"));
             var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -904,6 +902,10 @@ async Task<int> RunTui(string dbPath)
                     if (string.IsNullOrWhiteSpace(arg)) { SearchDialog(); return; }
                     DoTuiSearch(arg);
                     return;
+                case "g" or "--grep":
+                    if (string.IsNullOrWhiteSpace(arg)) { Ask(Lang.T("用法: grep <关键词>"), Lang.T("确定")); return; }
+                    DoTuiGrep(arg);
+                    return;
                 case "y" or "--summary":
                     SummarizeSelected();
                     return;
@@ -933,10 +935,57 @@ async Task<int> RunTui(string dbPath)
             contentView.Text = Lang.T("正在搜索，请稍候...");
             var results = DoSearch(query, dbPath);
             if (results == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            // 让 Ctrl+O 链接导航也能遍历搜索结果
+            TuiMdState.Links.Clear();
+            foreach (var h in results)
+                if (!string.IsNullOrWhiteSpace(h.Link))
+                    TuiMdState.Links.Add((h.Title, h.Link));
             var sb = new StringBuilder();
             sb.AppendLine(Lang.T("搜索结果（查询：{0}，共 {1} 条）", query, results.Count));
+            sb.AppendLine(Lang.T("提示：Enter/Tab 或 Ctrl+O 打开链接"));
+            sb.AppendLine();
             foreach (var h in results)
-                sb.AppendLine($"  [{h.ItemId}] {h.Title}\n      来源：{h.FeedTitle} | 相似度：{h.Score:P1}");
+            {
+                string titleLink = !string.IsNullOrWhiteSpace(h.Link)
+                    ? $"[{EscapeMd(h.Title)}]({EscapeMdUrl(h.Link)})"
+                    : EscapeMd(h.Title);
+                string feedLink = !string.IsNullOrWhiteSpace(h.Link)
+                    ? $"[{EscapeMd(h.FeedTitle)}]({EscapeMdUrl(h.Link)})"
+                    : EscapeMd(h.FeedTitle);
+                sb.AppendLine($"- {titleLink}  （{Lang.T("相似度")} {h.Score:P1}）");
+                sb.AppendLine($"  来源：{feedLink}");
+                if (!string.IsNullOrWhiteSpace(h.Description))
+                    sb.AppendLine($"  摘要：{EscapeMd(h.Description)}");
+                sb.AppendLine();
+            }
+            contentView.Text = sb.ToString();
+        }
+
+        // TUI 内全文搜索（等价 CLI --grep，不依赖 AI）
+        void DoTuiGrep(string keyword)
+        {
+            contentView.Text = Lang.T("正在搜索，请稍候...");
+            var hits = DoGrep(keyword, dbPath);
+            if (hits == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            // 让 Ctrl+O 链接导航也能遍历搜索结果
+            TuiMdState.Links.Clear();
+            foreach (var h in hits)
+                if (!string.IsNullOrWhiteSpace(h.Link))
+                    TuiMdState.Links.Add((h.Title, h.Link));
+            var sb = new StringBuilder();
+            sb.AppendLine(Lang.T("全文搜索「{0}」：共 {1} 条", keyword, hits.Count));
+            sb.AppendLine(Lang.T("提示：Enter/Tab 或 Ctrl+O 打开链接"));
+            sb.AppendLine();
+            foreach (var h in hits)
+            {
+                string titleLink = !string.IsNullOrWhiteSpace(h.Link)
+                    ? $"[{EscapeMd(h.Title)}]({EscapeMdUrl(h.Link)})"
+                    : EscapeMd(h.Title);
+                sb.AppendLine($"- {titleLink}");
+                if (!string.IsNullOrWhiteSpace(h.Description))
+                    sb.AppendLine($"  {EscapeMd(h.Description)}");
+                sb.AppendLine();
+            }
             contentView.Text = sb.ToString();
         }
 
@@ -2517,6 +2566,59 @@ void SearchCli(string[] args, string dbPath)
     }
 }
 
+// 全文搜索 CLI：在标题/正文/摘要里做关键字匹配（类似 VS Code 全文搜索，不依赖 AI）
+void GrepCli(string keyword, string dbPath)
+{
+    var hits = DoGrep(keyword, dbPath);
+    if (hits == null) return;
+    Console.WriteLine(Lang.T("全文搜索「{0}」：共 {1} 条", keyword, hits.Count));
+    foreach (var h in hits)
+    {
+        Console.WriteLine($"  [{h.ItemId}] {h.Title}");
+        Console.WriteLine($"      来源：{h.FeedTitle} | {h.Link}");
+        if (!string.IsNullOrEmpty(h.Description))
+            Console.WriteLine($"      摘要：{h.Description}");
+    }
+}
+
+// 全文搜索核心逻辑（CLI 与 TUI 共用）：SQL LIKE 匹配标题/正文/摘要
+List<GrepHit>? DoGrep(string keyword, string dbPath)
+{
+    if (string.IsNullOrWhiteSpace(keyword)) { Console.WriteLine(Lang.T("请输入搜索关键词")); return null; }
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT i.Id, i.Title, i.Description, i.Link, f.Title AS FeedTitle
+        FROM Items i
+        JOIN Feeds f ON i.FeedId = f.Id
+        WHERE i.Status = 'active'
+          AND (i.Title LIKE @kw OR i.Content LIKE @kw OR i.Description LIKE @kw OR i.Summary LIKE @kw)
+        ORDER BY i.Id
+        LIMIT 200
+    ";
+    cmd.Parameters.AddWithValue("@kw", "%" + keyword + "%");
+    var hits = new List<GrepHit>();
+    using (var r = cmd.ExecuteReader())
+    {
+        while (r.Read())
+        {
+            hits.Add(new GrepHit
+            {
+                ItemId = r.GetInt32(0),
+                Title = r.GetString(1),
+                Description = r.IsDBNull(2) ? "" : r.GetString(2),
+                Link = r.IsDBNull(3) ? "" : r.GetString(3),
+                FeedTitle = r.GetString(4)
+            });
+        }
+    }
+    // Description 可能是 HTML，转纯文本便于阅读
+    for (int i = 0; i < hits.Count; i++)
+        hits[i] = new GrepHit { ItemId = hits[i].ItemId, Title = hits[i].Title, Description = StripHtml(hits[i].Description), Link = hits[i].Link, FeedTitle = hits[i].FeedTitle };
+    return hits;
+}
+
 // 语义搜索核心逻辑（CLI 与 TUI 共用）；失败返回 null
 List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, float? threshold = null, bool json = false)
 {
@@ -2977,6 +3079,16 @@ class SearchHit
     public string FeedTitle { get; set; } = "";
     public int FeedId { get; set; }
     public float Score { get; set; }
+}
+
+// 全文搜索结果条目
+class GrepHit
+{
+    public int ItemId { get; set; }
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string Link { get; set; } = "";
+    public string FeedTitle { get; set; } = "";
 }
 
 // ══════════ 自定义异常 ══════════
