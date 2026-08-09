@@ -27,10 +27,18 @@ using Terminal.Gui.Drivers;
 using Terminal.Gui.Views;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Input;
+using Terminal.Gui.Text;
 
-// 工作目录 = exe 所在文件夹（Mac/Linux/Windows 都适用）
-string workDir = AppDomain.CurrentDomain.BaseDirectory;
-string dbPath = Path.Combine(workDir, "rss.db");
+// 数据目录 = exe 同级下的 readwithhotsoup 文件夹（首次启动自动创建）
+// 数据库、AI 配置、语言文件等所有配置文件都放在这里，方便整体备份/迁移
+string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+string dataDir = Path.Combine(baseDir, "readwithhotsoup");
+Directory.CreateDirectory(dataDir);
+
+// 首次启动把默认语言文件复制到数据目录（已存在则跳过，保留用户编辑）
+EnsureDefaultLanguages(baseDir, dataDir);
+
+string dbPath = Path.Combine(dataDir, "rss.db");
 InitDatabase(dbPath);
 
 // 全局选项解析（任意位置均可，解析后从参数中剔除）
@@ -51,7 +59,7 @@ for (int gi = 0; gi < args.Length - 1; gi++)
         break;
     }
 }
-Lang.Init(workDir, langCode);
+Lang.Init(dataDir, langCode);
 
 // ══════════ CLI 模式 ══════════
 if (args.Length > 0)
@@ -67,10 +75,40 @@ return await RunTui(dbPath);
 // 以下是所有方法，按调用顺序排列
 // ═══════════════════════════════════════════════════════════
 
+// 把 exe 旁的默认语言文件复制到 readwithhotsoup/languages/（只复制不存在的，保留用户修改）
+void EnsureDefaultLanguages(string baseDir, string dataDir)
+{
+    try
+    {
+        string src = Path.Combine(baseDir, "languages");
+        if (!Directory.Exists(src)) return;
+        string dst = Path.Combine(dataDir, "languages");
+        Directory.CreateDirectory(dst);
+        foreach (var f in Directory.GetFiles(src, "*.json"))
+        {
+            string target = Path.Combine(dst, Path.GetFileName(f));
+            if (!File.Exists(target)) File.Copy(f, target);
+        }
+    }
+    catch { /* 复制失败不影响主流程（可能只是没有默认语言文件） */ }
+}
+
 // ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
     var cmd = args[0].ToLower();
+
+    // 文章预览：sip --preview <文章编号> → 独立预览界面，底部提示按 W 进入完整 TUI
+    if (cmd is "-p" or "--preview")
+    {
+        if (args.Length < 2 || !int.TryParse(args[1], out int pNum))
+        {
+            Console.WriteLine(Lang.T("用法: rssreader --preview <文章编号>"));
+            return;
+        }
+        await RunPreviewOrFullTui(pNum, dbPath);
+        return;
+    }
 
     if (cmd is "-h" or "--help")
     {
@@ -92,6 +130,28 @@ async Task RunCli(string[] args, string dbPath)
         {
             ListFeedsFromDb(dbPath);
         }
+        return;
+    }
+
+    // ══════════ 更新调度命令 ═══════════
+    if (cmd is "--schedule" or "--sched")
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine(Lang.T("用法: rssreader --schedule <编号> <表达式>；表达式如 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual"));
+            return;
+        }
+        SetFeedSchedule(args[1], args[2], dbPath);
+        return;
+    }
+    if (cmd is "--sync")
+    {
+        await SyncCli(args.Skip(1).ToArray(), dbPath);
+        return;
+    }
+    if (cmd is "--update-all")
+    {
+        await UpdateAllCli(dbPath);
         return;
     }
 
@@ -174,7 +234,14 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  -a, --archive    归档（加时间戳）"));
     Console.WriteLine(Lang.T("  -una, --unarchive 去归档"));
     Console.WriteLine(Lang.T("  -r, --remove     删除订阅源"));
+    Console.WriteLine(Lang.T("  -p, --preview    预览单篇文章（按 W 进入完整 TUI）"));
     Console.WriteLine(Lang.T("  -h, --help       显示此帮助"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("更新调度:"));
+    Console.WriteLine(Lang.T("  --sync [--feed 编号]     只更新「到期」的订阅源（列表含上次/下次时间）"));
+    Console.WriteLine(Lang.T("  --update-all              强制更新所有订阅源（等价 TUI 的 F6）"));
+    Console.WriteLine(Lang.T("  --schedule <编号> <表达式> 设置某源更新计划，如 30m / 1h / 7d / daily@10:00 / weekly@Mon 08:00 / manual"));
+    Console.WriteLine(Lang.T("  -l 会显示每个源的「频率 · 上次 · 下次」"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("AI 命令:"));
     Console.WriteLine(Lang.T("  --init           首次配置 AI（模型 + API Key）"));
@@ -209,13 +276,17 @@ void PrintHelp()
 // 操作：↑↓ 选择，Enter 折叠/展开源或打开文章，←→ 切换树/正文，PageUp/PageDown 翻页，
 //       U 更新当前源，F6 全部更新，A 归档，R 去归档，X 删除，D 加源，S 搜索，Y 摘要，H 帮助，Q 退出
 #pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
-async Task<int> RunTui(string dbPath)
+async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScreen = true)
 {
-    Application.Init();
+    if (!appReady) Application.Init();
     try
     {
-        // —— 左侧：订阅源 + 文章 树形视图 ——
-        var tree = new TreeView<TuiNode>
+        // 开始界面：回车进入 / Q 退出
+        if (showStartScreen && !ShowStartScreen()) return 0;
+
+        // —— 左侧：订阅源 + 文章 侧栏（文章标题自动换行显示）——
+        // 侧栏为自绘 View：来源可展开/折叠，标题过长时自动换行（CJK 宽度感知）
+        var tree = new SidebarView(feedId => LoadArticleNodes(feedId, dbPath))
         {
             X = 0,
             Y = 0,
@@ -223,21 +294,19 @@ async Task<int> RunTui(string dbPath)
             Height = Dim.Fill() - 3,
             CanFocus = true,
             BorderStyle = LineStyle.Single,
-            Title = " " + Lang.T("订阅源") + " "
+            Title = " " + Lang.T("订阅源") + " (C " + Lang.T("折叠") + ") "
         };
-        tree.TreeBuilder = new DelegateTreeBuilder<TuiNode>(
-            childGetter: n => n.IsFeed ? LoadArticleNodes(n.FeedId, dbPath) : Enumerable.Empty<TuiNode>(),
-            canExpand: n => n.IsFeed
-        );
-        tree.AspectGetter = n => n.Title;
-        // 树样式：展开/收起图标 + 分支线
-        tree.Style = new TreeStyle
+        tree.SetScheme(new Scheme
         {
-            ExpandableSymbol = new Rune('▶'),
-            CollapseableSymbol = new Rune('▼'),
-            ShowBranchLines = true,
-            InvertExpandSymbolColors = true
-        };
+            Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+            HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
+            Active = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            ReadOnly = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black)
+        });
 
         // —— 中间垂直分隔线 ——
         var vDivider = new Line
@@ -250,40 +319,27 @@ async Task<int> RunTui(string dbPath)
         };
 
         // —— 右侧：正文预览（Markdown 渲染：标题/粗体/斜体/删除线/分隔线/列表/图片）——
-        var contentView = new Markdown
+        var contentView = CreateMarkdownView();
+        contentView.X = Pos.Right(tree) + 2;
+        contentView.Y = 0;
+        contentView.Width = Dim.Fill();
+        contentView.Height = Dim.Fill() - 3;
+        contentView.CanFocus = true;
+        contentView.BorderStyle = LineStyle.Single;
+        contentView.Title = " " + Lang.T("正文") + " ";
+
+        // 侧栏折叠状态：按 C 折叠左侧栏，正文区扩张（再按 C 恢复）
+        bool sidebarCollapsed = false;
+        void ToggleSidebar()
         {
-            X = Pos.Right(tree) + 2,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill() - 3,
-            CanFocus = true,
-            BorderStyle = LineStyle.Single,
-            Title = " " + Lang.T("正文") + " ",
-            ShowHeadingPrefix = false,
-            UseThemeBackground = true,
-            EnableSixelImages = false,   // 图片已转链接，关闭 Sixel 管线避免重绘卡顿
-            ImageLoader = MarkdownImageLoader
-        };
-        // 高对比配色：标题/强调用亮黄，正文白色，标签用亮青
-        contentView.SetScheme(new Scheme
-        {
-            Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
-            HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
-            Active = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
-            HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
-            Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
-            HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.DarkBlue),
-            Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
-            ReadOnly = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
-            Code = new Terminal.Gui.Drawing.Attribute(StandardColor.Green, StandardColor.Black),
-            CodeString = new Terminal.Gui.Drawing.Attribute(StandardColor.Yellow, StandardColor.Black),
-            CodeComment = new Terminal.Gui.Drawing.Attribute(StandardColor.Gray, StandardColor.Black)
-        });
-        // 软换行当硬换行 + 启用删除线（~~ 需要 UseEmphasisExtras）
-        var pipeBuilder = new Markdig.MarkdownPipelineBuilder();
-        Markdig.MarkdownExtensions.UseSoftlineBreakAsHardlineBreak(pipeBuilder);
-        Markdig.MarkdownExtensions.UseEmphasisExtras(pipeBuilder, Markdig.Extensions.EmphasisExtras.EmphasisExtraOptions.Strikethrough);
-        contentView.MarkdownPipeline = pipeBuilder.Build();
+            sidebarCollapsed = !sidebarCollapsed;
+            tree.Visible = !sidebarCollapsed;
+            vDivider.Visible = !sidebarCollapsed;
+            if (sidebarCollapsed) contentView.X = 0;
+            else contentView.X = Pos.Right(tree) + 2;
+            UpdateLinkNavTitle();
+            contentView.SetFocus();
+        }
 
         // 底部命令行：平时隐藏，按 Esc 唤出，Enter 执行后隐藏，再按 Esc 隐藏
         var cmdBar = new TextField
@@ -319,6 +375,7 @@ async Task<int> RunTui(string dbPath)
         // 正文/概要模式 + 链接导航状态（供状态栏快捷键引用）
         bool contentMode = true;     // true=完整正文，false=文章概要
         bool linkNavMode = false;
+        bool _syncing = false;       // 到期源自动同步进行中（防重入）
         int linkNavIndex = 0;
 
         // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
@@ -338,11 +395,11 @@ async Task<int> RunTui(string dbPath)
             new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
         });
 
-        top.Add(tree, contentView, cmdLabel, cmdBar, statusBar);
+        top.Add(tree, vDivider, contentView, cmdLabel, cmdBar, statusBar);
 
         void RebuildTree()
         {
-            tree.ClearObjects();
+            var feeds = new List<TuiNode>();
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
             var cmd = conn.CreateCommand();
@@ -366,10 +423,10 @@ async Task<int> RunTui(string dbPath)
                 if (active > 0) parts.Add(Lang.T("现存{0}篇", active + deleted));
                 if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
                 if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
-                string stats = string.Join(", ", parts);
-                tree.AddObject(new TuiNode { IsFeed = true, FeedId = id, Title = $"{title} {stats}" });
+                string stats = string.Join("，", parts);
+                feeds.Add(new TuiNode { IsFeed = true, FeedId = id, Title = $"{CjkSpace(title)} {stats}" });
             }
-            tree.RebuildTree();
+            tree.SetFeeds(feeds);
             tree.ExpandAll();
         }
 
@@ -377,66 +434,74 @@ async Task<int> RunTui(string dbPath)
         {
             var n = tree.SelectedObject;
             if (n == null || n.IsFeed) { contentView.Text = ""; return; }
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
-            conn.Open();
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate, Summary FROM Items WHERE Id = @id";
-            cmd.Parameters.AddWithValue("@id", n.ItemId);
-            using var r = cmd.ExecuteReader();
-            if (r.Read())
+            contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth());
+            UpdateLinkNavTitle();
+        }
+
+        // 在正文区显示某个历史版本的内容
+        void ShowSelectedVersion(long itemId, int version)
+        {
+            contentMode = true;   // 历史版本固定用完整正文
+            contentView.Text = BuildArticleMarkdown(itemId, true, dbPath, contentView.GetContentWidth());
+            contentView.Title = " " + Lang.T("正文") + " · v" + version + " ";
+            contentView.SetFocus();
+        }
+
+        // V：查看当前文章的版本历史 / 变更（列出所有版本，可输入编号查看旧版正文）
+        void ShowVersionHistory(TuiNode n)
+        {
+            if (n == null || n.IsFeed || string.IsNullOrEmpty(n.Guid)) return;
+
+            var versions = new List<(long Id, int Version, string Status, string At)>();
+            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
             {
-                string title = r.GetString(0);
-                string content = r.IsDBNull(1) ? "" : r.GetString(1);
-                string desc = r.IsDBNull(2) ? "" : r.GetString(2);
-                string link = r.IsDBNull(3) ? "" : r.GetString(3);
-                string pub = r.IsDBNull(4) ? "" : r.GetString(4);
-                string aiSummary = r.IsDBNull(5) ? "" : r.GetString(5);
+                conn.Open();
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt FROM Items WHERE Guid = @g ORDER BY Version DESC";
+                cmd.Parameters.AddWithValue("@g", n.Guid);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    versions.Add((r.GetInt64(0), r.GetInt32(1), r.GetString(2), r.IsDBNull(3) ? "" : r.GetString(3)));
+            }
 
-                var md = new StringBuilder();
-                md.AppendLine($"# **{EscapeMd(title)}**");
-                md.AppendLine();
-                md.AppendLine("---");
-                md.AppendLine();
-                if (!string.IsNullOrWhiteSpace(link)) md.AppendLine($"*{EscapeMd(link)}*");
-                if (!string.IsNullOrWhiteSpace(pub)) md.AppendLine($"*{EscapeMd(pub)}*");
-                if (!string.IsNullOrWhiteSpace(link) || !string.IsNullOrWhiteSpace(pub))
-                {
-                    md.AppendLine();
-                    md.AppendLine("---");
-                    md.AppendLine();
-                }
+            if (versions.Count <= 1)
+            {
+                Ask(Lang.T("这篇文章只有一版，没有历史变更"), Lang.T("确定"));
+                return;
+            }
 
-                if (contentMode)
+            var sb = new StringBuilder();
+            for (int i = 0; i < versions.Count; i++)
+            {
+                var (_, ver, status, at) = versions[i];
+                string tag = status switch
                 {
-                    // 完整正文模式
-                    string body = string.IsNullOrWhiteSpace(content) ? desc : content;
-                    body = HtmlToMarkdown(body, contentView.GetContentWidth());
-                    md.Append(body);
-                }
-                else
-                {
-                    // 概要模式：AI 摘要 + RSS 摘要
-                    if (!string.IsNullOrWhiteSpace(aiSummary))
-                    {
-                        md.AppendLine("## " + Lang.T("AI 摘要"));
-                        md.AppendLine();
-                        md.AppendLine(EscapeMd(aiSummary));
-                        md.AppendLine();
-                        md.AppendLine("---");
-                        md.AppendLine();
-                    }
-                    if (!string.IsNullOrWhiteSpace(desc))
-                    {
-                        md.AppendLine("## " + Lang.T("RSS 摘要"));
-                        md.AppendLine();
-                        md.Append(HtmlToMarkdown(desc, contentView.GetContentWidth()));
-                    }
-                    else
-                    {
-                        md.Append(Lang.T("（无摘要，按 G 查看完整正文）"));
-                    }
-                }
-                contentView.Text = md.ToString();
+                    "active" => Lang.T("现行"),
+                    "archived" => Lang.T("已归档"),
+                    "deleted" => Lang.T("已删除"),
+                    _ => ""
+                };
+                string when = at.Length > 0 && TryParseIso(at) is DateTime dt ? " · " + dt.ToString("yyyy-MM-dd HH:mm") : "";
+                sb.AppendLine($"{i + 1}.  v{ver}  {tag}{when}");
+            }
+            sb.AppendLine();
+            sb.AppendLine(Lang.T("输入编号查看该版本，0 取消"));
+
+            var dlg = new Dialog { Title = " " + Lang.T("版本历史") + " ", Width = 60, Height = 14 };
+            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 9, ReadOnly = true };
+            txt.Text = sb.ToString();
+            var input = new TextField { X = 0, Y = Pos.Bottom(txt), Width = 5, Text = "" };
+            var ok = new Button { Text = Lang.T("查看"), IsDefault = true, X = 0, Y = Pos.Bottom(input) + 1 };
+            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(input) + 1 };
+            dlg.Add(txt, input, ok, cancel);
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+            Application.Run(dlg);
+
+            if (int.TryParse(input.Text.Trim(), out int idx) && idx >= 1 && idx <= versions.Count)
+            {
+                var (id2, ver2, _, _) = versions[idx - 1];
+                ShowSelectedVersion(id2, ver2);
             }
         }
 
@@ -480,10 +545,10 @@ async Task<int> RunTui(string dbPath)
             }
             else
             {
-                // 删除单篇文章
-                int ans = Ask(Lang.T("确定删除这篇文章？此操作不可恢复！"), Lang.T("确定"), Lang.T("取消"));
+                // 删除整篇文章（该 Guid 的全部版本，含向量）
+                int ans = Ask(Lang.T("确定删除这篇文章（含全部历史版本）？此操作不可恢复！"), Lang.T("确定"), Lang.T("取消"));
                 if (ans != 0) return;
-                DeleteArticleByRealId(n.ItemId, dbPath);
+                DeleteArticleByGuid(n.Guid, dbPath);
                 RebuildTree();
                 contentView.Text = "";
             }
@@ -643,14 +708,19 @@ async Task<int> RunTui(string dbPath)
                 Lang.T("S          语义搜索"),
                 Lang.T("Y          生成文章摘要"),
                 Lang.T("G          切换正文/概要"),
+                Lang.T("V          查看文章版本/变更历史（✎ 标记）"),
+                Lang.T("C          折叠/展开侧栏"),
                 Lang.T("Esc        唤出命令行"),
                 Lang.T("H          显示本帮助"),
                 Lang.T("Q          退出"),
                 Lang.T("Enter      源:折叠/展开; 文章:打开正文"),
-                Lang.T("← / →      切换树/正文"),
+                Lang.T("← / →      切换侧栏/正文"),
                 Lang.T("PageUp/Dn  上下翻页"),
                 "",
-                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / g / y / q"));
+                Lang.T("自动同步：打开程序时 + 每 15 分钟，仅更新「到期」源（schedule 设置频率）"),
+                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / g / y / q"),
+                Lang.T("           schedule <编号> <表达式>（如 30m / daily@10:00 / manual）"),
+                Lang.T("           sync / all"));
             var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             var about = new Button { Text = Lang.T("关于"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok, about);
@@ -677,7 +747,7 @@ async Task<int> RunTui(string dbPath)
                 "功能：文件夹视图 TUI + 全功能 CLI",
                 "      · 全文搜索  --grep / 语义搜索 --search",
                 "      · 版本追踪 / 快照归档 / AI 摘要",
-                "      · 多语言（languages/*.json）",
+                "      · 多语言（readwithhotsoup/languages/*.json）",
                 "",
                 "作者：hahahotsoup with ❤",
                 "thanks to deepseek + opencode",
@@ -735,6 +805,7 @@ async Task<int> RunTui(string dbPath)
                 ? $"  [ {linkNavIndex + 1}/{TuiMdState.Links.Count} ]  {TuiMdState.Links[linkNavIndex].Text}"
                 : "";
             string modeTag = contentMode ? Lang.T("正文") : Lang.T("概要");
+            if (sidebarCollapsed) modeTag = "◀ " + modeTag;
             contentView.Title = " " + modeTag + (linkNavMode ? " (链接模式)" : "") + extra + " ";
         }
 
@@ -764,7 +835,7 @@ async Task<int> RunTui(string dbPath)
             e.Handled = true;
         };
 
-        // 树：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；Esc 唤出命令行
+        // 侧栏：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；C 折叠侧栏；Esc 唤出命令行
         tree.KeyDown += (s, e) =>
         {
             var n = tree.SelectedObject;
@@ -780,12 +851,23 @@ async Task<int> RunTui(string dbPath)
             }
             else if (e.KeyCode == KeyCode.PageUp)
             {
-                tree.MovePageUp(false);
+                tree.MovePageUp();
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.PageDown)
             {
-                tree.MovePageDown(false);
+                tree.MovePageDown();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.C)
+            {
+                ToggleSidebar();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.V)
+            {
+                if (n is { IsFeed: false } && n.HasHistory) ShowVersionHistory(n);
+                else Ask(Lang.T("这篇文章没有变更历史（有 ✎ 标记的才有）"), Lang.T("确定"));
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.Esc)
@@ -827,6 +909,18 @@ async Task<int> RunTui(string dbPath)
                     if (linkNavMode) OpenCurrentLink();
                     e.Handled = true;
                     break;
+                case KeyCode.C:
+                    ToggleSidebar();
+                    e.Handled = true;
+                    break;
+                case KeyCode.V:
+                {
+                    var nv = tree.SelectedObject;
+                    if (nv is { IsFeed: false } && nv.HasHistory) ShowVersionHistory(nv);
+                    else Ask(Lang.T("这篇文章没有变更历史（有 ✎ 标记的才有）"), Lang.T("确定"));
+                    e.Handled = true;
+                    break;
+                }
                 case KeyCode.Esc:
                     if (linkNavMode) { linkNavMode = false; UpdateLinkNavTitle(); }
                     else ShowCmdBar();
@@ -951,6 +1045,25 @@ async Task<int> RunTui(string dbPath)
                     return;
                 case "reindex" or "--reindex":
                     ReindexAll();
+                    return;
+                case "schedule" or "sched" or "--schedule":
+                {
+                    var sp = arg.Split(' ', 2);
+                    if (sp.Length < 2 || !int.TryParse(sp[0], out int sn))
+                    {
+                        Ask(Lang.T("用法: schedule <编号> <表达式>，如 schedule 1 30m / schedule 1 daily@10:00 / schedule 1 manual"), Lang.T("确定"));
+                        return;
+                    }
+                    if (sn <= 0 || GetRealId(sn, dbPath) == 0) { Ask(Lang.T("没找到这个编号"), Lang.T("确定")); return; }
+                    SetFeedSchedule(sn.ToString(), sp[1], dbPath);
+                    RebuildTree();
+                    return;
+                }
+                case "sync" or "--sync":
+                    SyncDueFeeds();
+                    return;
+                case "all" or "--update-all" or "update-all":
+                    RefreshAllFeeds();
                     return;
                 default:
                     Ask(Lang.T("未知命令: {0}，按 H 查看帮助", cmd), Lang.T("确定"));
@@ -1175,17 +1288,296 @@ async Task<int> RunTui(string dbPath)
 
         RebuildTree();
         tree.ExpandAll();
+        tree.SetFocus();
+
+        // —— 到期源自动同步 ——
+        // 启动后稍等片刻，主界面先显示，再非阻塞地同步到期的源；开着期间每 15 分钟后台检查一次
+        void SyncDueFeeds()
+        {
+            if (_syncing) return;
+            try
+            {
+                var due = GetDueFeeds(dbPath);
+                if (due.Count == 0) return;
+                _syncing = true;
+                RunNetworkOp(() =>
+                {
+                    Console.WriteLine(Lang.T("正在同步 {0} 个到期订阅源：", due.Count));
+                    var now = DateTime.Now;
+                    foreach (var f in due)
+                    {
+                        Console.WriteLine(Lang.T("  · {0}（上次 {1}）", f.Title,
+                            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未")));
+                        try
+                        {
+                            DownloadAndSaveToDb(f.Url, dbPath, interactive: false).Wait();
+                            Console.WriteLine(Lang.T("    ✓ 已更新"));
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
+                        }
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Ask(Lang.T("同步到期源出错：{0}", ex.Message), Lang.T("确定"));
+            }
+            finally
+            {
+                _syncing = false;
+            }
+        }
+
+        // 启动同步：一次性的，主界面显示后约 0.4 秒开始
+        Application.AddTimeout(TimeSpan.FromMilliseconds(400), () =>
+        {
+            SyncDueFeeds();
+            return false;
+        });
+        // 后台检查：程序开着期间每 15 分钟查一次到期源（没到期不请求，几乎零开销）
+        Application.AddTimeout(TimeSpan.FromMinutes(15), () =>
+        {
+            SyncDueFeeds();
+            return true;
+        });
+
         Application.Run(top);
         return 0;
+    }
+    finally
+    {
+        if (!appReady) Application.Shutdown();
+    }
+}
+#pragma warning restore CS0618
+
+#pragma warning disable CS0618
+// ══════════ 外部 CLI 查看文章预览（sip --preview <文章编号>）═══════════
+// 独立预览界面：正文 + 底部提示「按 W 进入完整 TUI 程序」；W → 进入完整 TUI，Q/Esc → 返回
+async Task RunPreviewOrFullTui(int itemId, string dbPath)
+{
+    Application.Init();
+    try
+    {
+        if (ShowArticlePreview(itemId, dbPath))
+            await RunTui(dbPath, appReady: true, showStartScreen: false);
     }
     finally
     {
         Application.Shutdown();
     }
 }
+
+bool ShowArticlePreview(int itemId, string dbPath)
+{
+    var md = CreateMarkdownView();
+    md.X = 0;
+    md.Y = 0;
+    md.Width = Dim.Fill();
+    md.Height = Dim.Fill() - 1;
+    md.CanFocus = true;
+    md.Title = " " + Lang.T("文章预览") + " ";
+    md.Text = BuildArticleMarkdown(itemId, contentMode: true, dbPath, 90);
+
+    var hint = new Label
+    {
+        Text = Lang.T("  按 W 进入完整 TUI 程序  ·  Q 返回  "),
+        X = 0,
+        Y = Pos.AnchorEnd(1),
+        Width = Dim.Fill(),
+        Height = 1,
+        TextAlignment = Alignment.Center
+    };
+
+    var top = new Window
+    {
+        Title = " sip · " + Lang.T("文章预览") + " ",
+        X = 0,
+        Y = 0,
+        Width = Dim.Fill(),
+        Height = Dim.Fill(),
+    };
+    top.Add(md, hint);
+
+    bool enterTui = false;
+    void OnKey(object? s, Key e)
+    {
+        if (e.KeyCode == KeyCode.W)
+        {
+            enterTui = true;
+            top.RequestStop();
+            e.Handled = true;
+        }
+        else if (e.KeyCode is KeyCode.Q or KeyCode.Esc)
+        {
+            top.RequestStop();
+            e.Handled = true;
+        }
+    }
+    top.KeyDown += OnKey;
+    md.KeyDown += OnKey;
+
+    md.SetFocus();
+    Application.Run(top);
+    return enterTui;
+}
+
+// 开始界面：全屏居中展示 slogan 与功能简介，回车进入 / Q 退出
+bool ShowStartScreen()
+{
+    var top = new Window
+    {
+        Title = " 🍲 sip RSS Reader ",
+        X = 0,
+        Y = 0,
+        Width = Dim.Fill(),
+        Height = Dim.Fill(),
+    };
+    var sv = new StartScreenView
+    {
+        Lines = new[]
+        {
+            "🍲 sip",
+            "",
+            "——「品，你细品。」",
+            "一个让你站着把信息喝了的 RSS 阅读器核心",
+            "",
+            "  订阅管理 · 全文搜索 · 语义搜索 · AI 摘要",
+            "  版本追踪 · 快照归档 · 多语言",
+            "",
+            "",
+            "  Enter 进入  ·  Q 退出  ",
+        }
+    };
+    sv.X = 0;
+    sv.Y = 0;
+    sv.Width = Dim.Fill();
+    sv.Height = Dim.Fill();
+    top.Add(sv);
+
+    bool cont = false;
+    top.KeyDown += (s, e) =>
+    {
+        if (e.KeyCode is KeyCode.Enter or KeyCode.Space)
+        {
+            cont = true;
+            top.RequestStop();
+            e.Handled = true;
+        }
+        else if (e.KeyCode is KeyCode.Q or KeyCode.Esc)
+        {
+            top.RequestStop();
+            e.Handled = true;
+        }
+    };
+    Application.Run(top);
+    return cont;
+}
 #pragma warning restore CS0618
 
+// 统一配置的 Markdown 阅读视图（配色 + 软换行当硬换行 + 删除线）
+Markdown CreateMarkdownView()
+{
+    var v = new Markdown
+    {
+        ShowHeadingPrefix = false,
+        UseThemeBackground = true,
+        EnableSixelImages = false,   // 图片已转链接，关闭 Sixel 管线避免重绘卡顿
+        ImageLoader = MarkdownImageLoader
+    };
+    // 阅读配色：正文亮白、代码绿色、强调亮黄、链接亮青、选中高亮
+    v.SetScheme(new Scheme
+    {
+        Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+        HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightCyan, StandardColor.Black),
+        Active = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
+        HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
+        Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
+        HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightCyan, StandardColor.DarkBlue),
+        Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+        ReadOnly = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+        Code = new Terminal.Gui.Drawing.Attribute(StandardColor.Green, StandardColor.Black),
+        CodeString = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
+        CodeComment = new Terminal.Gui.Drawing.Attribute(StandardColor.Gray, StandardColor.Black)
+    });
+    // 软换行当硬换行 + 启用删除线（~~ 需要 UseEmphasisExtras）
+    var pipeBuilder = new Markdig.MarkdownPipelineBuilder();
+    Markdig.MarkdownExtensions.UseSoftlineBreakAsHardlineBreak(pipeBuilder);
+    Markdig.MarkdownExtensions.UseEmphasisExtras(pipeBuilder, Markdig.Extensions.EmphasisExtras.EmphasisExtraOptions.Strikethrough);
+    v.MarkdownPipeline = pipeBuilder.Build();
+    return v;
+}
+
+// 把一篇文章渲染成 Markdown 字符串（TUI 正文区与 CLI 预览共用）
+string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wrapWidth)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate, Summary FROM Items WHERE Id = @id";
+    cmd.Parameters.AddWithValue("@id", itemId);
+    using var r = cmd.ExecuteReader();
+    if (!r.Read()) return Lang.T("（没有找到这篇文章）");
+    string title = r.GetString(0);
+    string content = r.IsDBNull(1) ? "" : r.GetString(1);
+    string desc = r.IsDBNull(2) ? "" : r.GetString(2);
+    string link = r.IsDBNull(3) ? "" : r.GetString(3);
+    string pub = r.IsDBNull(4) ? "" : r.GetString(4);
+    string aiSummary = r.IsDBNull(5) ? "" : r.GetString(5);
+
+    var md = new StringBuilder();
+    md.AppendLine($"# **{EscapeMd(CjkSpace(title))}**");
+    md.AppendLine();
+    // 元信息用引用块渲染为暗淡色，避免与正文抢注意力
+    if (!string.IsNullOrWhiteSpace(pub)) md.AppendLine($"> {EscapeMd(CjkSpace(pub))}");
+    if (!string.IsNullOrWhiteSpace(link)) md.AppendLine($"> {EscapeMd(CjkSpace(link))}");
+    md.AppendLine();
+    md.AppendLine("---");
+    md.AppendLine();
+
+    if (contentMode)
+    {
+        // 完整正文模式
+        string body = string.IsNullOrWhiteSpace(content) ? desc : content;
+        md.Append(HtmlToMarkdown(body, wrapWidth));
+    }
+    else
+    {
+        // 概要模式：AI 摘要 + RSS 摘要
+        if (!string.IsNullOrWhiteSpace(aiSummary))
+        {
+            md.AppendLine("## " + Lang.T("AI 摘要"));
+            md.AppendLine();
+            md.AppendLine(EscapeMd(aiSummary));
+            md.AppendLine();
+            md.AppendLine("---");
+            md.AppendLine();
+        }
+        if (!string.IsNullOrWhiteSpace(desc))
+            md.Append(HtmlToMarkdown(desc, wrapWidth));
+        else
+            md.Append(Lang.T("（无摘要，按 G 查看完整正文）"));
+    }
+    return md.ToString();
+}
+
+// 中文排版：在汉字与相邻的英文/数字之间插入空格，让混排更清爽
+string CjkSpace(string s)
+{
+    if (string.IsNullOrEmpty(s)) return s;
+    return Regex.Replace(s,
+        @"(?<=[\u4E00-\u9FFF])(?=[A-Za-z0-9@#%])|(?<=[A-Za-z0-9@#%])(?=[\u4E00-\u9FFF])",
+        " ");
+}
+
+
 // 从数据库加载某源的文章节点（TUI 树的叶子）
+// 加载某源的文章节点（TUI 侧栏叶子）
+// 每个 Guid（同一篇文章）只显示最新一版，不再堆「[现] v1」；若该文有被作者改过的旧版本，
+// 标题右侧加 ✎ 标记，选中后按 V 可查看全部版本 / 变更历史
+// 注意：Guid 为空串时（既无 Id 也无 Link 的文章）不做分组，避免把无关文章挤成一行
 IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
 {
     var nodes = new List<TuiNode>();
@@ -1193,9 +1585,15 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        SELECT Id, Title, Status, Version
-        FROM Items WHERE FeedId = @fid
-        ORDER BY Id
+        SELECT i.Id, i.Title, i.Version, i.Status, i.Guid,
+               CASE WHEN i.Guid = '' THEN 1
+                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid) END AS VersionCount,
+               CASE WHEN i.Guid = '' THEN 0
+                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid AND g.Status = 'archived') END AS ArchivedCount
+        FROM Items i
+        WHERE i.FeedId = @fid
+          AND (i.Guid = '' OR i.Version = (SELECT MAX(g.Version) FROM Items g WHERE g.Guid = i.Guid))
+        ORDER BY i.Id
     ";
     cmd.Parameters.AddWithValue("@fid", feedId);
     using var r = cmd.ExecuteReader();
@@ -1203,16 +1601,23 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
     {
         long id = r.GetInt64(0);
         string title = r.GetString(1);
-        string status = r.GetString(2);
-        int version = r.GetInt32(3);
-        string tag = status switch
+        string status = r.GetString(3);
+        string guid = r.IsDBNull(4) ? "" : r.GetString(4);
+        int versionCount = r.GetInt32(5);
+        int archivedCount = r.GetInt32(6);
+        bool hasHistory = archivedCount > 0;
+        string display = CjkSpace(title) + (hasHistory ? " ✎" : "");
+        nodes.Add(new TuiNode
         {
-            "active" => Lang.T("[现]"),
-            "archived" => Lang.T("[旧]"),
-            "deleted" => Lang.T("[删]"),
-            _ => "[?]"
-        };
-        nodes.Add(new TuiNode { IsFeed = false, FeedId = feedId, ItemId = id, Status = status, Title = $"{tag} v{version} | {title}" });
+            IsFeed = false,
+            FeedId = feedId,
+            ItemId = id,
+            Status = status,
+            Guid = guid,
+            HasHistory = hasHistory,
+            VersionCount = versionCount,
+            Title = display
+        });
     }
     return nodes;
 }
@@ -1492,6 +1897,147 @@ void DownloadCli(string url, string dbPath)
     catch (Exception ex) { Console.WriteLine(Lang.T("出错: {0}", ex.Message)); }
 }
 
+// ══════════ 更新计划（CLI）═══════════
+// 设置某源的更新计划表达式；无效表达式会给出提示
+void SetFeedSchedule(string displayNum, string expr, string dbPath)
+{
+    if (!int.TryParse(displayNum, out int dn)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+    int realId = GetRealId(dn, dbPath);
+    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+
+    string raw = (expr ?? "").Trim();
+    if (raw.Length == 0 || raw.Equals("manual", StringComparison.OrdinalIgnoreCase))
+    {
+        // 清空计划 = 手动，不自动更新
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE Feeds SET Schedule = '' WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", realId);
+        cmd.ExecuteNonQuery();
+        Console.WriteLine(Lang.T("已设置订阅源 {0} 为手动更新（不自动）", dn));
+        return;
+    }
+
+    var s = TryParseSchedule(raw);
+    if (s == null)
+    {
+        Console.WriteLine(Lang.T("无效的更新计划表达式：{0}；示例：30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual", raw));
+        return;
+    }
+
+    using var conn2 = new SqliteConnection($"Data Source={dbPath}");
+    conn2.Open();
+    var cmd2 = conn2.CreateCommand();
+    cmd2.CommandText = "UPDATE Feeds SET Schedule = @s WHERE Id = @id";
+    cmd2.Parameters.AddWithValue("@s", raw.ToLowerInvariant());
+    cmd2.Parameters.AddWithValue("@id", realId);
+    cmd2.ExecuteNonQuery();
+
+    string hint = TryParseSchedule(raw.ToLowerInvariant()) is FeedSchedule ps && !ps.IsManual && ps.Raw.Length > 0
+        ? HumanSchedule(ps) : raw;
+    Console.WriteLine(Lang.T("已设置订阅源 {0} 的更新计划：{1}", dn, hint));
+}
+
+// --sync：只更新到期的订阅源（可 --feed N 限定单个源）；输出每个源的 上次/下次
+async Task SyncCli(string[] extra, string dbPath)
+{
+    int? feedReal = null;
+    for (int i = 0; i < extra.Length; i++)
+        if (extra[i] == "--feed" && i + 1 < extra.Length && int.TryParse(extra[++i], out int f))
+            feedReal = GetRealId(f, dbPath);
+
+    if (feedReal.HasValue && feedReal.Value == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+
+    var now = DateTime.Now;
+    var due = feedReal.HasValue
+        ? GetDueFeeds(dbPath).Where(d => d.Id == feedReal.Value).ToList()
+        : GetDueFeeds(dbPath);
+
+    if (feedReal.HasValue && due.Count == 0)
+    {
+        // 限定单个源但未到期 → 提示还差多久
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Title, LastCheckedAt, Schedule FROM Feeds WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", feedReal.Value);
+        using var r = cmd.ExecuteReader();
+        if (r.Read())
+        {
+            string title = r.GetString(0);
+            DateTime? lc = r.IsDBNull(1) ? null : TryParseIso(r.GetString(1));
+            string schedule = r.IsDBNull(2) ? "" : r.GetString(2);
+            var next = FeedNextDue(schedule, lc, now);
+            if (next != null)
+                Console.WriteLine(Lang.T("{0} 未到期，距离下次更新还需 {1}", title, UntilText(next.Value, now)));
+            else
+                Console.WriteLine(Lang.T("{0} 未设置自动更新计划（可用 --schedule 设置）", title));
+        }
+        return;
+    }
+
+    if (due.Count == 0)
+    {
+        Console.WriteLine(Lang.T("没有到期的订阅源"));
+        return;
+    }
+
+    Console.WriteLine(Lang.T("有 {0} 个到期的订阅源，开始同步...", due.Count));
+    int ok = 0, fail = 0;
+    foreach (var f in due)
+    {
+        Console.WriteLine(Lang.T("  · {0}（上次 {1}）", f.Title,
+            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未")));
+        try
+        {
+            await DownloadAndSaveToDb(f.Url, dbPath, interactive: false);
+            ok++;
+        }
+        catch (Exception ex)
+        {
+            fail++;
+            Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
+        }
+    }
+    Console.WriteLine(Lang.T("同步完成：成功 {0}，失败 {1}", ok, fail));
+}
+
+// --update-all：强制更新所有订阅源（等价 TUI F6）
+async Task UpdateAllCli(string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id, Title, FeedUrl FROM Feeds ORDER BY Id";
+    using var r = cmd.ExecuteReader();
+    var feeds = new List<(int Id, string Title, string Url)>();
+    while (r.Read())
+        feeds.Add((r.GetInt32(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)));
+    r.Close();
+
+    if (feeds.Count == 0) { Console.WriteLine(Lang.T("数据库里还没有订阅源")); return; }
+
+    Console.WriteLine(Lang.T("正在更新所有订阅源（共 {0} 个）...", feeds.Count));
+    int ok = 0, fail = 0;
+    foreach (var f in feeds)
+    {
+        if (IsArchived(f.Title)) { Console.WriteLine(Lang.T("  · 跳过归档源：{0}", f.Title)); continue; }
+        if (string.IsNullOrWhiteSpace(f.Url)) { fail++; continue; }
+        try
+        {
+            await DownloadAndSaveToDb(f.Url, dbPath, interactive: false);
+            ok++;
+        }
+        catch (Exception ex)
+        {
+            fail++;
+            Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
+        }
+    }
+    Console.WriteLine(Lang.T("更新完成：成功 {0}，失败 {1}", ok, fail));
+}
+
 // ══════════ 建表方法 ══════════
 // 只在程序启动时调用一次。IF NOT EXISTS 保证不会覆盖已有数据库
 // 两张表的关系：Feeds 是"班级"，Items 是"学生"，FeedId 就是学生属于哪个班级
@@ -1588,6 +2134,11 @@ void InitDatabase(string dbPath)
         cmd.ExecuteNonQuery();
     }
     catch (SqliteException) { /* 列已存在则忽略 */ }
+    // 旧库迁移：给 Feeds 补更新计划相关字段（Schedule=计划表达式，LastCheckedAt=上次拉取时间）
+    try { cmd.CommandText = "ALTER TABLE Feeds ADD COLUMN Schedule TEXT"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
+    try { cmd.CommandText = "ALTER TABLE Feeds ADD COLUMN LastCheckedAt TEXT"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
 }
 
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
@@ -1603,14 +2154,21 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
     Console.WriteLine(Lang.T("── [{0}] {1} 的文章列表──", feedDisplayNum, feedTitle));
 
-    // 用 ROW_NUMBER 给文章编显示号（删后自动继位）
+    // 用 ROW_NUMBER 给文章编显示号（删后自动继位）；每个 Guid 只列最新一版，
+    // 有历史版本的文章标题右侧加 ✎ 标记（TUI 里按 V 可查看全部版本）
+    // 注意：Guid 为空串时（既无 Id 也无 Link 的文章）不做分组
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        SELECT Id, Guid, Title, Status, Version,
-               ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
-        FROM Items
-        WHERE FeedId = @fid
-        ORDER BY Id
+        SELECT i.Id, i.Title, i.Status, i.Version,
+               ROW_NUMBER() OVER (ORDER BY i.Id) AS DisplayNum,
+               CASE WHEN i.Guid = '' THEN 1
+                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid) END AS VersionCount,
+               CASE WHEN i.Guid = '' THEN 0
+                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid AND g.Status = 'archived') END AS ArchivedCount
+        FROM Items i
+        WHERE i.FeedId = @fid
+          AND (i.Guid = '' OR i.Version = (SELECT MAX(g.Version) FROM Items g WHERE g.Guid = i.Guid))
+        ORDER BY i.Id
     ";
     cmd.Parameters.AddWithValue("@fid", feedRealId);
     using var reader = cmd.ExecuteReader();
@@ -1621,19 +2179,12 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     }
     while (reader.Read())
     {
-        int displayNum = reader.GetInt32(5);    // 第 5 列 DisplayNum
-        string status  = reader.GetString(3);   // 第 3 列 Status
-        string title   = reader.GetString(2);   // 第 2 列 Title
-        int version    = reader.GetInt32(4);    // 第 4 列 Version
+        int displayNum = reader.GetInt32(4);    // 第 5 列 DisplayNum
+        string title   = reader.GetString(1);   // 第 2 列 Title
+        int archived   = reader.GetInt32(6);    // 第 7 列 ArchivedCount
 
-        string tag = status switch
-        {
-            "active"   => Lang.T("[现]"),
-            "archived" => Lang.T("[旧]"),
-            "deleted"  => Lang.T("[删]"),
-            _          => "[?]"
-        };
-        Console.WriteLine($"  [{displayNum}] {tag} v{version} | {title}");
+        string marker = archived > 0 ? " ✎" : "";
+        Console.WriteLine($"  [{displayNum}] {CjkSpace(title)}{marker}");
     }
 }
 
@@ -1650,10 +2201,11 @@ void ListFeedsFromDb(string dbPath)
                (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'active')   AS ActiveCount,
                (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'archived') AS ArchiveCount,
                (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'deleted')  AS DeleteCount,
-               ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum
+               ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum,
+               LastCheckedAt, Schedule
         FROM Feeds
     ";
-    // 六列：[真实Id, 标题, 活跃数, 旧版本数, 已删除数, 显示编号]
+    // 八列：[真实Id, 标题, 活跃数, 旧版本数, 已删除数, 显示编号, 上次检查时间, 更新计划]
 
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
@@ -1662,6 +2214,7 @@ void ListFeedsFromDb(string dbPath)
         return;
     }
 
+    var now = DateTime.Now;
     while (reader.Read())
     {
         int active = reader.GetInt32(2);
@@ -1675,12 +2228,208 @@ void ListFeedsFromDb(string dbPath)
         if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
         string stats = string.Join(", ", parts);
 
-        Console.WriteLine($"[{reader.GetInt32(5)}] {reader.GetString(1)} {stats}");
+        DateTime? lastChecked = reader.IsDBNull(6) ? null : TryParseIso(reader.GetString(6));
+        string schedule = reader.IsDBNull(7) ? "" : reader.GetString(7);
+        string status = FormatFeedStatus(schedule, lastChecked, now);
+
+        Console.WriteLine($"[{reader.GetInt32(5)}] {reader.GetString(1)} {stats}{status}");
     }
 }
 
+// ══════════ 更新计划（调度）═══════════
+// 每个订阅源可设一条「更新计划」，到期才自动拉取，避免浪费资源：
+//   间隔：     5m / 30m / 1h / 6h / 1d / 7d / 30d
+//   固定时刻： daily@HH:mm  /  weekly@Ddd HH:mm（Ddd = Mon..Sun）
+//   manual 或空：不自动更新
+// 到期判断：now >= 上次拉取时间 + 计划到期点；LastCheckedAt 为空视为首次，到期更新一次。
+// 每次成功拉取（手动 U / F6 / --sync / 启动同步）都会重写 LastCheckedAt，计时从最新拉取重算。
+
+FeedSchedule? TryParseSchedule(string raw)
+{
+    string r = (raw ?? "").Trim();
+    if (r.Length == 0 || r.Equals("manual", StringComparison.OrdinalIgnoreCase))
+        return new FeedSchedule { Raw = r, IsManual = true };
+    string lower = r.ToLowerInvariant();
+
+    var mInterval = Regex.Match(lower, @"^(\d+)([mhd])$");
+    if (mInterval.Success)
+    {
+        double n = int.Parse(mInterval.Groups[1].Value);
+        double minutes = mInterval.Groups[2].Value switch { "m" => n, "h" => n * 60, _ => n * 1440 };
+        return new FeedSchedule { Raw = r, Interval = TimeSpan.FromMinutes(minutes) };
+    }
+
+    if (lower.StartsWith("daily@"))
+    {
+        if (TryParseHhmm(lower["daily@".Length..], out int h, out int m))
+            return new FeedSchedule { Raw = r, IsDaily = true, DailyHour = h, DailyMinute = m };
+        return null;   // 无效 → 返回 null 表示表达式有误
+    }
+
+    if (lower.StartsWith("weekly@"))
+    {
+        var parts = lower["weekly@".Length..].Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 2 && TryParseWeekday(parts[0], out int dow) && TryParseHhmm(parts[1], out int h, out int m))
+            return new FeedSchedule { Raw = r, IsWeekly = true, WeeklyDay = dow, WeeklyHour = h, WeeklyMinute = m };
+        return null;
+    }
+
+    return null;   // 无效表达式
+}
+
+bool TryParseHhmm(string s, out int hour, out int minute)
+{
+    hour = minute = 0;
+    var p = s.Split(':');
+    if (p.Length != 2) return false;
+    if (!int.TryParse(p[0], out hour) || !int.TryParse(p[1], out minute)) return false;
+    return hour is >= 0 and <= 23 && minute is >= 0 and <= 59;
+}
+
+bool TryParseWeekday(string s, out int dow)
+{
+    dow = s switch
+    {
+        "sun" or "sunday" => 0,
+        "mon" or "monday" => 1,
+        "tue" or "tuesday" => 2,
+        "wed" or "wednesday" => 3,
+        "thu" or "thursday" => 4,
+        "fri" or "friday" => 5,
+        "sat" or "saturday" => 6,
+        _ => -1
+    };
+    return dow >= 0;
+}
+
+string WeekdayName(int dow) => Lang.T(new[] { "周日", "周一", "周二", "周三", "周四", "周五", "周六" }[dow]);
+
+// 计算某源的下一次到期时间；手动/无效计划返回 null
+DateTime? ComputeNextDue(FeedSchedule s, DateTime lastChecked, DateTime now)
+{
+    if (s.IsManual) return null;
+    if (s.Interval.HasValue)
+        return lastChecked.Add(s.Interval.Value);
+    if (s.IsDaily)
+    {
+        var cand = new DateTime(now.Year, now.Month, now.Day, s.DailyHour, s.DailyMinute, 0);
+        if (cand <= lastChecked) cand = cand.AddDays(1);
+        return cand;
+    }
+    if (s.IsWeekly)
+    {
+        var cand = new DateTime(now.Year, now.Month, now.Day, s.WeeklyHour, s.WeeklyMinute, 0);
+        int diff = (s.WeeklyDay - (int)cand.DayOfWeek + 7) % 7;
+        cand = cand.AddDays(diff);
+        if (cand <= lastChecked) cand = cand.AddDays(7);
+        return cand;
+    }
+    return null;
+}
+
+bool IsFeedDue(string schedule, DateTime? lastChecked, DateTime now)
+{
+    var s = TryParseSchedule(schedule);
+    if (s == null || s.IsManual) return false;
+    if (lastChecked == null) return true;   // 首次：到期
+    var due = ComputeNextDue(s, lastChecked.Value, now);
+    return due != null && now >= due.Value;
+}
+
+// 列出当前到期的订阅源（归档源跳过）
+List<DueFeed> GetDueFeeds(string dbPath)
+{
+    var now = DateTime.Now;
+    var list = new List<DueFeed>();
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id, Title, FeedUrl, LastCheckedAt, Schedule FROM Feeds ORDER BY Id";
+    using var r = cmd.ExecuteReader();
+    while (r.Read())
+    {
+        int id = r.GetInt32(0);
+        string title = r.GetString(1);
+        string url = r.IsDBNull(2) ? "" : r.GetString(2);
+        DateTime? lc = r.IsDBNull(3) ? null : TryParseIso(r.GetString(3));
+        string schedule = r.IsDBNull(4) ? "" : r.GetString(4);
+        if (IsArchived(title) || string.IsNullOrWhiteSpace(url)) continue;
+        if (IsFeedDue(schedule, lc, now))
+            list.Add(new DueFeed { Id = id, Title = title, Url = url, LastChecked = lc, Schedule = schedule });
+    }
+    return list;
+}
+
+DateTime? TryParseIso(string s)
+{
+    return DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+        System.Globalization.DateTimeStyles.RoundtripKind, out var d) ? d : null;
+}
+
+// 返回某源的下一次到期时间（用于「距离下次还需多久」提示）；手动/未设置/从未检查返回 null
+DateTime? FeedNextDue(string schedule, DateTime? lastChecked, DateTime now)
+{
+    var s = TryParseSchedule(schedule);
+    if (s == null || s.IsManual || lastChecked == null) return null;
+    return ComputeNextDue(s, lastChecked.Value, now);
+}
+
+string HumanSchedule(FeedSchedule s)
+{
+    if (s.IsManual) return Lang.T("手动");
+    if (s.Interval is TimeSpan iv)
+    {
+        double minutes = iv.TotalMinutes;
+        if (minutes < 60) return Lang.T("{0} 分钟", (int)minutes);
+        if (minutes < 1440) return Lang.T("{0} 小时", (int)(minutes / 60));
+        return Lang.T("{0} 天", (int)(minutes / 1440));
+    }
+    if (s.IsDaily) return Lang.T("每天 {0:00}:{1:00}", s.DailyHour, s.DailyMinute);
+    if (s.IsWeekly) return Lang.T("每周{0} {1:00}:{2:00}", WeekdayName(s.WeeklyDay), s.WeeklyHour, s.WeeklyMinute);
+    return "";
+}
+
+string AgoText(DateTime t, DateTime now)
+{
+    var span = now - t;
+    if (span.TotalSeconds < 60) return Lang.T("刚刚");
+    if (span.TotalMinutes < 60) return Lang.T("{0} 分钟前", (int)span.TotalMinutes);
+    if (span.TotalHours < 24) return Lang.T("{0} 小时前", (int)span.TotalHours);
+    return Lang.T("{0} 天前", (int)span.TotalDays);
+}
+
+string UntilText(DateTime t, DateTime now)
+{
+    var span = t - now;
+    if (span.TotalSeconds < 60) return Lang.T("即将");
+    if (span.TotalMinutes < 60) return Lang.T("{0} 分钟后", (int)span.TotalMinutes);
+    if (span.TotalHours < 24) return Lang.T("{0} 小时后", (int)span.TotalHours);
+    return Lang.T("{0} 天后", (int)span.TotalDays);
+}
+
+// -l 里追加的「频率 / 上次 / 下次」状态；手动或未设置时返回空串
+string FormatFeedStatus(string schedule, DateTime? lastChecked, DateTime now)
+{
+    var s = TryParseSchedule(schedule);
+    if (s == null || s.IsManual) return "";
+    string sched = HumanSchedule(s);
+    string last = lastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未");
+    string next;
+    if (lastChecked is DateTime lc2)
+    {
+        var due = ComputeNextDue(s, lc2, now);
+        next = due is DateTime d ? Lang.T("还需 ") + UntilText(d, now) : "—";
+    }
+    else
+    {
+        next = Lang.T("待首次更新");
+    }
+    return Lang.T("（{0} · 上次 {1} · 下次 {2}）", sched, last, next);
+}
+
+
 // ══════════ 核心方法：下载 RSS → 解析 → 去重 → 写入数据库 ══════════
-async Task DownloadAndSaveToDb(string url, string dbPath)
+async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = true)
 {
     // 用户可能忘记 https:// 或 http:// 前缀，自动补全；
     // 若补全的 https 连不上（站点只提供 http），再回退 http 重试一次
@@ -1760,8 +2509,8 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
         isNewFeed = true;
         var insertCmd = conn.CreateCommand();
         insertCmd.CommandText = @"
-            INSERT INTO Feeds (Title, FeedUrl, Link, Description, LastFetched, RawXml)
-            VALUES (@title, @url, @link, @desc, @fetched, @rawXml)
+            INSERT INTO Feeds (Title, FeedUrl, Link, Description, LastFetched, RawXml, LastCheckedAt)
+            VALUES (@title, @url, @link, @desc, @fetched, @rawXml, @checked)
         ";
         insertCmd.Parameters.AddWithValue("@title", feed.Title);
         insertCmd.Parameters.AddWithValue("@url", url);
@@ -1769,11 +2518,19 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
         insertCmd.Parameters.AddWithValue("@desc", feed.Description ?? "");
         insertCmd.Parameters.AddWithValue("@fetched", DateTime.Now.ToString("O"));
         insertCmd.Parameters.AddWithValue("@rawXml", rawXml);
+        insertCmd.Parameters.AddWithValue("@checked", DateTime.Now.ToString("O"));
         insertCmd.ExecuteNonQuery();
 
         insertCmd.CommandText = "SELECT last_insert_rowid()";
         feedId = (long)insertCmd.ExecuteScalar()!;
     }
+
+    // 无论内容是否有变化，都记录「上次拉取时间」——调度只关心上次何时真正查过
+    var touchCmd = conn.CreateCommand();
+    touchCmd.CommandText = "UPDATE Feeds SET LastCheckedAt = @checked WHERE Id = @id";
+    touchCmd.Parameters.AddWithValue("@checked", DateTime.Now.ToString("O"));
+    touchCmd.Parameters.AddWithValue("@id", feedId);
+    touchCmd.ExecuteNonQuery();
 
     // --- 第 5 步：ShowDiff 负责检测文章变化 + 输出 + 执行归档/插入/标记删除 ---
     // 新源 → 全量插入不过滤；旧源 → 逐篇比对
@@ -1782,12 +2539,13 @@ async Task DownloadAndSaveToDb(string url, string dbPath)
     Console.WriteLine(Lang.T("{0} 写入完成", feed.Title));
 
     // --- 第 6 步：若已初始化 AI，询问是否把该源未向量化的文章加入 embedding ---
-    await MaybeIndexNewArticles(feedId, dbPath);
+    await MaybeIndexNewArticles(feedId, dbPath, interactive);
 }
 
 // ══════════ 辅助方法：下载/更新后询问是否对新文章做向量化 ══════════
 // 仅当已执行过 --init（存在 ai_config.json）时才会询问，避免打扰未配置 AI 的用户
-async Task MaybeIndexNewArticles(long feedId, string dbPath)
+// ask=false（自动同步/后台检查）时跳过询问，默认不向量化，避免卡在读输入
+async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = true)
 {
     if (!File.Exists(ConfigPath(dbPath))) return;
 
@@ -1803,6 +2561,9 @@ async Task MaybeIndexNewArticles(long feedId, string dbPath)
     cmd.Parameters.AddWithValue("@fid", feedId);
     long pending = (long)cmd.ExecuteScalar()!;
     if (pending == 0) return;
+
+    // 自动同步 / 后台检查时跳过 y/n 询问，不打扰、不卡输入
+    if (!ask) { Console.WriteLine(Lang.T("有 {0} 篇新文章未向量化（自动同步，已跳过，需要时用 rssreader --index 补上）", pending)); return; }
 
     Console.WriteLine(Lang.T("这个源有 {0} 篇新文章还未向量化，是否加入语义搜索（{1}）？(y/n)", pending, cfg.Embedding.Model));
     if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("已跳过，需要时可用 rssreader --index 补上")); return; }
@@ -2727,16 +3488,17 @@ void RefreshOneFeed(int realId, string dbPath)
     catch { }
 }
 
-// 按真实 Id 删除单篇文章及其向量（TUI 用）
-void DeleteArticleByRealId(long itemId, string dbPath)
+// 按 Guid 删除整篇文章（含全部历史版本与向量）
+void DeleteArticleByGuid(string guid, string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
-    cmd.CommandText = "DELETE FROM Vectors WHERE ItemId = @id";
-    cmd.Parameters.AddWithValue("@id", itemId);
+    cmd.CommandText = "DELETE FROM Vectors WHERE ItemId IN (SELECT Id FROM Items WHERE Guid = @g)";
+    cmd.Parameters.AddWithValue("@g", guid);
     cmd.ExecuteNonQuery();
-    cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+    cmd.CommandText = "DELETE FROM Items WHERE Guid = @g";
+    cmd.Parameters.AddWithValue("@g", guid);
     cmd.ExecuteNonQuery();
 }
 
@@ -3019,7 +3781,8 @@ static class TuiMdState
 
 // ══════════ 语言 / 本地化支持 ══════════
 // 用法：Lang.T("你好") / Lang.T("共有 {0} 篇", n)
-// 查找顺序：languages/<代码>.json（可定制翻译）→ 内置中文默认值 → 原样返回
+// 查找顺序：readwithhotsoup/languages/<代码>.json（首次启动已自动复制默认翻译，可直接编辑）
+//        → 内置中文默认值 → 原样返回
 // 语言文件格式（JSON 字典，键为原文，值为译文）：
 //   { "你好": "Hello", "共有 {0} 篇": "Total {0} articles" }
 static class Lang
@@ -3029,14 +3792,15 @@ static class Lang
     private static readonly Dictionary<string, string> _custom = new();
     private static bool _loaded;
 
-    public static void Init(string workDir, string? requested)
+    public static void Init(string dataDir, string? requested)
     {
         string code = requested ?? "";
         if (string.IsNullOrEmpty(code))
             code = Environment.GetEnvironmentVariable("LANG") ?? "zh-CN";
         Code = code;
 
-        string path = Path.Combine(workDir, "languages", code + ".json");
+        // 语言文件只从数据目录 readwithhotsoup/languages/ 读取（首次启动已复制默认翻译）
+        string path = Path.Combine(dataDir, "languages", code + ".json");
         if (!File.Exists(path)) return;
 
         try
@@ -3101,6 +3865,315 @@ class TuiNode
     public long ItemId { get; set; }    // 文章 Id（源节点为 0）
     public string Status { get; set; } = "active";  // 文章状态：active/archived/deleted
     public string Title { get; set; } = "";
+    public string Guid { get; set; } = "";        // 文章 Guid（同一篇文章的多个版本共享）
+    public bool HasHistory { get; set; }          // 是否有被改过的旧版本（有则标题右侧有 ✎ 标记）
+    public int VersionCount { get; set; } = 1;    // 该文章共有几个版本
+}
+
+// 解析后的更新计划（见 TryParseSchedule）
+class FeedSchedule
+{
+    public string Raw { get; set; } = "";       // 原始表达式
+    public bool IsManual { get; set; }          // manual / 空：不自动更新
+    public TimeSpan? Interval { get; set; }      // 间隔型：5m / 1h / 7d ...
+    public bool IsDaily { get; set; }            // daily@HH:mm
+    public int DailyHour { get; set; }
+    public int DailyMinute { get; set; }
+    public bool IsWeekly { get; set; }           // weekly@Ddd HH:mm
+    public int WeeklyDay { get; set; }           // 0=周日 ... 6=周六
+    public int WeeklyHour { get; set; }
+    public int WeeklyMinute { get; set; }
+}
+
+// 一个到期的订阅源（GetDueFeeds 的结果）
+class DueFeed
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = "";
+    public string Url { get; set; } = "";
+    public DateTime? LastChecked { get; set; }
+    public string Schedule { get; set; } = "";
+}
+
+
+// ══════════ 自绘侧栏（订阅源 + 文章，标题自动换行）═══════════
+// Terminal.Gui 的 TreeView 每行只能画一行，长标题会被截断；
+// 这里自绘一个轻量侧栏：来源可展开/折叠，标题按列宽换行（CJK 宽度感知），
+// 提供与旧 TreeView 用法一致的接口（SelectedObject/SetFeeds/Toggle/...），
+// 便于正文区、状态栏等其余代码无感替换。
+class SidebarRow
+{
+    public TuiNode Node { get; set; } = new();
+    public bool IsFeed { get; set; }
+    public List<string> Lines { get; set; } = new();
+}
+
+class SidebarView : View
+{
+    private readonly Func<int, IEnumerable<TuiNode>> _childLoader;
+    private readonly List<TuiNode> _roots = new();
+    private readonly Dictionary<int, List<TuiNode>> _articles = new();
+    private readonly HashSet<int> _expanded = new();
+    private readonly List<SidebarRow> _rows = new();
+    private int _sel;
+    private int _scrollTop;      // 第一行可见的「换行后行号」
+    private int _layoutWidth = -1;
+    private bool _layoutDirty = true;
+
+    public event EventHandler? SelectionChanged;
+
+    public SidebarView(Func<int, IEnumerable<TuiNode>> childLoader)
+    {
+        _childLoader = childLoader;
+        CanFocus = true;
+    }
+
+    public TuiNode? SelectedObject
+    {
+        get
+        {
+            if (_rows.Count == 0) return null;
+            _sel = Math.Clamp(_sel, 0, _rows.Count - 1);
+            return _rows[_sel].Node;
+        }
+    }
+
+    public void SetFeeds(IEnumerable<TuiNode> feeds)
+    {
+        _roots.Clear();
+        _roots.AddRange(feeds);
+        _articles.Clear();
+        foreach (var f in _roots)
+            _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
+        _expanded.Clear();
+        _sel = 0;
+        _scrollTop = 0;
+        RebuildRows();
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+        SetNeedsDraw();
+    }
+
+    public void ExpandAll()
+    {
+        foreach (var f in _roots) _expanded.Add(f.FeedId);
+        RebuildRows();
+        SetNeedsDraw();
+    }
+
+    public void Toggle(TuiNode n)
+    {
+        if (n == null || !n.IsFeed) return;
+        if (!_expanded.Remove(n.FeedId)) _expanded.Add(n.FeedId);
+        RebuildRows();
+        int idx = _rows.FindIndex(r => ReferenceEquals(r.Node, n));
+        if (idx >= 0) _sel = idx;
+        EnsureSelectedVisible();
+        SetNeedsDraw();
+    }
+
+    public void MovePageUp() => MoveSelection(-Math.Max(1, Viewport.Height));
+
+    public void MovePageDown() => MoveSelection(Math.Max(1, Viewport.Height));
+
+    void RebuildRows()
+    {
+        _rows.Clear();
+        foreach (var f in _roots)
+        {
+            _rows.Add(new SidebarRow { Node = f, IsFeed = true });
+            if (_expanded.Contains(f.FeedId) && _articles.TryGetValue(f.FeedId, out var arts))
+                foreach (var a in arts)
+                    _rows.Add(new SidebarRow { Node = a, IsFeed = false });
+        }
+        _sel = _rows.Count == 0 ? 0 : Math.Clamp(_sel, 0, _rows.Count - 1);
+        _layoutDirty = true;
+    }
+
+    void EnsureLayout(int width)
+    {
+        if (!_layoutDirty && _layoutWidth == width) return;
+        _layoutWidth = width;
+        _layoutDirty = false;
+        int textWidth = Math.Max(1, width);
+        foreach (var row in _rows)
+        {
+            string prefix = row.IsFeed
+                ? (_expanded.Contains(row.Node.FeedId) ? "▼ " : "▶ ")
+                : "  ";
+            var wrapped = Terminal.Gui.Text.TextFormatter.WordWrapText(prefix + row.Node.Title, textWidth);
+            row.Lines = wrapped.Count > 0 ? wrapped : new List<string> { "" };
+        }
+        if (_scrollTop >= TotalLines() && TotalLines() > 0)
+            _scrollTop = Math.Max(0, TotalLines() - 1);
+    }
+
+    int RowStartLine(int rowIndex)
+    {
+        int line = 0;
+        for (int i = 0; i < rowIndex; i++) line += _rows[i].Lines.Count;
+        return line;
+    }
+
+    int TotalLines()
+    {
+        int n = 0;
+        foreach (var r in _rows) n += r.Lines.Count;
+        return n;
+    }
+
+    int RowForLine(int line)
+    {
+        int l = 0;
+        for (int i = 0; i < _rows.Count; i++)
+        {
+            l += _rows[i].Lines.Count;
+            if (line < l) return i;
+        }
+        return _rows.Count - 1;
+    }
+
+    void OnSelectionChanged()
+    {
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+        SetNeedsDraw();
+    }
+
+    void MoveSelection(int delta)
+    {
+        if (_rows.Count == 0) return;
+        int target = Math.Clamp(_sel + delta, 0, _rows.Count - 1);
+        if (target == _sel) return;
+        _sel = target;
+        OnSelectionChanged();
+        EnsureSelectedVisible();
+    }
+
+    void EnsureSelectedVisible()
+    {
+        if (_rows.Count == 0) return;
+        EnsureLayout(Viewport.Width);
+        int h = Viewport.Height;
+        int start = RowStartLine(_sel);
+        int end = start + _rows[_sel].Lines.Count;
+        if (start < _scrollTop) _scrollTop = start;
+        else if (end > _scrollTop + h) _scrollTop = end - h;
+        if (_scrollTop < 0) _scrollTop = 0;
+    }
+
+    protected override bool OnKeyDown(Key key)
+    {
+        switch (key.KeyCode)
+        {
+            case KeyCode.CursorUp:
+                MoveSelection(-1);
+                return true;
+            case KeyCode.CursorDown:
+                MoveSelection(1);
+                return true;
+            case KeyCode.Home:
+                MoveSelection(-_rows.Count);
+                return true;
+            case KeyCode.End:
+                MoveSelection(_rows.Count);
+                return true;
+        }
+        return false;
+    }
+
+    protected override bool OnMouseEvent(Mouse mouse)
+    {
+        if (mouse.Flags is MouseFlags.LeftButtonPressed or MouseFlags.LeftButtonClicked)
+        {
+            if (mouse.Position.HasValue)
+            {
+                EnsureLayout(Viewport.Width);
+                int row = RowForLine(mouse.Position.Value.Y + _scrollTop);
+                if (row >= 0 && row < _rows.Count)
+                {
+                    _sel = row;
+                    OnSelectionChanged();
+                    EnsureSelectedVisible();
+                }
+            }
+            SetFocus();
+            return true;
+        }
+        return false;
+    }
+
+    protected override bool OnDrawingContent(DrawContext? context)
+    {
+        int w = Viewport.Width;
+        int h = Viewport.Height;
+        EnsureLayout(w);
+        SetAttribute(GetAttributeForRole(VisualRole.Normal));
+        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
+        int line = 0;
+        for (int i = 0; i < _rows.Count; i++)
+        {
+            var row = _rows[i];
+            bool selected = i == _sel;
+            for (int li = 0; li < row.Lines.Count; li++)
+            {
+                int sy = line + li - _scrollTop;
+                if (sy >= 0 && sy < h)
+                {
+                    Terminal.Gui.Drawing.Attribute attr = selected
+                        ? (HasFocus ? GetAttributeForRole(VisualRole.Focus) : GetAttributeForRole(VisualRole.Active))
+                        : (row.IsFeed ? GetAttributeForRole(VisualRole.HotNormal) : GetAttributeForRole(VisualRole.Normal));
+                    SetAttribute(attr);
+                    AddStr(0, sy, new string(' ', w));
+                    AddStr(0, sy, row.Lines[li]);
+                }
+            }
+            line += row.Lines.Count;
+        }
+        return true;
+    }
+}
+
+// 开始界面的自绘视图：整块居中排版
+class StartScreenView : View
+{
+    public string[] Lines { get; set; } = Array.Empty<string>();
+
+    public StartScreenView()
+    {
+        SetScheme(new Scheme
+        {
+            Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+            HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
+            Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
+            HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.DarkBlue),
+            Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan)
+        });
+    }
+
+    protected override bool OnDrawingContent(DrawContext? context)
+    {
+        int w = Viewport.Width;
+        int h = Viewport.Height;
+        SetAttribute(GetAttributeForRole(VisualRole.Normal));
+        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
+        if (Lines.Length == 0) return true;
+
+        int totalW = 0;
+        foreach (var l in Lines)
+        {
+            int c = l.GetColumns();
+            if (c > totalW) totalW = c;
+        }
+        int x0 = Math.Max(0, (w - totalW) / 2);
+        int y0 = Math.Max(0, (h - Lines.Length) / 2);
+        for (int i = 0; i < Lines.Length; i++)
+        {
+            int row = y0 + i;
+            if (row < 0 || row >= h) continue;
+            SetAttribute(GetAttributeForRole(i == 0 ? VisualRole.HotNormal : VisualRole.Normal));
+            AddStr(x0, row, Lines[i]);
+        }
+        return true;
+    }
 }
 
 // 搜索结果条目

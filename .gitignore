@@ -13,6 +13,10 @@ obj/
 ## Database files (local data, don't commit)
 *.db
 
+## Publish output & runtime data
+publish/
+readwithhotsoup/
+
 ## OS
 .DS_Store
 Thumbs.db

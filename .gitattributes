@@ -1,0 +1,24 @@
+# 统一行尾符策略：文本文件在仓库内统一存 LF，检出时按平台自动转换（Windows=CRLF，Mac/Linux=LF）
+* text=auto
+
+# 二进制文件不进行行尾转换
+*.db binary
+*.dll binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+
+# Windows 脚本/项目文件固定 CRLF（仓库内仍存 LF）
+*.ps1 text eol=crlf
+*.cs text eol=crlf
+*.csproj text eol=crlf
+*.md text eol=crlf

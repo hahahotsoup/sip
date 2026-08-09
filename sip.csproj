@@ -12,8 +12,24 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="languages\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="languages\**\*.json" />
   </ItemGroup>
+
+  <!-- 语言文件用自定义复制（不走 CopyToOutputDirectory/CopyToPublishDirectory，避免单文件发布的 MSB3094 冲突）：
+       Build 后复制到 bin，Publish 后复制到发布目录 -->
+  <Target Name="CopyLanguagesToOutput" AfterTargets="Build">
+    <ItemGroup>
+      <_LangFiles Include="languages\**\*.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_LangFiles)" DestinationFolder="$(OutputPath)languages\" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyLanguagesToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <_LangFiles Include="languages\**\*.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_LangFiles)" DestinationFolder="$(PublishDir)languages\" SkipUnchangedFiles="true" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="CodeHollow.FeedReader" Version="1.2.6" />
