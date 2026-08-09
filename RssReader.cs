@@ -29,6 +29,9 @@ using Terminal.Gui.ViewBase;
 using Terminal.Gui.Input;
 using Terminal.Gui.Text;
 
+// 统一 UTF-8 输出：避免中文在终端 / AI 调用（PowerShell 默认 GBK 代码页）时乱码
+try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* 某些重定向场景可能不支持，忽略 */ }
+
 // 数据目录 = exe 同级下的 readwithhotsoup 文件夹（首次启动自动创建）
 // 数据库、AI 配置、语言文件等所有配置文件都放在这里，方便整体备份/迁移
 string baseDir = AppDomain.CurrentDomain.BaseDirectory;

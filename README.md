@@ -198,6 +198,8 @@ sip -l                          # 每个源显示「频率 · 上次 · 下次�
 
 内置 AI 能力：**Embedding 向量化 + 语义搜索**（RAG）与 **LLM 文章摘要**，供 AI Agent 或人类通过同一套 CLI 使用。
 
+> **给 AI Agent / 脚本的初始化提醒**：默认**未配置模型、未做向量化**——直接用 `--search` 会报「AI 未配置」或「尚无向量索引」。AI 应先 `sip --config` 确认已初始化，缺配置跑 `sip --init`、缺索引跑 `sip --index`、换过模型跑 `sip --reindex`，不要默认这些已就绪。输出一律 **UTF-8**（Windows 终端若乱码请按 UTF-8 解码，不要用 GBK）。
+
 ```bash
 sip --init                          # 首次配置 AI（模型 + API Key，交互式）
 sip --config                        # 查看/修改 AI 配置

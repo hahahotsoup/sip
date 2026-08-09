@@ -7,6 +7,22 @@ description: 调用 sip（RSS 阅读器）CLI 进行订阅管理、全文搜索�
 
 `sip` 是一个本地 RSS 阅读器，所有数据存于 SQLite（`rss.db`）。AI 通过命令行调用它来完成两类任务。
 
+## ⚠️ 先初始化，别默认模型已就绪
+
+**AI 很容易犯的错**：默认 Embedding / LLM 模型已经配置好、文章已经向量化。**事实是：默认什么都没配置、什么都没索引。** 必须按下面流程先检查，缺什么补什么：
+
+```bash
+sip --config                                   # ① 检查 AI 是否已配置（无输出/提示未配置 → 需 --init）
+sip --search "test" --ignoresafeannouncement   # ② 试探搜索：报「尚无向量索引 / run --index」→ 需先 --index
+```
+
+- **未配置 AI**（`--config` 无有效配置）：先跑 `sip --init`（交互式向导，会提示用户录入 API Key；若用户不在场，**告诉用户需要先手动执行 `sip --init` 或配置 ai_config.json**，不要假装已配置）
+- **「尚无向量索引」/ 搜索为空但该有内容**：先跑 `sip --index`（交互式选择源，或先 `sip -l` 看有哪些源）
+- **换了 Embedding 模型报「模型维度变化」**：跑 `sip --reindex`
+- **`--grep` 不依赖 AI**，永远可用；AI 未配置时用它做全文检索是可靠的兜底
+
+> 初始化涉及录入 API Key / 交互选择，**需要用户在终端配合时不要代跑**，明确告知用户执行哪条命令。
+
 ## 如何调用
 
 ```bash
@@ -22,6 +38,8 @@ dotnet bin/Release/net10.0/sip.dll <命令> [参数]
 ```bash
 sip --search "关键词" --json --ignoresafeannouncement
 ```
+
+**编码**：sip 一律输出 **UTF-8**。若调用环境的终端是 GBK/其他代码页（Windows cmd/PowerShell 默认 GBK），把输出按 UTF-8 解码即可，或在 PowerShell 里先执行 `[Console]::OutputEncoding = [Text.Encoding]::UTF8`；不要用 GBK 解码，否则中文乱码。
 
 ## 命令速查
 
