@@ -65,6 +65,7 @@ Lang.Init(dataDir, langCode);
 if (args.Length > 0)
 {
     await RunCli(args, dbPath);
+    RemindDueFeeds(args, dbPath);
     return 0;
 }
 
@@ -76,6 +77,7 @@ return await RunTui(dbPath);
 // ═══════════════════════════════════════════════════════════
 
 // 把 exe 旁的默认语言文件复制到 readwithhotsoup/languages/（只复制不存在的，保留用户修改）
+// 旧版本语言文件（键为中文）会自动覆盖为新的英文键格式
 void EnsureDefaultLanguages(string baseDir, string dataDir)
 {
     try
@@ -87,10 +89,51 @@ void EnsureDefaultLanguages(string baseDir, string dataDir)
         foreach (var f in Directory.GetFiles(src, "*.json"))
         {
             string target = Path.Combine(dst, Path.GetFileName(f));
-            if (!File.Exists(target)) File.Copy(f, target);
+            if (!File.Exists(target))
+            {
+                File.Copy(f, target);
+            }
+            else if (IsLegacyLangFile(target))
+            {
+                // 旧格式（键为中文原文）→ 用新版英文键格式覆盖，避免界面回退英文
+                try { File.Copy(f, target, overwrite: true); } catch { }
+            }
         }
     }
     catch { /* 复制失败不影响主流程（可能只是没有默认语言文件） */ }
+}
+
+// 判断语言文件是否为旧格式：任何键包含中文（新版键应为英文）
+bool IsLegacyLangFile(string path)
+{
+    try
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        foreach (var prop in doc.RootElement.EnumerateObject())
+            if (prop.Name.Any(c => c >= 0x4E00 && c <= 0x9FFF))
+                return true;
+    }
+    catch { }
+    return false;
+}
+
+// CLI 命令结束后提示「有到期的订阅源」（不自动更新，只提醒用户手动 sip --sync）
+// 纯读库判断，零网络、不阻塞、不改变退出码；脚本/AI 可用 --ignoresafeannouncement 关掉
+void RemindDueFeeds(string[] args, string dbPath)
+{
+    try
+    {
+        if (AiState.IgnoreAnnouncement) return;                       // 脚本/Agent 要纯净输出
+        if (args.Contains("--json", StringComparer.OrdinalIgnoreCase)) return;  // 不能污染 | jq 的 JSON
+        string cmd = args[0].ToLowerInvariant();
+        if (cmd is "-h" or "--help") return;                          // 帮助页不带噪声
+        if (cmd is "-u" or "--update" or "-d" or "--download" or "--sync" or "--update-all"
+            or "--schedule" or "--sched") return;                     // 本身就是更新类命令
+        var due = GetDueFeeds(dbPath);
+        if (due.Count == 0) return;                                   // 没有到期的就不打扰
+        Console.WriteLine(Lang.T("{0} feeds are due, run sip --sync to update", due.Count));
+    }
+    catch { /* 提示失败不影响主命令与退出码 */ }
 }
 
 // ══════════ CLI 参数处理 ══════════
@@ -103,10 +146,22 @@ async Task RunCli(string[] args, string dbPath)
     {
         if (args.Length < 2 || !int.TryParse(args[1], out int pNum))
         {
-            Console.WriteLine(Lang.T("用法: rssreader --preview <文章编号>"));
+            Console.WriteLine(Lang.T("Usage: rssreader --preview <article-id>"));
             return;
         }
         await RunPreviewOrFullTui(pNum, dbPath);
+        return;
+    }
+
+    // 原文直出：sip --show <文章编号> → 把文章原始内容（标题/链接/正文原文）打到标准输出，供 AI 直接读取
+    if (cmd is "--show" or "--content")
+    {
+        if (args.Length < 2 || !int.TryParse(args[1], out int sNum))
+        {
+            Console.WriteLine(Lang.T("Usage: rssreader --show <article-id>"));
+            return;
+        }
+        ShowArticleCli(sNum, dbPath);
         return;
     }
 
@@ -121,9 +176,9 @@ async Task RunCli(string[] args, string dbPath)
         if (args.Length >= 2)
         {
             // -l 后面带编号 → 列出该源的文章
-            if (!int.TryParse(args[1], out int lNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            if (!int.TryParse(args[1], out int lNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
             int feedRealId = GetRealId(lNum, dbPath);
-            if (feedRealId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+            if (feedRealId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
             ListArticlesFromDb(feedRealId, lNum, dbPath);
         }
         else
@@ -138,7 +193,7 @@ async Task RunCli(string[] args, string dbPath)
     {
         if (args.Length < 3)
         {
-            Console.WriteLine(Lang.T("用法: rssreader --schedule <编号> <表达式>；表达式如 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual"));
+            Console.WriteLine(Lang.T("Usage: rssreader --schedule <id> <expr>; expr like 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual"));
             return;
         }
         SetFeedSchedule(args[1], args[2], dbPath);
@@ -180,34 +235,34 @@ async Task RunCli(string[] args, string dbPath)
                     or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep";
     if (args.Length < 2)
     {
-        if (!needsArg) { Console.WriteLine(Lang.T("未知命令: {0}", cmd)); PrintHelp(); return; }
-        Console.WriteLine(Lang.T("缺少参数。用法: rssreader {0} <参数>", cmd));
+        if (!needsArg) { Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
+        Console.WriteLine(Lang.T("Missing argument. Usage: rssreader {0} <arg>", cmd));
         return;
     }
 
     switch (cmd)
     {
         case "-u" or "--update":
-            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
             UpdateFeed(aNum, dbPath).Wait();
             break;
         case "-d" or "--download":
             DownloadCli(args[1], dbPath);
             break;
         case "-a" or "--archive":
-            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
             AddTimestamp(tNum, dbPath);
             break;
         case "-una" or "--unarchive":
-            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
             RemoveTimestamp(uNum, dbPath);
             break;
         case "-r" or "--remove":
-            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
             DeleteFeed(dNum, dbPath);
             break;
         case "--search":
-            if (args.Length < 2) { Console.WriteLine(Lang.T("用法: rssreader --search <查询> [--feed 编号] [--threshold 0.7] [--json]")); return; }
+            if (args.Length < 2) { Console.WriteLine(Lang.T("Usage: rssreader --search <query> [--feed number] [--threshold 0.7] [--json]")); return; }
             SearchCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--grep":
@@ -217,7 +272,7 @@ async Task RunCli(string[] args, string dbPath)
             SummaryCli(args[1], dbPath).Wait();
             break;
         default:
-            Console.WriteLine(Lang.T("未知命令: {0}", cmd));
+            Console.WriteLine(Lang.T("Unknown command: {0}", cmd));
             PrintHelp();
             break;
     }
@@ -225,35 +280,36 @@ async Task RunCli(string[] args, string dbPath)
 
 void PrintHelp()
 {
-    Console.WriteLine(Lang.T("用法: rssreader <命令> [参数]"));
+    Console.WriteLine(Lang.T("Usage: rssreader <command> [args]"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("命令:"));
-    Console.WriteLine(Lang.T("  -l, --list       列出所有订阅源"));
-    Console.WriteLine(Lang.T("  -u, --update     更新指定订阅源（编号）"));
-    Console.WriteLine(Lang.T("  -d, --download   下载新的 RSS 源（URL）"));
-    Console.WriteLine(Lang.T("  -a, --archive    归档（加时间戳）"));
-    Console.WriteLine(Lang.T("  -una, --unarchive 去归档"));
-    Console.WriteLine(Lang.T("  -r, --remove     删除订阅源"));
-    Console.WriteLine(Lang.T("  -p, --preview    预览单篇文章（按 W 进入完整 TUI）"));
-    Console.WriteLine(Lang.T("  -h, --help       显示此帮助"));
+    Console.WriteLine(Lang.T("Commands:"));
+    Console.WriteLine(Lang.T("  -l, --list       list all feeds"));
+    Console.WriteLine(Lang.T("  -u, --update     update a feed (number)"));
+    Console.WriteLine(Lang.T("  -d, --download   download a new RSS feed (URL)"));
+    Console.WriteLine(Lang.T("  -a, --archive    archive a feed (add timestamp)"));
+    Console.WriteLine(Lang.T("  -una, --unarchive unarchive a feed"));
+    Console.WriteLine(Lang.T("  -r, --remove     delete a feed"));
+    Console.WriteLine(Lang.T("  -p, --preview    preview a single article (W = enter full TUI)"));
+    Console.WriteLine(Lang.T("  --show           print an article's raw content to stdout (for AI/scripts)"));
+    Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("更新调度:"));
-    Console.WriteLine(Lang.T("  --sync [--feed 编号]     只更新「到期」的订阅源（列表含上次/下次时间）"));
-    Console.WriteLine(Lang.T("  --update-all              强制更新所有订阅源（等价 TUI 的 F6）"));
-    Console.WriteLine(Lang.T("  --schedule <编号> <表达式> 设置某源更新计划，如 30m / 1h / 7d / daily@10:00 / weekly@Mon 08:00 / manual"));
-    Console.WriteLine(Lang.T("  -l 会显示每个源的「频率 · 上次 · 下次」"));
+    Console.WriteLine(Lang.T("Update scheduling:"));
+    Console.WriteLine(Lang.T("  --sync [--feed N]       update only 'due' feeds (lists last/next times)"));
+    Console.WriteLine(Lang.T("  --update-all            force update all feeds (same as TUI F6)"));
+    Console.WriteLine(Lang.T("  --schedule <id> <expr>  set a feed's update schedule, e.g. 30m / 1h / 7d / daily@10:00 / weekly@Mon 08:00 / manual"));
+    Console.WriteLine(Lang.T("  -l shows each feed's 'schedule · last · next'"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("AI 命令:"));
-    Console.WriteLine(Lang.T("  --init           首次配置 AI（模型 + API Key）"));
-    Console.WriteLine(Lang.T("  --config         查看/修改 AI 配置"));
-    Console.WriteLine(Lang.T("  --index          对文章做 Embedding 向量化（交互式选择）"));
-    Console.WriteLine(Lang.T("  --reindex        更换 Embedding 模型后重新向量化"));
-    Console.WriteLine(Lang.T("  --search <查询>   [--feed 编号] [--threshold 0.7] [--json] 语义搜索（不带 --feed 时搜索全部源）"));
-    Console.WriteLine(Lang.T("  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）"));
-    Console.WriteLine(Lang.T("  --summary <编号>  为文章生成摘要（保存到数据库）；可传 feed:<编号> 为该源全部文章生成"));
-    Console.WriteLine(Lang.T("  --summary-all    为所有未生成摘要的文章生成摘要"));
+    Console.WriteLine(Lang.T("AI commands:"));
+    Console.WriteLine(Lang.T("  --init           configure AI for the first time (model + API key)"));
+    Console.WriteLine(Lang.T("  --config         view/edit AI config"));
+    Console.WriteLine(Lang.T("  --index          embed articles (interactive selection)"));
+    Console.WriteLine(Lang.T("  --reindex        re-embed after changing the embedding model"));
+    Console.WriteLine(Lang.T("  --search <query> [--feed number] [--threshold 0.7] [--json] semantic search (all feeds without --feed)"));
+    Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed)"));
+    Console.WriteLine(Lang.T("  --summary <id>   summarize one article; use feed:<number> for all articles of a feed"));
+    Console.WriteLine(Lang.T("  --summary-all    summarize all articles without a summary"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("示例:"));
+    Console.WriteLine(Lang.T("Examples:"));
     Console.WriteLine(Lang.T("  rssreader -l"));
     Console.WriteLine(Lang.T("  rssreader -d https://example.com/rss"));
     Console.WriteLine(Lang.T("  rssreader -u 1"));
@@ -262,13 +318,13 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  rssreader --summary 12"));
     Console.WriteLine(Lang.T("  rssreader --summary feed:3"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("全局选项:"));
-    Console.WriteLine(Lang.T("  --ignoresafeannouncement   跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 调用）"));
-    Console.WriteLine(Lang.T("  --lang <代码>              指定语言文件（如 zh-CN / en-US，默认 zh-CN）"));
+    Console.WriteLine(Lang.T("Global options:"));
+    Console.WriteLine(Lang.T("  --ignoresafeannouncement   skip safety banner, data only (for scripts / AI agents)"));
+    Console.WriteLine(Lang.T("  --lang <code>              language file (e.g. zh-CN / en-US, default zh-CN)"));
     Console.WriteLine();
-    Console.WriteLine(Lang.T("安全提示:"));
-    Console.WriteLine(Lang.T("  API Key 存储在操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），"));
-    Console.WriteLine(Lang.T("  不写入任何文件。请勿泄露 API Key。首次调用 AI 功能时会提示。"));
+    Console.WriteLine(Lang.T("Security notes:"));
+    Console.WriteLine(Lang.T("  API keys are stored in the OS-native credential store (Windows Credential Manager / macOS Keychain / Linux Secret Service),"));
+    Console.WriteLine(Lang.T("  never written to any file. Do not leak it. You will be prompted on first AI use."));
 }
 
 // ══════════ TUI（Terminal.Gui 文件夹视图）═══════════
@@ -294,7 +350,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             Height = Dim.Fill() - 3,
             CanFocus = true,
             BorderStyle = LineStyle.Single,
-            Title = " " + Lang.T("订阅源") + " (C " + Lang.T("折叠") + ") "
+            Title = " " + Lang.T("Feeds") + " (C " + Lang.T("collapse") + ") "
         };
         tree.SetScheme(new Scheme
         {
@@ -326,7 +382,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         contentView.Height = Dim.Fill() - 3;
         contentView.CanFocus = true;
         contentView.BorderStyle = LineStyle.Single;
-        contentView.Title = " " + Lang.T("正文") + " ";
+        contentView.Title = " " + Lang.T("Content") + " ";
 
         // 侧栏折叠状态：按 C 折叠左侧栏，正文区扩张（再按 C 恢复）
         bool sidebarCollapsed = false;
@@ -381,18 +437,18 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
         var statusBar = new StatusBar(new Shortcut[]
         {
-            new Shortcut(Key.H, Lang.T("帮助"), () => ShowHelpDialog(), Lang.T("查看全部快捷键")),
-            new Shortcut(Key.F2, Lang.T("关于"), () => ShowAboutDialog(), Lang.T("关于 sip")),
-            new Shortcut(Key.U, Lang.T("更新"), () => RefreshSelectedFeed(), Lang.T("下载更新当前源 (同 CLI -u)")),
-            new Shortcut(Key.F6, Lang.T("全部更新"), () => RefreshAllFeeds(), Lang.T("下载更新所有源")),
-            new Shortcut(Key.A, Lang.T("归档"), () => ArchiveSelectedFeed(), Lang.T("给当前源加时间戳 (同 CLI -a)")),
-            new Shortcut(Key.R, Lang.T("去归档"), () => UnarchiveSelectedFeed(), Lang.T("去掉时间戳 (同 CLI -una)")),
-            new Shortcut(Key.X, Lang.T("删除"), () => DeleteSelected(), Lang.T("删除选中源/文章 (同 CLI -r)")),
-            new Shortcut(Key.D, Lang.T("加源"), () => AddFeedDialog(), Lang.T("添加新订阅源 (同 CLI -d)")),
-            new Shortcut(Key.S, Lang.T("搜索"), () => SearchDialog(), Lang.T("语义搜索 (同 CLI --search)")),
-            new Shortcut(Key.Y, Lang.T("摘要"), () => SummarizeSelected(), Lang.T("给当前文章生成摘要 (同 CLI --summary)")),
-            new Shortcut(Key.G, Lang.T("概要"), () => ToggleContentMode(), Lang.T("切换正文/概要")),
-            new Shortcut(Key.Q, Lang.T("退出"), () => top.RequestStop(), Lang.T("退出程序"))
+            new Shortcut(Key.H, Lang.T("Help"), () => ShowHelpDialog(), Lang.T("Show all keybindings")),
+            new Shortcut(Key.F2, Lang.T("About"), () => ShowAboutDialog(), Lang.T("About sip")),
+            new Shortcut(Key.U, Lang.T("Update"), () => RefreshSelectedFeed(), Lang.T("Update selected feed (same as CLI -u)")),
+            new Shortcut(Key.F6, Lang.T("Update all"), () => RefreshAllFeeds(), Lang.T("Update all feeds")),
+            new Shortcut(Key.A, Lang.T("Archive"), () => ArchiveSelectedFeed(), Lang.T("Add timestamp to feed (same as CLI -a)")),
+            new Shortcut(Key.R, Lang.T("Unarchive"), () => UnarchiveSelectedFeed(), Lang.T("Remove timestamp (same as CLI -una)")),
+            new Shortcut(Key.X, Lang.T("Delete"), () => DeleteSelected(), Lang.T("Delete selected feed/article (same as CLI -r)")),
+            new Shortcut(Key.D, Lang.T("Add"), () => AddFeedDialog(), Lang.T("Add new feed (same as CLI -d)")),
+            new Shortcut(Key.S, Lang.T("Search"), () => SearchDialog(), Lang.T("Semantic search (same as CLI --search)")),
+            new Shortcut(Key.Y, Lang.T("Summary"), () => SummarizeSelected(), Lang.T("Summarize current article (same as CLI --summary)")),
+            new Shortcut(Key.G, Lang.T("Overview"), () => ToggleContentMode(), Lang.T("Toggle content/overview")),
+            new Shortcut(Key.Q, Lang.T("Quit"), () => top.RequestStop(), Lang.T("Exit program"))
         });
 
         top.Add(tree, vDivider, contentView, cmdLabel, cmdBar, statusBar);
@@ -420,9 +476,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 int archive = r.GetInt32(3);
                 int deleted = r.GetInt32(4);
                 var parts = new List<string>();
-                if (active > 0) parts.Add(Lang.T("现存{0}篇", active + deleted));
-                if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
-                if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
+                if (active > 0) parts.Add(Lang.T("{0} current", active + deleted));
+                if (archive > 0) parts.Add(Lang.T("{0} changed", archive));
+                if (deleted > 0) parts.Add(Lang.T("{0} deleted by author, but archived for you", deleted));
                 string stats = string.Join("，", parts);
                 feeds.Add(new TuiNode { IsFeed = true, FeedId = id, Title = $"{CjkSpace(title)} {stats}" });
             }
@@ -443,7 +499,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             contentMode = true;   // 历史版本固定用完整正文
             contentView.Text = BuildArticleMarkdown(itemId, true, dbPath, contentView.GetContentWidth());
-            contentView.Title = " " + Lang.T("正文") + " · v" + version + " ";
+            contentView.Title = " " + Lang.T("Content") + " · v" + version + " ";
             contentView.SetFocus();
         }
 
@@ -466,7 +522,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 
             if (versions.Count <= 1)
             {
-                Ask(Lang.T("这篇文章只有一版，没有历史变更"), Lang.T("确定"));
+                Ask(Lang.T("This article has only one version, no change history"), Lang.T("OK"));
                 return;
             }
 
@@ -476,23 +532,23 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 var (_, ver, status, at) = versions[i];
                 string tag = status switch
                 {
-                    "active" => Lang.T("现行"),
-                    "archived" => Lang.T("已归档"),
-                    "deleted" => Lang.T("已删除"),
+                    "active" => Lang.T("current"),
+                    "archived" => Lang.T("archived"),
+                    "deleted" => Lang.T("deleted"),
                     _ => ""
                 };
                 string when = at.Length > 0 && TryParseIso(at) is DateTime dt ? " · " + dt.ToString("yyyy-MM-dd HH:mm") : "";
                 sb.AppendLine($"{i + 1}.  v{ver}  {tag}{when}");
             }
             sb.AppendLine();
-            sb.AppendLine(Lang.T("输入编号查看该版本，0 取消"));
+            sb.AppendLine(Lang.T("Enter a number to view that version, 0 to cancel"));
 
-            var dlg = new Dialog { Title = " " + Lang.T("版本历史") + " ", Width = 60, Height = 14 };
+            var dlg = new Dialog { Title = " " + Lang.T("Version History") + " ", Width = 60, Height = 14 };
             var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 9, ReadOnly = true };
             txt.Text = sb.ToString();
             var input = new TextField { X = 0, Y = Pos.Bottom(txt), Width = 5, Text = "" };
-            var ok = new Button { Text = Lang.T("查看"), IsDefault = true, X = 0, Y = Pos.Bottom(input) + 1 };
-            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(input) + 1 };
+            var ok = new Button { Text = Lang.T("View"), IsDefault = true, X = 0, Y = Pos.Bottom(input) + 1 };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(input) + 1 };
             dlg.Add(txt, input, ok, cancel);
             ok.Accepted += (s, e) => dlg.RequestStop();
             cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
@@ -536,8 +592,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             if (n.IsFeed)
             {
                 // 删除源（同 CLI -r）
-                int ans = Ask(Lang.T("确定删除 {0}？此操作不可恢复！(y/n)", n.Title),
-                    Lang.T("确定"), Lang.T("取消"));
+                int ans = Ask(Lang.T("Delete {0}? This cannot be undone! (y/n)", n.Title),
+                    Lang.T("OK"), Lang.T("Cancel"));
                 if (ans != 0) return;
                 DeleteFeedByRealId(n.FeedId, dbPath);
                 RebuildTree();
@@ -546,7 +602,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             else
             {
                 // 删除整篇文章（该 Guid 的全部版本，含向量）
-                int ans = Ask(Lang.T("确定删除这篇文章（含全部历史版本）？此操作不可恢复！"), Lang.T("确定"), Lang.T("取消"));
+                int ans = Ask(Lang.T("Delete this article (with all its versions)? This cannot be undone!"), Lang.T("OK"), Lang.T("Cancel"));
                 if (ans != 0) return;
                 DeleteArticleByGuid(n.Guid, dbPath);
                 RebuildTree();
@@ -589,7 +645,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
                 ReadOnly = true, WordWrap = true, ScrollBars = true
             };
-            var dlg = new Dialog { Title = " " + Lang.T("处理中") + " ", Width = 64, Height = 18 };
+            var dlg = new Dialog { Title = " " + Lang.T("Working") + " ", Width = 64, Height = 18 };
             dlg.Add(outTxt);
 
             TextWriter oldOut = Console.Out;
@@ -602,7 +658,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             Task.Run(() =>
             {
                 try { op(); }
-                catch (Exception ex) { lock (lockObj) sb.AppendLine(Lang.T("出错: {0}", ex.Message)); }
+                catch (Exception ex) { lock (lockObj) sb.AppendLine(Lang.T("Error: {0}", ex.Message)); }
                 finally { lock (lockObj) { done = true; sb.AppendLine(); } }
             });
 
@@ -627,11 +683,11 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         void AddFeedDialog()
         {
             // 输入 URL 添加新源（同 CLI -d <url>）
-            var dlg = new Dialog { Title = " " + Lang.T("添加订阅源") + " " };
-            var lbl = new Label { Text = Lang.T("RSS 链接："), X = 0, Y = 0 };
+            var dlg = new Dialog { Title = " " + Lang.T("Add feed") + " " };
+            var lbl = new Label { Text = Lang.T("RSS URL: "), X = 0, Y = 0 };
             var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
-            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = 3 };
-            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = 3 };
+            var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = 3 };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = 3 };
             dlg.Add(lbl, input, ok, cancel);
             dlg.Width = 60;
             dlg.Height = 7;
@@ -649,14 +705,14 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             if (!File.Exists(ConfigPath(dbPath)))
             {
-                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                Ask(Lang.T("AI not configured. Run 'sip --init' in the terminal first"), Lang.T("OK"));
                 return;
             }
-            var dlg = new Dialog { Title = " " + Lang.T("语义搜索") + " " };
-            var lbl = new Label { Text = Lang.T("搜索内容："), X = 0, Y = 0 };
+            var dlg = new Dialog { Title = " " + Lang.T("Semantic search") + " " };
+            var lbl = new Label { Text = Lang.T("Search for: "), X = 0, Y = 0 };
             var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
-            var ok = new Button { Text = Lang.T("搜索"), IsDefault = true, X = 0, Y = 3 };
-            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = 3 };
+            var ok = new Button { Text = Lang.T("Search"), IsDefault = true, X = 0, Y = 3 };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = 3 };
             dlg.Add(lbl, input, ok, cancel);
             dlg.Width = 60;
             dlg.Height = 7;
@@ -677,12 +733,12 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var n = GetSelected();
             if (n == null || n.IsFeed)
             {
-                Ask(Lang.T("请先选中一篇文章再生成摘要"), Lang.T("确定"));
+                Ask(Lang.T("Select an article first to summarize it"), Lang.T("OK"));
                 return;
             }
             if (!File.Exists(ConfigPath(dbPath)))
             {
-                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                Ask(Lang.T("AI not configured. Run 'sip --init' in the terminal first"), Lang.T("OK"));
                 return;
             }
             long itemId = n.ItemId;
@@ -692,37 +748,38 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 
         void ShowHelpDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("快捷键帮助") + " ", Width = 56, Height = 22 };
+            var dlg = new Dialog { Title = " " + Lang.T("Keyboard help") + " ", Width = 56, Height = 22 };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
                 ReadOnly = true, WordWrap = false
             };
             txt.Text = string.Join("\n",
-                Lang.T("U          更新当前源"),
-                Lang.T("F6         更新所有源"),
-                Lang.T("A          归档当前源"),
-                Lang.T("R          去归档"),
-                Lang.T("X          删除选中源/文章"),
-                Lang.T("D          添加新订阅源"),
-                Lang.T("S          语义搜索"),
-                Lang.T("Y          生成文章摘要"),
-                Lang.T("G          切换正文/概要"),
-                Lang.T("V          查看文章版本/变更历史（✎ 标记）"),
-                Lang.T("C          折叠/展开侧栏"),
-                Lang.T("Esc        唤出命令行"),
-                Lang.T("H          显示本帮助"),
-                Lang.T("Q          退出"),
-                Lang.T("Enter      源:折叠/展开; 文章:打开正文"),
-                Lang.T("← / →      切换侧栏/正文"),
-                Lang.T("PageUp/Dn  上下翻页"),
+                Lang.T("U          update current feed"),
+                Lang.T("F6         update all feeds"),
+                Lang.T("A          archive current feed"),
+                Lang.T("R          unarchive"),
+                Lang.T("X          delete selected feed/article"),
+                Lang.T("D          add new feed"),
+                Lang.T("S          semantic search"),
+                Lang.T("Y          summarize article"),
+                Lang.T("G          toggle content/overview"),
+                Lang.T("V          view article versions/changes (marked ✎)"),
+                Lang.T("C          collapse/expand sidebar"),
+                Lang.T("Esc        open command line"),
+                Lang.T("H          show this help"),
+                Lang.T("Q          quit"),
+                Lang.T("Enter      feed: collapse/expand; article: open"),
+                Lang.T("← / →      switch sidebar/content"),
+                Lang.T("PageUp/Dn  page up/down"),
                 "",
-                Lang.T("自动同步：打开程序时 + 每 15 分钟，仅更新「到期」源（schedule 设置频率）"),
-                Lang.T("命令行指令: init / index / reindex / u / d / a / r / s / g / y / q"),
-                Lang.T("           schedule <编号> <表达式>（如 30m / daily@10:00 / manual）"),
-                Lang.T("           sync / all"));
-            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
-            var about = new Button { Text = Lang.T("关于"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
+                Lang.T("Auto-sync: on open + every 15 min, only 'due' feeds (set frequency with schedule)"),
+                Lang.T("Commands: init / index / reindex / u / d / a / r / s / g / y / q"),
+                Lang.T("           schedule <id> <expr> (e.g. 30m / daily@10:00 / manual)"),
+                Lang.T("           sync / all"),
+                Lang.T("           lang <code> (switch UI language, e.g. zh-CN / en-US)"));
+            var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
+            var about = new Button { Text = Lang.T("About"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok, about);
             ok.Accepted += (s, e) => dlg.RequestStop();
             about.Accepted += (s, e) => { dlg.RequestStop(); ShowAboutDialog(); };
@@ -731,7 +788,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 
         void ShowAboutDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("关于") + " ", Width = 60, Height = 18 };
+            var dlg = new Dialog { Title = " " + Lang.T("About") + " ", Width = 60, Height = 18 };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
@@ -754,7 +811,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 "",
                 "博客：https://blog.hotsouprealm.top/atom.xml",
                 "关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾");
-            var ok = new Button { Text = Lang.T("确定"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
+            var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
             Application.Run(dlg);
@@ -763,8 +820,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         // 通用确认/提示对话框，返回按钮索引（0 = 第一个按钮）
         int Ask(string message, params string[] buttons)
         {
-            var btns = buttons.Length > 0 ? buttons : new[] { Lang.T("确定") };
-            return MessageBox.Query(Application.Instance, Lang.T("提示"), message, btns) ?? 0;
+            var btns = buttons.Length > 0 ? buttons : new[] { Lang.T("OK") };
+            return MessageBox.Query(Application.Instance, Lang.T("Notice"), message, btns) ?? 0;
         }
 
         // 在浏览器/默认程序中打开链接
@@ -781,7 +838,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             }
             catch (Exception ex)
             {
-                Ask(Lang.T("打开链接失败：{0}", ex.Message), Lang.T("确定"));
+                Ask(Lang.T("Failed to open link: {0}", ex.Message), Lang.T("OK"));
             }
         }
 
@@ -790,7 +847,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             if (TuiMdState.Links.Count == 0)
             {
-                Ask(Lang.T("当前文章没有可打开的链接"), Lang.T("确定"));
+                Ask(Lang.T("This article has no openable links"), Lang.T("OK"));
                 return;
             }
             linkNavMode = !linkNavMode;
@@ -804,7 +861,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             string extra = linkNavMode && TuiMdState.Links.Count > 0
                 ? $"  [ {linkNavIndex + 1}/{TuiMdState.Links.Count} ]  {TuiMdState.Links[linkNavIndex].Text}"
                 : "";
-            string modeTag = contentMode ? Lang.T("正文") : Lang.T("概要");
+            string modeTag = contentMode ? Lang.T("Content") : Lang.T("Overview");
             if (sidebarCollapsed) modeTag = "◀ " + modeTag;
             contentView.Title = " " + modeTag + (linkNavMode ? " (链接模式)" : "") + extra + " ";
         }
@@ -821,7 +878,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             if (!linkNavMode || TuiMdState.Links.Count == 0) return;
             var (text, url) = TuiMdState.Links[linkNavIndex];
-            int ans = Ask(Lang.T("打开链接？\n{0}\n{1}", text, url), Lang.T("打开"), Lang.T("取消"));
+            int ans = Ask(Lang.T("Open link?\n{0}\n{1}", text, url), Lang.T("Open"), Lang.T("Cancel"));
             if (ans == 0) OpenUrl(url);
         }
 
@@ -867,7 +924,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             else if (e.KeyCode == KeyCode.V)
             {
                 if (n is { IsFeed: false } && n.HasHistory) ShowVersionHistory(n);
-                else Ask(Lang.T("这篇文章没有变更历史（有 ✎ 标记的才有）"), Lang.T("确定"));
+                else Ask(Lang.T("This article has no change history (only ones marked ✎ have it)"), Lang.T("OK"));
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.Esc)
@@ -917,7 +974,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 {
                     var nv = tree.SelectedObject;
                     if (nv is { IsFeed: false } && nv.HasHistory) ShowVersionHistory(nv);
-                    else Ask(Lang.T("这篇文章没有变更历史（有 ✎ 标记的才有）"), Lang.T("确定"));
+                    else Ask(Lang.T("This article has no change history (only ones marked ✎ have it)"), Lang.T("OK"));
                     e.Handled = true;
                     break;
                 }
@@ -1031,7 +1088,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     DoTuiSearch(arg);
                     return;
                 case "g" or "--grep":
-                    if (string.IsNullOrWhiteSpace(arg)) { Ask(Lang.T("用法: grep <关键词>"), Lang.T("确定")); return; }
+                    if (string.IsNullOrWhiteSpace(arg)) { Ask(Lang.T("Usage: grep <keyword>"), Lang.T("OK")); return; }
                     DoTuiGrep(arg);
                     return;
                 case "y" or "--summary":
@@ -1051,10 +1108,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     var sp = arg.Split(' ', 2);
                     if (sp.Length < 2 || !int.TryParse(sp[0], out int sn))
                     {
-                        Ask(Lang.T("用法: schedule <编号> <表达式>，如 schedule 1 30m / schedule 1 daily@10:00 / schedule 1 manual"), Lang.T("确定"));
+                        Ask(Lang.T("Usage: schedule <id> <expr>, e.g. schedule 1 30m / schedule 1 daily@10:00 / schedule 1 manual"), Lang.T("OK"));
                         return;
                     }
-                    if (sn <= 0 || GetRealId(sn, dbPath) == 0) { Ask(Lang.T("没找到这个编号"), Lang.T("确定")); return; }
+                    if (sn <= 0 || GetRealId(sn, dbPath) == 0) { Ask(Lang.T("Feed number not found"), Lang.T("OK")); return; }
                     SetFeedSchedule(sn.ToString(), sp[1], dbPath);
                     RebuildTree();
                     return;
@@ -1065,10 +1122,59 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case "all" or "--update-all" or "update-all":
                     RefreshAllFeeds();
                     return;
+                case "lang" or "--lang":
+                    SwitchLanguage(arg);
+                    return;
                 default:
-                    Ask(Lang.T("未知命令: {0}，按 H 查看帮助", cmd), Lang.T("确定"));
+                    Ask(Lang.T("Unknown command: {0}. Press H for help", cmd), Lang.T("OK"));
                     return;
             }
+        }
+
+        // 运行时切换界面语言：lang <代码>（如 lang zh-CN / lang en-US）
+        void SwitchLanguage(string code)
+        {
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                Ask(Lang.T("Usage: lang <code>, e.g. lang zh-CN / lang en-US"), Lang.T("OK"));
+                return;
+            }
+            string dataDir = Path.GetDirectoryName(dbPath) ?? ".";
+            string file = Path.Combine(dataDir, "languages", code + ".json");
+            if (!File.Exists(file))
+            {
+                Ask(Lang.T("Language file not found: {0}", file), Lang.T("OK"));
+                return;
+            }
+            Lang.Init(dataDir, code);
+            // 重绘持久化的静态标签（Terminal.Gui 设置 Title 会自动触发重绘）
+            tree.Title = " " + Lang.T("Feeds") + " (C " + Lang.T("collapse") + ") ";
+            contentView.Title = " " + Lang.T("Content") + " ";
+            RebuildStatusBar();
+            Ask(Lang.T("Language switched to {0}", code), Lang.T("OK"));
+        }
+
+        // 用当前语言重建状态栏（语言切换后调用）
+        void RebuildStatusBar()
+        {
+            var sb = new StatusBar(new Shortcut[]
+            {
+                new Shortcut(Key.H, Lang.T("Help"), () => ShowHelpDialog(), Lang.T("Show all keybindings")),
+                new Shortcut(Key.F2, Lang.T("About"), () => ShowAboutDialog(), Lang.T("About sip")),
+                new Shortcut(Key.U, Lang.T("Update"), () => RefreshSelectedFeed(), Lang.T("Update selected feed (same as CLI -u)")),
+                new Shortcut(Key.F6, Lang.T("Update all"), () => RefreshAllFeeds(), Lang.T("Update all feeds")),
+                new Shortcut(Key.A, Lang.T("Archive"), () => ArchiveSelectedFeed(), Lang.T("Add timestamp to feed (same as CLI -a)")),
+                new Shortcut(Key.R, Lang.T("Unarchive"), () => UnarchiveSelectedFeed(), Lang.T("Remove timestamp (same as CLI -una)")),
+                new Shortcut(Key.X, Lang.T("Delete"), () => DeleteSelected(), Lang.T("Delete selected feed/article (same as CLI -r)")),
+                new Shortcut(Key.D, Lang.T("Add"), () => AddFeedDialog(), Lang.T("Add new feed (same as CLI -d)")),
+                new Shortcut(Key.S, Lang.T("Search"), () => SearchDialog(), Lang.T("Semantic search (same as CLI --search)")),
+                new Shortcut(Key.Y, Lang.T("Summary"), () => SummarizeSelected(), Lang.T("Summarize current article (same as CLI --summary)")),
+                new Shortcut(Key.G, Lang.T("Overview"), () => ToggleContentMode(), Lang.T("Toggle content/overview")),
+                new Shortcut(Key.Q, Lang.T("Quit"), () => top.RequestStop(), Lang.T("Exit program"))
+            });
+            top.Remove(statusBar);
+            statusBar = sb;
+            top.Add(statusBar);
         }
 
         // TUI 内语义搜索并显示到正文区
@@ -1076,20 +1182,20 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             if (!File.Exists(ConfigPath(dbPath)))
             {
-                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                Ask(Lang.T("AI not configured. Run 'sip --init' in the terminal first"), Lang.T("OK"));
                 return;
             }
-            contentView.Text = Lang.T("正在搜索，请稍候...");
+            contentView.Text = Lang.T("Searching, please wait...");
             var results = DoSearch(query, dbPath);
-            if (results == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            if (results == null) { contentView.Text = Lang.T("Search failed"); return; }
             // 让 Ctrl+O 链接导航也能遍历搜索结果
             TuiMdState.Links.Clear();
             foreach (var h in results)
                 if (!string.IsNullOrWhiteSpace(h.Link))
                     TuiMdState.Links.Add((h.Title, h.Link));
             var sb = new StringBuilder();
-            sb.AppendLine(Lang.T("搜索结果（查询：{0}，共 {1} 条）", query, results.Count));
-            sb.AppendLine(Lang.T("提示：Enter/Tab 或 Ctrl+O 打开链接"));
+            sb.AppendLine(Lang.T("Search results (query: {0}, total {1})", query, results.Count));
+            sb.AppendLine(Lang.T("Hint: Enter/Tab or Ctrl+O to open link"));
             sb.AppendLine();
             foreach (var h in results)
             {
@@ -1099,7 +1205,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 string feedLink = !string.IsNullOrWhiteSpace(h.Link)
                     ? $"[{EscapeMd(h.FeedTitle)}]({EscapeMdUrl(h.Link)})"
                     : EscapeMd(h.FeedTitle);
-                sb.AppendLine($"- {titleLink}  （{Lang.T("相似度")} {h.Score:P1}）");
+                sb.AppendLine($"- {titleLink}  （{Lang.T("similarity")} {h.Score:P1}）");
                 sb.AppendLine($"  来源：{feedLink}");
                 if (!string.IsNullOrWhiteSpace(h.Description))
                     sb.AppendLine($"  摘要：{EscapeMd(h.Description)}");
@@ -1111,17 +1217,17 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         // TUI 内全文搜索（等价 CLI --grep，不依赖 AI）
         void DoTuiGrep(string keyword)
         {
-            contentView.Text = Lang.T("正在搜索，请稍候...");
+            contentView.Text = Lang.T("Searching, please wait...");
             var hits = DoGrep(keyword, dbPath);
-            if (hits == null) { contentView.Text = Lang.T("搜索失败"); return; }
+            if (hits == null) { contentView.Text = Lang.T("Search failed"); return; }
             // 让 Ctrl+O 链接导航也能遍历搜索结果
             TuiMdState.Links.Clear();
             foreach (var h in hits)
                 if (!string.IsNullOrWhiteSpace(h.Link))
                     TuiMdState.Links.Add((h.Title, h.Link));
             var sb = new StringBuilder();
-            sb.AppendLine(Lang.T("全文搜索「{0}」：共 {1} 条", keyword, hits.Count));
-            sb.AppendLine(Lang.T("提示：Enter/Tab 或 Ctrl+O 打开链接"));
+            sb.AppendLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, hits.Count));
+            sb.AppendLine(Lang.T("Hint: Enter/Tab or Ctrl+O to open link"));
             sb.AppendLine();
             foreach (var h in hits)
             {
@@ -1142,32 +1248,32 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var cfg = LoadConfig(dbPath);
             int y = 0;
             var embEp = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.ApiEndpoint };
-            var embEpL = new Label { Text = Lang.T("Embedding 端点:"), X = 1, Y = y };
+            var embEpL = new Label { Text = Lang.T("Embedding endpoint: "), X = 1, Y = y };
             y++;
             var embM = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.Model };
-            var embML = new Label { Text = Lang.T("Embedding 模型:"), X = 1, Y = y };
+            var embML = new Label { Text = Lang.T("Embedding model: "), X = 1, Y = y };
             y++;
             var embD = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.Dimensions.ToString() };
-            var embDL = new Label { Text = Lang.T("向量维度:"), X = 1, Y = y };
+            var embDL = new Label { Text = Lang.T("Vector dims: "), X = 1, Y = y };
             y++;
             var llmEp = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Llm.ApiEndpoint };
-            var llmEpL = new Label { Text = Lang.T("LLM 端点:"), X = 1, Y = y };
+            var llmEpL = new Label { Text = Lang.T("LLM endpoint: "), X = 1, Y = y };
             y++;
             var llmM = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Llm.Model };
-            var llmML = new Label { Text = Lang.T("LLM 模型:"), X = 1, Y = y };
+            var llmML = new Label { Text = Lang.T("LLM model: "), X = 1, Y = y };
             y++;
             var embKey = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = "", Secret = true };
-            var embKeyL = new Label { Text = Lang.T("Embedding Key:"), X = 1, Y = y };
+            var embKeyL = new Label { Text = Lang.T("Embedding Key: "), X = 1, Y = y };
             y++;
             var llmKey = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = "", Secret = true };
-            var llmKeyL = new Label { Text = Lang.T("LLM Key:"), X = 1, Y = y };
+            var llmKeyL = new Label { Text = Lang.T("LLM Key: "), X = 1, Y = y };
             y++;
             var thr = new TextField { X = 16, Y = y, Width = Dim.Fill(2), Text = cfg.Embedding.SearchThreshold.ToString() };
-            var thrL = new Label { Text = Lang.T("搜索阈值:"), X = 1, Y = y };
+            var thrL = new Label { Text = Lang.T("Search threshold: "), X = 1, Y = y };
             y++;
-            var ok = new Button { Text = Lang.T("保存"), IsDefault = true, X = 1, Y = y };
-            var cancel = new Button { Text = Lang.T("取消"), X = Pos.Right(ok) + 1, Y = y };
-            var dlg = new Dialog { Title = " " + Lang.T("AI 配置") + " ", Width = 64, Height = y + 3 };
+            var ok = new Button { Text = Lang.T("Save"), IsDefault = true, X = 1, Y = y };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = y };
+            var dlg = new Dialog { Title = " " + Lang.T("AI config") + " ", Width = 64, Height = y + 3 };
             dlg.Add(embEpL, embEp, embML, embM, embDL, embD, llmEpL, llmEp, llmML, llmM,
                     embKeyL, embKey, llmKeyL, llmKey, thrL, thr, ok, cancel);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -1189,17 +1295,17 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             if (!string.IsNullOrEmpty(embKey.Text)) CredSet("embedding_api_key", embKey.Text);
             if (!string.IsNullOrEmpty(llmKey.Text)) CredSet("llm_api_key", llmKey.Text);
 
-            Ask(Lang.T("AI 配置已保存。更换 Embedding 模型后需执行 reindex 重新向量化。"), Lang.T("确定"));
+            Ask(Lang.T("AI config saved. Run reindex after changing the Embedding model."), Lang.T("OK"));
         }
 
         // TUI 内对当前选中源做向量化（等价 CLI --index，作用于当前源）
         void IndexSelectedFeed()
         {
             int realId = GetSelectedFeedId();
-            if (realId == 0) { Ask(Lang.T("请先选中一个订阅源"), Lang.T("确定")); return; }
+            if (realId == 0) { Ask(Lang.T("Select a feed first"), Lang.T("OK")); return; }
             if (!File.Exists(ConfigPath(dbPath)))
             {
-                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                Ask(Lang.T("AI not configured. Run 'sip --init' in the terminal first"), Lang.T("OK"));
                 return;
             }
             var cfg = LoadConfig(dbPath);
@@ -1216,9 +1322,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var articles = new List<(int Id, string Title)>();
             while (r.Read()) articles.Add((r.GetInt32(0), r.GetString(1)));
 
-            if (articles.Count == 0) { Ask(Lang.T("该源的文章都已向量化"), Lang.T("确定")); return; }
+            if (articles.Count == 0) { Ask(Lang.T("All articles of this feed are already embedded"), Lang.T("OK")); return; }
 
-            Console.WriteLine(Lang.T("正在向量化 {0} 篇文章...", articles.Count));
+            Console.WriteLine(Lang.T("Embedding {0} articles...", articles.Count));
             RunNetworkOp(() =>
             {
                 int modelId = EnsureModel(dbPath, cfg.Embedding);
@@ -1226,7 +1332,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 foreach (var a in articles)
                 {
                     var vec = SafeEmbed(a.Title, cfg).GetAwaiter().GetResult();
-                    if (vec == null) { fail++; Console.WriteLine(Lang.T("  失败：{0}", a.Title)); continue; }
+                    if (vec == null) { fail++; Console.WriteLine(Lang.T("  failed: {0}", a.Title)); continue; }
                     if (vec.Length != cfg.Embedding.Dimensions)
                     {
                         cfg.Embedding.Dimensions = vec.Length;
@@ -1234,9 +1340,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     }
                     SaveVector(dbPath, realId, a.Id, modelId, vec);
                     ok++;
-                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, articles.Count));
+                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  processed {0}/{1}", ok + fail, articles.Count));
                 }
-                Console.WriteLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
+                Console.WriteLine(Lang.T("Embedding done: {0} OK, {1} failed", ok, fail));
             });
         }
 
@@ -1245,10 +1351,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             if (!File.Exists(ConfigPath(dbPath)))
             {
-                Ask(Lang.T("尚未配置 AI，请先用命令行执行 sip --init 配置"), Lang.T("确定"));
+                Ask(Lang.T("AI not configured. Run 'sip --init' in the terminal first"), Lang.T("OK"));
                 return;
             }
-            int ans = Ask(Lang.T("将删除现有全部向量并重新向量化所有 active 文章，确认？"), Lang.T("确定"), Lang.T("取消"));
+            int ans = Ask(Lang.T("Delete all vectors and re-embed all active articles?"), Lang.T("OK"), Lang.T("Cancel"));
             if (ans != 0) return;
 
             var cfg = LoadConfig(dbPath);
@@ -1262,9 +1368,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var items = new List<(int Id, int FeedId, string Title)>();
             while (r.Read()) items.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2)));
 
-            if (items.Count == 0) { Ask(Lang.T("没有需要向量化的文章"), Lang.T("确定")); return; }
+            if (items.Count == 0) { Ask(Lang.T("No articles to embed"), Lang.T("OK")); return; }
 
-            Console.WriteLine(Lang.T("正在重新向量化 {0} 篇文章...", items.Count));
+            Console.WriteLine(Lang.T("Re-embedding {0} articles...", items.Count));
             RunNetworkOp(() =>
             {
                 int modelId = EnsureModel(dbPath, cfg.Embedding);
@@ -1280,9 +1386,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     }
                     SaveVector(dbPath, it.FeedId, it.Id, modelId, vec);
                     ok++;
-                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, items.Count));
+                    if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  processed {0}/{1}", ok + fail, items.Count));
                 }
-                Console.WriteLine(Lang.T("重新索引完成：成功 {0}，失败 {1}", ok, fail));
+                Console.WriteLine(Lang.T("Re-indexing done: {0} OK, {1} failed", ok, fail));
             });
         }
 
@@ -1302,16 +1408,16 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 _syncing = true;
                 RunNetworkOp(() =>
                 {
-                    Console.WriteLine(Lang.T("正在同步 {0} 个到期订阅源：", due.Count));
+                    Console.WriteLine(Lang.T("Syncing {0} due feeds:", due.Count));
                     var now = DateTime.Now;
                     foreach (var f in due)
                     {
-                        Console.WriteLine(Lang.T("  · {0}（上次 {1}）", f.Title,
-                            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未")));
+                        Console.WriteLine(Lang.T("  · {0} (last {1})", f.Title,
+                            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("never")));
                         try
                         {
                             DownloadAndSaveToDb(f.Url, dbPath, interactive: false).Wait();
-                            Console.WriteLine(Lang.T("    ✓ 已更新"));
+                            Console.WriteLine(Lang.T("    ✓ updated"));
                         }
                         catch (Exception ex)
                         {
@@ -1322,7 +1428,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             }
             catch (Exception ex)
             {
-                Ask(Lang.T("同步到期源出错：{0}", ex.Message), Lang.T("确定"));
+                Ask(Lang.T("Error syncing due feeds: {0}", ex.Message), Lang.T("OK"));
             }
             finally
             {
@@ -1378,12 +1484,12 @@ bool ShowArticlePreview(int itemId, string dbPath)
     md.Width = Dim.Fill();
     md.Height = Dim.Fill() - 1;
     md.CanFocus = true;
-    md.Title = " " + Lang.T("文章预览") + " ";
+    md.Title = " " + Lang.T("Article Preview") + " ";
     md.Text = BuildArticleMarkdown(itemId, contentMode: true, dbPath, 90);
 
     var hint = new Label
     {
-        Text = Lang.T("  按 W 进入完整 TUI 程序  ·  Q 返回  "),
+        Text = Lang.T("  Press W to enter the full TUI  ·  Q to go back  "),
         X = 0,
         Y = Pos.AnchorEnd(1),
         Width = Dim.Fill(),
@@ -1393,7 +1499,7 @@ bool ShowArticlePreview(int itemId, string dbPath)
 
     var top = new Window
     {
-        Title = " sip · " + Lang.T("文章预览") + " ",
+        Title = " sip · " + Lang.T("Article Preview") + " ",
         X = 0,
         Y = 0,
         Width = Dim.Fill(),
@@ -1519,7 +1625,7 @@ string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wr
     cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate, Summary FROM Items WHERE Id = @id";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) return Lang.T("（没有找到这篇文章）");
+    if (!r.Read()) return Lang.T("(Article not found)");
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
     string desc = r.IsDBNull(2) ? "" : r.GetString(2);
@@ -1548,7 +1654,7 @@ string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wr
         // 概要模式：AI 摘要 + RSS 摘要
         if (!string.IsNullOrWhiteSpace(aiSummary))
         {
-            md.AppendLine("## " + Lang.T("AI 摘要"));
+            md.AppendLine("## " + Lang.T("AI Summary"));
             md.AppendLine();
             md.AppendLine(EscapeMd(aiSummary));
             md.AppendLine();
@@ -1558,7 +1664,7 @@ string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wr
         if (!string.IsNullOrWhiteSpace(desc))
             md.Append(HtmlToMarkdown(desc, wrapWidth));
         else
-            md.Append(Lang.T("（无摘要，按 G 查看完整正文）"));
+            md.Append(Lang.T("(No summary, press G for full content)"));
     }
     return md.ToString();
 }
@@ -1747,7 +1853,7 @@ void WalkHtml(HtmlAgilityPack.HtmlNode node, StringBuilder sb, int listDepth)
             {
                 // Windows Terminal 等终端不支持 Sixel/kitty 内嵌图片，
                 // 统一转成可点击链接，用链接导航模式/Ctrl+O 或鼠标点击在浏览器打开
-                string label = string.IsNullOrWhiteSpace(alt2) ? Lang.T("图片") : alt2;
+                string label = string.IsNullOrWhiteSpace(alt2) ? Lang.T("Image") : alt2;
                 sb.Append('[').Append("🖼️ ").Append(label).Append(']').Append('(').Append(EscapeMdUrl(src2)).Append(')');
             }
             return;
@@ -1868,7 +1974,7 @@ void DeleteFeedByRealId(int realId, string dbPath)
 async Task UpdateFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -1881,29 +1987,29 @@ async Task UpdateFeed(int displayNum, string dbPath)
     string url = r.GetString(1);
     r.Close();
 
-    if (IsArchived(title)) { Console.WriteLine(Lang.T("{0} 已归档，不能更新", title)); return; }
+    if (IsArchived(title)) { Console.WriteLine(Lang.T("{0} is archived and cannot be updated", title)); return; }
 
-    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine(Lang.T("更新完成")); }
-    catch (TaskCanceledException) { Console.WriteLine(Lang.T("下载超时，请检查网络或链接是否有效")); }
-    catch (HttpRequestException) { Console.WriteLine(Lang.T("网络请求失败，链接可能已失效")); }
-    catch (SqliteException ex) { Console.WriteLine(Lang.T("数据库出错：{0}", ex.Message)); }
-    catch (Exception ex) { Console.WriteLine(Lang.T("未知错误：{0}", ex.Message)); }
+    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine(Lang.T("Update complete")); }
+    catch (TaskCanceledException) { Console.WriteLine(Lang.T("Download timed out; check your network or the URL")); }
+    catch (HttpRequestException) { Console.WriteLine(Lang.T("Network request failed, the URL may be dead")); }
+    catch (SqliteException ex) { Console.WriteLine(Lang.T("Database error: {0}", ex.Message)); }
+    catch (Exception ex) { Console.WriteLine(Lang.T("Unknown error: {0}", ex.Message)); }
 }
 
 // CLI 模式下载（同步等待异步方法）
 void DownloadCli(string url, string dbPath)
 {
-    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine(Lang.T("下载完成")); }
-    catch (Exception ex) { Console.WriteLine(Lang.T("出错: {0}", ex.Message)); }
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine(Lang.T("Download complete")); }
+    catch (Exception ex) { Console.WriteLine(Lang.T("Error: {0}", ex.Message)); }
 }
 
 // ══════════ 更新计划（CLI）═══════════
 // 设置某源的更新计划表达式；无效表达式会给出提示
 void SetFeedSchedule(string displayNum, string expr, string dbPath)
 {
-    if (!int.TryParse(displayNum, out int dn)) { Console.WriteLine(Lang.T("编号必须是数字")); return; }
+    if (!int.TryParse(displayNum, out int dn)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
     int realId = GetRealId(dn, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     string raw = (expr ?? "").Trim();
     if (raw.Length == 0 || raw.Equals("manual", StringComparison.OrdinalIgnoreCase))
@@ -1915,14 +2021,14 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
         cmd.CommandText = "UPDATE Feeds SET Schedule = '' WHERE Id = @id";
         cmd.Parameters.AddWithValue("@id", realId);
         cmd.ExecuteNonQuery();
-        Console.WriteLine(Lang.T("已设置订阅源 {0} 为手动更新（不自动）", dn));
+        Console.WriteLine(Lang.T("Feed {0} set to manual updates (not automatic)", dn));
         return;
     }
 
     var s = TryParseSchedule(raw);
     if (s == null)
     {
-        Console.WriteLine(Lang.T("无效的更新计划表达式：{0}；示例：30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual", raw));
+        Console.WriteLine(Lang.T("Invalid schedule expression: {0}; e.g. 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual", raw));
         return;
     }
 
@@ -1936,7 +2042,7 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
 
     string hint = TryParseSchedule(raw.ToLowerInvariant()) is FeedSchedule ps && !ps.IsManual && ps.Raw.Length > 0
         ? HumanSchedule(ps) : raw;
-    Console.WriteLine(Lang.T("已设置订阅源 {0} 的更新计划：{1}", dn, hint));
+    Console.WriteLine(Lang.T("Feed {0} update schedule set: {1}", dn, hint));
 }
 
 // --sync：只更新到期的订阅源（可 --feed N 限定单个源）；输出每个源的 上次/下次
@@ -1947,7 +2053,7 @@ async Task SyncCli(string[] extra, string dbPath)
         if (extra[i] == "--feed" && i + 1 < extra.Length && int.TryParse(extra[++i], out int f))
             feedReal = GetRealId(f, dbPath);
 
-    if (feedReal.HasValue && feedReal.Value == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (feedReal.HasValue && feedReal.Value == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     var now = DateTime.Now;
     var due = feedReal.HasValue
@@ -1970,25 +2076,25 @@ async Task SyncCli(string[] extra, string dbPath)
             string schedule = r.IsDBNull(2) ? "" : r.GetString(2);
             var next = FeedNextDue(schedule, lc, now);
             if (next != null)
-                Console.WriteLine(Lang.T("{0} 未到期，距离下次更新还需 {1}", title, UntilText(next.Value, now)));
+                Console.WriteLine(Lang.T("{0} is not due yet; next update in {1}", title, UntilText(next.Value, now)));
             else
-                Console.WriteLine(Lang.T("{0} 未设置自动更新计划（可用 --schedule 设置）", title));
+                Console.WriteLine(Lang.T("{0} has no auto-update schedule (set one with --schedule)", title));
         }
         return;
     }
 
     if (due.Count == 0)
     {
-        Console.WriteLine(Lang.T("没有到期的订阅源"));
+        Console.WriteLine(Lang.T("No feeds are due"));
         return;
     }
 
-    Console.WriteLine(Lang.T("有 {0} 个到期的订阅源，开始同步...", due.Count));
+    Console.WriteLine(Lang.T("{0} feeds are due, syncing...", due.Count));
     int ok = 0, fail = 0;
     foreach (var f in due)
     {
-        Console.WriteLine(Lang.T("  · {0}（上次 {1}）", f.Title,
-            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未")));
+        Console.WriteLine(Lang.T("  · {0} (last {1})", f.Title,
+            f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("never")));
         try
         {
             await DownloadAndSaveToDb(f.Url, dbPath, interactive: false);
@@ -2000,7 +2106,7 @@ async Task SyncCli(string[] extra, string dbPath)
             Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
         }
     }
-    Console.WriteLine(Lang.T("同步完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Sync done: {0} ok, {1} failed", ok, fail));
 }
 
 // --update-all：强制更新所有订阅源（等价 TUI F6）
@@ -2016,13 +2122,13 @@ async Task UpdateAllCli(string dbPath)
         feeds.Add((r.GetInt32(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)));
     r.Close();
 
-    if (feeds.Count == 0) { Console.WriteLine(Lang.T("数据库里还没有订阅源")); return; }
+    if (feeds.Count == 0) { Console.WriteLine(Lang.T("No feeds in the database yet")); return; }
 
-    Console.WriteLine(Lang.T("正在更新所有订阅源（共 {0} 个）...", feeds.Count));
+    Console.WriteLine(Lang.T("Updating all feeds ({0} total)...", feeds.Count));
     int ok = 0, fail = 0;
     foreach (var f in feeds)
     {
-        if (IsArchived(f.Title)) { Console.WriteLine(Lang.T("  · 跳过归档源：{0}", f.Title)); continue; }
+        if (IsArchived(f.Title)) { Console.WriteLine(Lang.T("  · skipping archived feed: {0}", f.Title)); continue; }
         if (string.IsNullOrWhiteSpace(f.Url)) { fail++; continue; }
         try
         {
@@ -2035,7 +2141,7 @@ async Task UpdateAllCli(string dbPath)
             Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
         }
     }
-    Console.WriteLine(Lang.T("更新完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Update done: {0} ok, {1} failed", ok, fail));
 }
 
 // ══════════ 建表方法 ══════════
@@ -2152,7 +2258,7 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     titleCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
     titleCmd.Parameters.AddWithValue("@id", feedRealId);
     string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
-    Console.WriteLine(Lang.T("── [{0}] {1} 的文章列表──", feedDisplayNum, feedTitle));
+    Console.WriteLine(Lang.T("── [{0}] {1} article list──", feedDisplayNum, feedTitle));
 
     // 用 ROW_NUMBER 给文章编显示号（删后自动继位）；每个 Guid 只列最新一版，
     // 有历史版本的文章标题右侧加 ✎ 标记（TUI 里按 V 可查看全部版本）
@@ -2174,7 +2280,7 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
     {
-        Console.WriteLine(Lang.T("  这个源还没有文章"));
+        Console.WriteLine(Lang.T("  This feed has no articles yet"));
         return;
     }
     while (reader.Read())
@@ -2186,6 +2292,39 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
         string marker = archived > 0 ? " ✎" : "";
         Console.WriteLine($"  [{displayNum}] {CjkSpace(title)}{marker}");
     }
+}
+
+// ══════════ 原文直出（sip --show <文章编号>）：供 AI / 脚本直接读取 ═══════════
+// 不做任何渲染，标题/来源/链接/作者等元信息 + 原始正文（Content 原文）原样打到标准输出
+void ShowArticleCli(int itemId, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        SELECT i.Title, i.Content, i.Description, i.Link, i.PublishDate, i.Author, f.Title
+        FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id
+        WHERE i.Id = @id";
+    cmd.Parameters.AddWithValue("@id", itemId);
+    using var r = cmd.ExecuteReader();
+    if (!r.Read()) { Console.WriteLine(Lang.T("Article {0} not found", itemId)); return; }
+
+    string title = r.GetString(0);
+    string content = r.IsDBNull(1) ? "" : r.GetString(1);
+    string desc = r.IsDBNull(2) ? "" : r.GetString(2);
+    string link = r.IsDBNull(3) ? "" : r.GetString(3);
+    string pub = r.IsDBNull(4) ? "" : r.GetString(4);
+    string author = r.IsDBNull(5) ? "" : r.GetString(5);
+    string feed = r.IsDBNull(6) ? "" : r.GetString(6);
+
+    if (!string.IsNullOrWhiteSpace(title)) Console.WriteLine(Lang.T("Title: {0}", title));
+    if (!string.IsNullOrWhiteSpace(feed)) Console.WriteLine(Lang.T("Feed: {0}", feed));
+    if (!string.IsNullOrWhiteSpace(link)) Console.WriteLine(Lang.T("Link: {0}", link));
+    if (!string.IsNullOrWhiteSpace(pub)) Console.WriteLine(Lang.T("Published: {0}", pub));
+    if (!string.IsNullOrWhiteSpace(author)) Console.WriteLine(Lang.T("Author: {0}", author));
+    Console.WriteLine();
+    // 原始正文：优先完整 Content（原文），为空则退回 RSS 摘要
+    Console.WriteLine(string.IsNullOrWhiteSpace(content) ? desc : content);
 }
 
 // ══════════ 列表方法：显示数据库中所有订阅源 ══════════
@@ -2210,7 +2349,7 @@ void ListFeedsFromDb(string dbPath)
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
     {
-        Console.WriteLine(Lang.T("数据库里还没有订阅源"));
+        Console.WriteLine(Lang.T("No feeds in the database yet"));
         return;
     }
 
@@ -2223,9 +2362,9 @@ void ListFeedsFromDb(string dbPath)
 
         // 拼出显示文本：只显示非零的状态
         var parts = new List<string>();
-        if (active > 0)  parts.Add(Lang.T("现存{0}篇", active + deleted));
-        if (archive > 0) parts.Add(Lang.T("其中有{0} 篇发生了更改", archive));
-        if (deleted > 0) parts.Add(Lang.T("{0} 篇被作者删掉了，但是我们已经帮你存档了", deleted));
+        if (active > 0)  parts.Add(Lang.T("{0} current", active + deleted));
+        if (archive > 0) parts.Add(Lang.T("{0} changed", archive));
+        if (deleted > 0) parts.Add(Lang.T("{0} deleted by author, but archived for you", deleted));
         string stats = string.Join(", ", parts);
 
         DateTime? lastChecked = reader.IsDBNull(6) ? null : TryParseIso(reader.GetString(6));
@@ -2302,7 +2441,7 @@ bool TryParseWeekday(string s, out int dow)
     return dow >= 0;
 }
 
-string WeekdayName(int dow) => Lang.T(new[] { "周日", "周一", "周二", "周三", "周四", "周五", "周六" }[dow]);
+string WeekdayName(int dow) => new[] { Lang.T("Sun"), Lang.T("Mon"), Lang.T("Tue"), Lang.T("Wed"), Lang.T("Thu"), Lang.T("Fri"), Lang.T("Sat") }[dow];
 
 // 计算某源的下一次到期时间；手动/无效计划返回 null
 DateTime? ComputeNextDue(FeedSchedule s, DateTime lastChecked, DateTime now)
@@ -2376,35 +2515,35 @@ DateTime? FeedNextDue(string schedule, DateTime? lastChecked, DateTime now)
 
 string HumanSchedule(FeedSchedule s)
 {
-    if (s.IsManual) return Lang.T("手动");
+    if (s.IsManual) return Lang.T("manual");
     if (s.Interval is TimeSpan iv)
     {
         double minutes = iv.TotalMinutes;
-        if (minutes < 60) return Lang.T("{0} 分钟", (int)minutes);
-        if (minutes < 1440) return Lang.T("{0} 小时", (int)(minutes / 60));
-        return Lang.T("{0} 天", (int)(minutes / 1440));
+        if (minutes < 60) return Lang.T("{0} min", (int)minutes);
+        if (minutes < 1440) return Lang.T("{0} hr", (int)(minutes / 60));
+        return Lang.T("{0} days", (int)(minutes / 1440));
     }
-    if (s.IsDaily) return Lang.T("每天 {0:00}:{1:00}", s.DailyHour, s.DailyMinute);
-    if (s.IsWeekly) return Lang.T("每周{0} {1:00}:{2:00}", WeekdayName(s.WeeklyDay), s.WeeklyHour, s.WeeklyMinute);
+    if (s.IsDaily) return Lang.T("daily at {0:00}:{1:00}", s.DailyHour, s.DailyMinute);
+    if (s.IsWeekly) return Lang.T("weekly {0} {1:00}:{2:00}", WeekdayName(s.WeeklyDay), s.WeeklyHour, s.WeeklyMinute);
     return "";
 }
 
 string AgoText(DateTime t, DateTime now)
 {
     var span = now - t;
-    if (span.TotalSeconds < 60) return Lang.T("刚刚");
-    if (span.TotalMinutes < 60) return Lang.T("{0} 分钟前", (int)span.TotalMinutes);
-    if (span.TotalHours < 24) return Lang.T("{0} 小时前", (int)span.TotalHours);
-    return Lang.T("{0} 天前", (int)span.TotalDays);
+    if (span.TotalSeconds < 60) return Lang.T("just now");
+    if (span.TotalMinutes < 60) return Lang.T("{0} min ago", (int)span.TotalMinutes);
+    if (span.TotalHours < 24) return Lang.T("{0} hr ago", (int)span.TotalHours);
+    return Lang.T("{0} days ago", (int)span.TotalDays);
 }
 
 string UntilText(DateTime t, DateTime now)
 {
     var span = t - now;
-    if (span.TotalSeconds < 60) return Lang.T("即将");
-    if (span.TotalMinutes < 60) return Lang.T("{0} 分钟后", (int)span.TotalMinutes);
-    if (span.TotalHours < 24) return Lang.T("{0} 小时后", (int)span.TotalHours);
-    return Lang.T("{0} 天后", (int)span.TotalDays);
+    if (span.TotalSeconds < 60) return Lang.T("soon");
+    if (span.TotalMinutes < 60) return Lang.T("in {0} min", (int)span.TotalMinutes);
+    if (span.TotalHours < 24) return Lang.T("in {0} hr", (int)span.TotalHours);
+    return Lang.T("in {0} days", (int)span.TotalDays);
 }
 
 // -l 里追加的「频率 / 上次 / 下次」状态；手动或未设置时返回空串
@@ -2413,18 +2552,18 @@ string FormatFeedStatus(string schedule, DateTime? lastChecked, DateTime now)
     var s = TryParseSchedule(schedule);
     if (s == null || s.IsManual) return "";
     string sched = HumanSchedule(s);
-    string last = lastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("从未");
+    string last = lastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("never");
     string next;
     if (lastChecked is DateTime lc2)
     {
         var due = ComputeNextDue(s, lc2, now);
-        next = due is DateTime d ? Lang.T("还需 ") + UntilText(d, now) : "—";
+        next = due is DateTime d ? Lang.T("in ") + UntilText(d, now) : "—";
     }
     else
     {
-        next = Lang.T("待首次更新");
+        next = Lang.T("first update pending");
     }
-    return Lang.T("（{0} · 上次 {1} · 下次 {2}）", sched, last, next);
+    return Lang.T("({0} · last {1} · next {2})", sched, last, next);
 }
 
 
@@ -2443,7 +2582,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
     // 不加 User-Agent 有些服务器会返回 403 拒绝
     using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
     client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
-    Console.WriteLine(Lang.T("正在下载..."));
+    Console.WriteLine(Lang.T("Downloading..."));
 
     string rawXml;
     try
@@ -2454,7 +2593,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
     {
         // https 失败 → 站点可能只支持 http，重试一次
         string httpUrl = "http://" + url["https://".Length..];
-        Console.WriteLine(Lang.T("https:// 连接失败，改用 http://{0} 重试...", httpUrl["http://".Length..]));
+        Console.WriteLine(Lang.T("https:// failed, retrying with http://{0}...", httpUrl["http://".Length..]));
         rawXml = await client.GetStringAsync(httpUrl);
         url = httpUrl;  // 后续用有效的 http 地址写入 / 更新
     }
@@ -2477,7 +2616,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
     {
         // 同名未归档源存在！先用文本 diff 比对 Feed 级别变化
         isNewFeed = false;
-        Console.WriteLine(Lang.T("订阅源{0}已存在，正在比对...", feed.Title));
+        Console.WriteLine(Lang.T("Feed {0} already exists, comparing...", feed.Title));
         bool hasChanges = ShowFeedXmlDiff(oldXml, rawXml);
 
         if (hasChanges)
@@ -2491,11 +2630,11 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
             updateCmd.Parameters.AddWithValue("@fetched", DateTime.Now.ToString("O"));
             updateCmd.Parameters.AddWithValue("@title", feed.Title);
             updateCmd.ExecuteNonQuery();
-            Console.WriteLine(Lang.T("内容有变化，已更新订阅源"));
+            Console.WriteLine(Lang.T("Content changed, feed updated"));
         }
         else
         {
-            Console.WriteLine(Lang.T("内容无变化，跳过更新"));
+            Console.WriteLine(Lang.T("No content change, skipped update"));
         }
 
         var idCmd = conn.CreateCommand();
@@ -2536,7 +2675,7 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
     // 新源 → 全量插入不过滤；旧源 → 逐篇比对
     ShowDiff(feed, feedId, conn, isNewFeed);
 
-    Console.WriteLine(Lang.T("{0} 写入完成", feed.Title));
+    Console.WriteLine(Lang.T("{0} saved", feed.Title));
 
     // --- 第 6 步：若已初始化 AI，询问是否把该源未向量化的文章加入 embedding ---
     await MaybeIndexNewArticles(feedId, dbPath, interactive);
@@ -2563,10 +2702,10 @@ async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = true)
     if (pending == 0) return;
 
     // 自动同步 / 后台检查时跳过 y/n 询问，不打扰、不卡输入
-    if (!ask) { Console.WriteLine(Lang.T("有 {0} 篇新文章未向量化（自动同步，已跳过，需要时用 rssreader --index 补上）", pending)); return; }
+    if (!ask) { Console.WriteLine(Lang.T("{0} new articles not embedded (auto-sync, skipped; use rssreader --index when needed)", pending)); return; }
 
-    Console.WriteLine(Lang.T("这个源有 {0} 篇新文章还未向量化，是否加入语义搜索（{1}）？(y/n)", pending, cfg.Embedding.Model));
-    if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("已跳过，需要时可用 rssreader --index 补上")); return; }
+    Console.WriteLine(Lang.T("This feed has {0} new articles not yet embedded. Add to semantic search ({1})? (y/n)", pending, cfg.Embedding.Model));
+    if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("Skipped, run rssreader --index later if needed")); return; }
 
     cmd.CommandText = "SELECT Id, Title FROM Items WHERE FeedId = @fid AND Status = 'active' AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = Items.Id)";
     using var r = cmd.ExecuteReader();
@@ -2588,7 +2727,7 @@ async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = true)
         SaveVector(dbPath, (int)feedId, a.Id, modelId, vec);
         ok++;
     }
-    Console.WriteLine(Lang.T("向量化完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Embedding done: {0} OK, {1} failed", ok, fail));
 }
 
 // ══════════ 辅助方法：补全 URL 协议前缀 ══════════
@@ -2602,7 +2741,7 @@ string EnsureUrlScheme(string url)
         return trimmed;
     if (trimmed.StartsWith("//", StringComparison.OrdinalIgnoreCase))
         return "https:" + trimmed;
-    Console.WriteLine(Lang.T("检测到链接缺少协议前缀，已自动补全为 https://{0}", trimmed));
+    Console.WriteLine(Lang.T("URL missing a scheme, auto-prefixed to https://{0}", trimmed));
     return "https://" + trimmed;
 }
 
@@ -2667,7 +2806,7 @@ int GetRealId(int displayNum, string dbPath)
 void DeleteFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2685,10 +2824,10 @@ void DeleteFeed(int displayNum, string dbPath)
     int itemCount = reader.GetInt32(1);
     reader.Close();
 
-    Console.Write(Lang.T("确定删除 {0} 及其 {1} 篇文章？(y/n)", title, itemCount));
+    Console.Write(Lang.T("Delete {0} and its {1} articles? (y/n)", title, itemCount));
     if (!"y".Equals(Console.ReadLine()?.Trim().ToLower()))
     {
-        Console.WriteLine(Lang.T("已取消"));
+        Console.WriteLine(Lang.T("Cancelled"));
         return;
     }
 
@@ -2702,7 +2841,7 @@ void DeleteFeed(int displayNum, string dbPath)
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine(Lang.T("{0}已删除", title));
+    Console.WriteLine(Lang.T("{0} deleted", title));
 }
 
 // ══════════ 加时间戳：标题 + _20260712_143000 ══════════
@@ -2711,7 +2850,7 @@ void DeleteFeed(int displayNum, string dbPath)
 void AddTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2725,7 +2864,7 @@ void AddTimestamp(int displayNum, string dbPath)
     // 2. 已经归档的不能再归档
     if (IsArchived(oldTitle))
     {
-        Console.WriteLine(Lang.T("{0} 已被归档，无需重复操作", oldTitle));
+        Console.WriteLine(Lang.T("{0} is already archived", oldTitle));
         return;
     }
 
@@ -2737,7 +2876,7 @@ void AddTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", newTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine(Lang.T("标题已变更：{0} → {1} ", oldTitle, newTitle));
+    Console.WriteLine(Lang.T("Title changed: {0} → {1} ", oldTitle, newTitle));
 }
 
 // ══════════ 去时间戳：去掉 _yyyymmdd_hhmmss 后缀 ══════════
@@ -2745,7 +2884,7 @@ void AddTimestamp(int displayNum, string dbPath)
 void RemoveTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("没找到这个编号")); return; }
+    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2761,7 +2900,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
 
     if (plainTitle == title)
     {
-        Console.WriteLine(Lang.T("{0} 未归档", title));
+        Console.WriteLine(Lang.T("{0} was not archived", title));
         return;
     }
 
@@ -2771,7 +2910,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
     long conflict = (long)cmd.ExecuteScalar()!;
     if (conflict > 0)
     {
-        Console.WriteLine(Lang.T("冲突！已存在另一个名称为 {0} 的源，无法去除时间戳", plainTitle));
+        Console.WriteLine(Lang.T("Conflict! Another feed named {0} exists, cannot remove the timestamp", plainTitle));
         return;
     }
 
@@ -2780,7 +2919,7 @@ void RemoveTimestamp(int displayNum, string dbPath)
     cmd.Parameters.AddWithValue("@newTitle", plainTitle);
     cmd.ExecuteNonQuery();
 
-    Console.WriteLine(Lang.T("时间戳已去除：{0} → {1} ", title, plainTitle));
+    Console.WriteLine(Lang.T("Timestamp removed: {0} → {1} ", title, plainTitle));
 }
 
 // ════════════════════════════════════════════════════════
@@ -2862,7 +3001,7 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
             // 插入新版本
             InsertNewItem(conn, feedId, item, guid, version: oldVersion + 1);
 
-            Console.WriteLine(Lang.T("  [已归档] {0} 作者修改了内容，旧版已保留", item.Title));
+            Console.WriteLine(Lang.T("  [archived] {0} author changed content, old version kept", item.Title));
             modifyCount++;
         }
         else
@@ -2877,13 +3016,13 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
     // 新源跳过修改检测（没有旧数据可比）
     if (isNewFeed)
     {
-        Console.WriteLine(Lang.T("  新增 {0} 篇", newCount));
+        Console.WriteLine(Lang.T("  {0} new", newCount));
         return;
     }
 
     // 不检测删除：很多站点 RSS 只推最近 N 篇，老文章不在列表里不代表被删，
     // 因此只跟踪新增与修改，避免把正常下架的文章误标为 deleted
-    Console.WriteLine(Lang.T("  新增 {0} 篇，修改 {1} 篇", newCount, modifyCount));
+    Console.WriteLine(Lang.T("  {0} new, {1} modified", newCount, modifyCount));
 }
 
 // ══════════ ShowDiff（Feed 级别）：纯文本比对，看旧 XML 和新 XML 有无差异 ══════════
@@ -2923,13 +3062,13 @@ bool ShowFeedXmlDiff(string oldRaw, string newRaw)
         }
 
         if (!hasChanges)  // 一个变化都没有
-            Console.WriteLine(Lang.T("新旧 RSS 完全相同，无新增、删除或修改"));
+            Console.WriteLine(Lang.T("New and old RSS are identical, no changes"));
 
         return hasChanges;  // 把结果返回给调用方，让它决定是否更新
     }
     catch (Exception ex)
     {
-        Console.WriteLine(Lang.T("比较条目差异时出错：{0}", ex.Message));
+        Console.WriteLine(Lang.T("Error comparing item diffs: {0}", ex.Message));
         return false;  // 出错了保守处理：不用旧数据覆盖，当作没变化
     }
 }
@@ -2937,7 +3076,7 @@ bool ShowFeedXmlDiff(string oldRaw, string newRaw)
 // ══════════ GetItemSummary：生成文章摘要行，供文本 diff 显示用 ══════════
 string GetItemSummary(FeedItem item)
 {
-    string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? Lang.T("未知");
+    string id = !string.IsNullOrEmpty(item.Id) ? item.Id : item.Link ?? item.Title ?? Lang.T("unknown");
     return $"[{id}] {item.Title}";
 }
 
@@ -2997,13 +3136,13 @@ void EnsureAiPrompted()
     AiState.Warned = true;
     if (AiState.IgnoreAnnouncement) return;
     Console.WriteLine(Lang.T("════════════════════════════════════════════════════"));
-    Console.WriteLine(Lang.T("🔐 安全提醒"));
-    Console.WriteLine(Lang.T("你的 API Key 存储在操作系统原生凭据库"));
-    Console.WriteLine(Lang.T("（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service）"));
-    Console.WriteLine(Lang.T("不会写入任何项目文件。请注意保密："));
-    Console.WriteLine(Lang.T("1. 不要把 API Key 分享/发给他人"));
-    Console.WriteLine(Lang.T("2. 不要截图或上传含密钥的界面"));
-    Console.WriteLine(Lang.T("3. 如怀疑泄露，请立即更换密钥"));
+    Console.WriteLine(Lang.T("🔐 Security notice"));
+    Console.WriteLine(Lang.T("Your API key is stored in the OS-native credential store"));
+    Console.WriteLine(Lang.T("(Windows Credential Manager / macOS Keychain / Linux Secret Service)"));
+    Console.WriteLine(Lang.T("It is never written to any project file. Please keep it secret:"));
+    Console.WriteLine(Lang.T("1. Never share/send your API key to anyone"));
+    Console.WriteLine(Lang.T("2. Never screenshot or upload screens with the key"));
+    Console.WriteLine(Lang.T("3. Rotate your key immediately if you suspect a leak"));
     Console.WriteLine(Lang.T("════════════════════════════════════════════════════"));
 }
 
@@ -3019,9 +3158,9 @@ void ReportError(string code, string message, string? suggestion = null, string?
     }
     else
     {
-        Console.WriteLine(Lang.T("错误 [{0}] {1}", code, message));
-        if (suggestion != null) Console.WriteLine(Lang.T("建议：{0}", suggestion));
-        if (details != null) Console.WriteLine(Lang.T("详情：{0}", details));
+        Console.WriteLine(Lang.T("Error [{0}] {1}", code, message));
+        if (suggestion != null) Console.WriteLine(Lang.T("Suggestion: {0}", suggestion));
+        if (details != null) Console.WriteLine(Lang.T("Details: {0}", details));
     }
 }
 
@@ -3039,8 +3178,8 @@ async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
     var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
         new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
     if (!resp.IsSuccessStatusCode)
-        throw new AiException("MODEL_UNAVAILABLE", Lang.T("Embedding 请求失败（HTTP {0}）", (int)resp.StatusCode),
-            Lang.T("请确认端点/端口/模型名正确；Ollama 可先执行 ollama list / ollama pull 拉取模型"), await resp.Content.ReadAsStringAsync());
+        throw new AiException("MODEL_UNAVAILABLE", Lang.T("Embedding request failed (HTTP {0})", (int)resp.StatusCode),
+            Lang.T("Verify the endpoint/port/model name; with Ollama run ollama list / ollama pull first"), await resp.Content.ReadAsStringAsync());
     try
     {
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
@@ -3050,8 +3189,8 @@ async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
     catch (JsonException)
     {
         // 返回的不是 JSON（比如端点缺少 /v1 返回的 HTML），给出友好提示而非崩溃
-        throw new AiException("INVALID_RESPONSE", Lang.T("Embedding 服务返回的不是 JSON"),
-            Lang.T("请检查端点是否缺少 /v1（正确形式 http://host:端口/v1）"));
+        throw new AiException("INVALID_RESPONSE", Lang.T("Embedding service did not return JSON"),
+            Lang.T("Check whether the endpoint is missing /v1 (correct form http://host:port/v1)"));
     }
 }
 
@@ -3065,8 +3204,8 @@ async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false)
     }
     catch (HttpRequestException ex)
     {
-        ReportError("NETWORK_ERROR", Lang.T("网络错误，无法连接到 Embedding 服务"),
-            Lang.T("请检查网络连接，或检查 API 端点地址"), ex.Message, json);
+        ReportError("NETWORK_ERROR", Lang.T("Network error, cannot reach the Embedding service"),
+            Lang.T("Check your network connection or the API endpoint"), ex.Message, json);
         return null;
     }
     catch (AiException ex)
@@ -3147,7 +3286,7 @@ string? CheckDimensionMismatch(string dbPath, EmbeddingCfg emb)
         string oldName = r.GetString(0);
         int oldDim = r.IsDBNull(1) ? 0 : r.GetInt32(1);
         if (oldName != emb.Model && oldDim != emb.Dimensions)
-            return Lang.T("检测到 Embedding 模型维度变化（旧模型 {0} {1} 维 → 新模型 {2} {3} 维），旧向量已无法使用，请执行 rssreader --reindex 重新向量化",
+            return Lang.T("Embedding model dimensions changed (old {0} {1}D → new {2} {3}D), old vectors are unusable, run --reindex to re-embed",
                 oldName, oldDim, emb.Model, emb.Dimensions);
     }
     return null;
@@ -3181,7 +3320,7 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     // 默认全选模式；也可支持 --all
     ListFeedsFromDb(dbPath);
     Console.WriteLine();
-    Console.Write(Lang.T("请输入要向量化的订阅源编号（逗号分隔多个，输入 all 表示全部）："));
+    Console.Write(Lang.T("Enter feed numbers to embed (comma-separated, \"all\" for all): "));
     string input = Console.ReadLine()?.Trim() ?? "";
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -3206,7 +3345,7 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
         }
     }
 
-    if (feedIds.Count == 0) { Console.WriteLine(Lang.T("未选择任何订阅源，已取消")); return; }
+    if (feedIds.Count == 0) { Console.WriteLine(Lang.T("No feed selected, cancelled")); return; }
 
     // 收集未向量化的 active 文章
     var articles = new List<(int Id, int FeedId, string Title)>();
@@ -3219,10 +3358,10 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     using var r2 = cmd2.ExecuteReader();
     while (r2.Read()) articles.Add((r2.GetInt32(0), r2.GetInt32(1), r2.GetString(2)));
 
-    if (articles.Count == 0) { Console.WriteLine(Lang.T("所选订阅源的文章都已向量化，无需处理")); return; }
+    if (articles.Count == 0) { Console.WriteLine(Lang.T("All articles of the selected feeds are already embedded")); return; }
 
-    Console.WriteLine(Lang.T("将向量化 {0} 篇文章，确认？(y/n)", articles.Count));
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
+    Console.WriteLine(Lang.T("Will embed {0} articles, confirm? (y/n)", articles.Count));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
 
     int modelId = EnsureModel(dbPath, cfg.Embedding);
     int ok = 0, fail = 0;
@@ -3230,7 +3369,7 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     {
         var a = articles[i];
         var vec = await SafeEmbed(a.Title, cfg);
-        if (vec == null) { fail++; Console.WriteLine(Lang.T("  [{0}/{1}] 失败：{2}", i + 1, articles.Count, a.Title)); continue; }
+        if (vec == null) { fail++; Console.WriteLine(Lang.T("  [{0}/{1}] failed: {2}", i + 1, articles.Count, a.Title)); continue; }
         if (vec.Length != cfg.Embedding.Dimensions)
         {
             // 自动校正维度（以实际为准）
@@ -3239,9 +3378,9 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
         }
         SaveVector(dbPath, a.FeedId, a.Id, modelId, vec);
         ok++;
-        if (ok % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, articles.Count));
+        if (ok % 10 == 0) Console.WriteLine(Lang.T("  processed {0}/{1}", ok + fail, articles.Count));
     }
-    Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
 }
 
 // 重新向量化（更换模型后）：清空旧向量并重来
@@ -3256,8 +3395,8 @@ async Task ReindexCli(string dbPath)
     cmd.CommandText = "SELECT COUNT(*) FROM Items WHERE Status = 'active'";
     long total = (long)cmd.ExecuteScalar()!;
 
-    Console.Write(Lang.T("将删除现有向量并重新向量化全部 {0} 篇 active 文章，确认？(y/n)", total));
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
+    Console.Write(Lang.T("Will delete existing vectors and re-embed all {0} active articles, confirm? (y/n)", total));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
 
     cmd.CommandText = "DELETE FROM Vectors";
     cmd.ExecuteNonQuery();
@@ -3276,9 +3415,9 @@ async Task ReindexCli(string dbPath)
         if (vec == null) { fail++; continue; }
         SaveVector(dbPath, item.FeedId, item.Id, modelId, vec);
         ok++;
-        if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  已处理 {0}/{1}", ok + fail, items.Count));
+        if ((ok + fail) % 10 == 0) Console.WriteLine(Lang.T("  processed {0}/{1}", ok + fail, items.Count));
     }
-    Console.WriteLine(Lang.T("重新索引完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Re-indexing done: {0} OK, {1} failed", ok, fail));
 }
 
 // ══════════ 语义搜索 ══════════
@@ -3302,7 +3441,7 @@ void SearchCli(string[] args, string dbPath)
                 {
                     feedDisplay = f;
                     feedReal = GetRealId(f, dbPath);
-                    if (feedReal == 0) { ReportError("FEED_NOT_FOUND", Lang.T("没有找到编号 {0} 的订阅源", f), json: json); return; }
+                    if (feedReal == 0) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number {0} not found", f), json: json); return; }
                 }
                 break;
             case "--threshold":
@@ -3319,7 +3458,7 @@ void SearchCli(string[] args, string dbPath)
     }
 
     string query = string.Join(" ", queryParts);
-    if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", Lang.T("请输入搜索查询"), json: json); return; }
+    if (string.IsNullOrWhiteSpace(query)) { ReportError("EMPTY_QUERY", Lang.T("Please enter a search query"), json: json); return; }
 
     var results = DoSearch(query, dbPath, feedReal, threshold, json);
     if (results == null) return;
@@ -3350,13 +3489,13 @@ void SearchCli(string[] args, string dbPath)
     }
     else
     {
-        Console.WriteLine(Lang.T("搜索结果（查询：{0}，阈值：{1}，共 {2} 条）", query, threshold, results.Count));
+        Console.WriteLine(Lang.T("Search results (query: {0}, threshold: {1}, total {2})", query, threshold, results.Count));
         foreach (var h in results)
         {
             Console.WriteLine($"  [{h.ItemId}] {h.Title}");
-            Console.WriteLine(Lang.T("      来源：{0} | 相似度：{1:P1}", h.FeedTitle, h.Score));
+            Console.WriteLine(Lang.T("      source: {0} | similarity: {1:P1}", h.FeedTitle, h.Score));
             if (!string.IsNullOrEmpty(h.Description) && h.Description.Length > 80)
-                Console.WriteLine(Lang.T("      摘要：{0}...", h.Description[..80]));
+                Console.WriteLine(Lang.T("      summary: {0}...", h.Description[..80]));
         }
     }
 }
@@ -3366,7 +3505,7 @@ void GrepCli(string keyword, string dbPath)
 {
     var hits = DoGrep(keyword, dbPath);
     if (hits == null) return;
-    Console.WriteLine(Lang.T("全文搜索「{0}」：共 {1} 条", keyword, hits.Count));
+    Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, hits.Count));
     foreach (var h in hits)
     {
         Console.WriteLine($"  [{h.ItemId}] {h.Title}");
@@ -3379,7 +3518,7 @@ void GrepCli(string keyword, string dbPath)
 // 全文搜索核心逻辑（CLI 与 TUI 共用）：SQL LIKE 匹配标题/正文/摘要
 List<GrepHit>? DoGrep(string keyword, string dbPath)
 {
-    if (string.IsNullOrWhiteSpace(keyword)) { Console.WriteLine(Lang.T("请输入搜索关键词")); return null; }
+    if (string.IsNullOrWhiteSpace(keyword)) { Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
@@ -3428,14 +3567,14 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
     var modelCmd = conn.CreateCommand();
     modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
     var modelObj = modelCmd.ExecuteScalar();
-    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("尚无向量索引，请先执行 rssreader --index"), json: json); return null; }
+    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("No vector index yet, run rssreader --index first"), json: json); return null; }
     int modelId = Convert.ToInt32(modelObj);
 
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
     cmd.Parameters.AddWithValue("@m", modelId);
     long count = (long)cmd.ExecuteScalar()!;
-    if (count == 0) { ReportError("NO_INDEX", Lang.T("当前模型尚无向量索引，请先执行 rssreader --index"), json: json); return null; }
+    if (count == 0) { ReportError("NO_INDEX", Lang.T("The current model has no vectors yet, run rssreader --index first"), json: json); return null; }
 
     cmd.Parameters.Clear();
     cmd.CommandText = @"
@@ -3520,8 +3659,8 @@ async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
     var resp = await client.PostAsync($"{cfg.Llm.ApiEndpoint}/chat/completions",
         new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
     if (!resp.IsSuccessStatusCode)
-        throw new AiException("API_KEY_INVALID", Lang.T("LLM 请求失败（HTTP {0}）", (int)resp.StatusCode),
-            Lang.T("请检查 API Key / 模型名 / 端点配置"), await resp.Content.ReadAsStringAsync());
+        throw new AiException("API_KEY_INVALID", Lang.T("LLM request failed (HTTP {0})", (int)resp.StatusCode),
+            Lang.T("Check the API key / model name / endpoint config"), await resp.Content.ReadAsStringAsync());
     try
     {
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
@@ -3529,8 +3668,8 @@ async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
     }
     catch (JsonException)
     {
-        throw new AiException("INVALID_JSON", Lang.T("LLM 服务返回的不是 JSON"),
-            Lang.T("请检查端点是否缺少 /v1（如 https://api.deepseek.com/v1）"));
+        throw new AiException("INVALID_JSON", Lang.T("LLM service did not return JSON"),
+            Lang.T("Check whether the endpoint is missing /v1 (e.g. https://api.deepseek.com/v1)"));
     }
 }
 
@@ -3544,7 +3683,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     cmd.CommandText = "SELECT Title, Content, Description, Summary FROM Items WHERE Id = @id AND Status = 'active'";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("没有找到文章 {0}", itemId), json: json); return false; }
+    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return false; }
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
     string desc = r.IsDBNull(2) ? "" : r.GetString(2);
@@ -3553,7 +3692,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
 
     if (!string.IsNullOrEmpty(existing))
     {
-        Console.WriteLine(Lang.T("文章 [{0}] {1} 已有摘要，跳过（如想重新生成请先删除）", itemId, title));
+        Console.WriteLine(Lang.T("Article [{0}] {1} already has a summary, skipped (delete it first to regenerate)", itemId, title));
         return true;
     }
 
@@ -3565,7 +3704,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     {
         EnsureAiPrompted();
         var summary = await CallLlmAsync(prompt, cfg);
-        if (summary == null) throw new AiException("EMPTY_RESPONSE", Lang.T("LLM 返回为空"), Lang.T("请重试或检查模型配置"));
+        if (summary == null) throw new AiException("EMPTY_RESPONSE", Lang.T("LLM returned empty"), Lang.T("Retry or check the model config"));
 
         var upd = conn.CreateCommand();
         upd.CommandText = "UPDATE Items SET Summary = @s, SummaryAt = @now WHERE Id = @id";
@@ -3573,13 +3712,13 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
         upd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
         upd.Parameters.AddWithValue("@id", itemId);
         upd.ExecuteNonQuery();
-        Console.WriteLine(Lang.T("已生成摘要：[{0}] {1}", itemId, title));
+        Console.WriteLine(Lang.T("Summary generated: [{0}] {1}", itemId, title));
         if (json) JsonOut(new { success = true, itemId, title, summary = summary.Trim() });
         return true;
     }
     catch (HttpRequestException ex)
     {
-        ReportError("NETWORK_ERROR", Lang.T("网络错误，无法连接 LLM 服务"), Lang.T("请检查网络连接"), ex.Message, json);
+        ReportError("NETWORK_ERROR", Lang.T("Network error, cannot reach the LLM service"), Lang.T("Check your network connection"), ex.Message, json);
         return false;
     }
     catch (AiException ex)
@@ -3599,11 +3738,11 @@ async Task SummaryCli(string arg, string dbPath)
     {
         if (!int.TryParse(arg["feed:".Length..].Trim(), out int feedDisplay))
         {
-            Console.WriteLine(Lang.T("格式错误。正确：{0}", "--summary feed:3"));
+            Console.WriteLine(Lang.T("Bad format. Correct: {0}", "--summary feed:3"));
             return;
         }
         int feedReal = GetRealId(feedDisplay, dbPath);
-        if (feedReal == 0) { Console.WriteLine(Lang.T("没有找到编号 {0} 的订阅源", feedDisplay)); return; }
+        if (feedReal == 0) { Console.WriteLine(Lang.T("Feed number {0} not found", feedDisplay)); return; }
 
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
@@ -3615,22 +3754,22 @@ async Task SummaryCli(string arg, string dbPath)
         while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
         r.Close();
 
-        if (items.Count == 0) { Console.WriteLine(Lang.T("订阅源 {0} 的所有 active 文章都已有摘要", feedDisplay)); return; }
-        Console.WriteLine(Lang.T("将为订阅源 {0} 的 {1} 篇文章生成摘要，确认？(y/n)", feedDisplay, items.Count));
-        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
+        if (items.Count == 0) { Console.WriteLine(Lang.T("All active articles of feed {0} already have summaries", feedDisplay)); return; }
+        Console.WriteLine(Lang.T("Will summarize {1} articles of feed {0}, confirm? (y/n)", feedDisplay, items.Count));
+        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
 
         int ok = 0, fail = 0;
         foreach (var it in items)
         {
             if (await SummarizeItem(dbPath, it.Id, json: false)) ok++; else fail++;
-            Console.WriteLine(Lang.T("  进度：{0}/{1}", ok + fail, items.Count));
+            Console.WriteLine(Lang.T("  progress: {0}/{1}", ok + fail, items.Count));
         }
-        Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
+        Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
         return;
     }
 
     // 单篇文章
-    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine(Lang.T("用法: rssreader --summary <文章编号 | feed:编号>")); return; }
+    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine(Lang.T("Usage: rssreader --summary <article-number | feed:number>")); return; }
     await SummarizeItem(dbPath, sumId);
 }
 
@@ -3647,75 +3786,75 @@ async Task SummaryAllCli(string dbPath)
     while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
     r.Close();
 
-    if (items.Count == 0) { Console.WriteLine(Lang.T("所有 active 文章都已有摘要")); return; }
-    Console.WriteLine(Lang.T("将为 {0} 篇文章生成摘要，确认？(y/n)", items.Count));
-    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("已取消")); return; }
+    if (items.Count == 0) { Console.WriteLine(Lang.T("All active articles already have summaries")); return; }
+    Console.WriteLine(Lang.T("Will summarize {0} articles, confirm? (y/n)", items.Count));
+    if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
 
     int ok = 0, fail = 0;
     foreach (var it in items)
     {
         if (await SummarizeItem(dbPath, it.Id)) ok++; else fail++;
-        Console.WriteLine(Lang.T("  进度：{0}/{1}", ok + fail, items.Count));
+        Console.WriteLine(Lang.T("  progress: {0}/{1}", ok + fail, items.Count));
     }
-    Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
+    Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
 }
 
 // ══════════ 交互式配置向导 ══════════
 void InitAiConfigInteractive(string dbPath)
 {
     EnsureAiPrompted();
-    Console.WriteLine(Lang.T("===== RSS Reader AI 配置向导 ====="));
-    Console.WriteLine(Lang.T("所有服务均使用 OpenAI 兼容格式（Ollama / DeepSeek / OpenAI / 任意兼容服务均可），端点与端口可自由指定。"));
+    Console.WriteLine(Lang.T("===== RSS Reader AI Setup Wizard ====="));
+    Console.WriteLine(Lang.T("All services use the OpenAI-compatible format (Ollama / DeepSeek / OpenAI / any compatible service), endpoints and ports can be freely specified."));
     var cfg = LoadConfig(dbPath);
 
 // --- Embedding ---
-    Console.WriteLine(Lang.T("\n[1/3] Embedding 服务（语义搜索用，OpenAI 兼容格式）："));
-    Console.Write(Lang.T("  端点（只需 http://host:端口 或 https://域名，自动补全 /v1）〔当前：{0}〕：", cfg.Embedding.ApiEndpoint));
+    Console.WriteLine(Lang.T("\n[1/3] Embedding service (for semantic search, OpenAI-compatible format):"));
+    Console.Write(Lang.T("  endpoint (just http://host:port or https://domain, /v1 auto-appended) [current: {0}]: ", cfg.Embedding.ApiEndpoint));
     string embEndpoint = Console.ReadLine()?.Trim() ?? "";
     if (!string.IsNullOrEmpty(embEndpoint))
     {
         cfg.Embedding.ApiEndpoint = EnsureV1Endpoint(embEndpoint);
-        Console.WriteLine(Lang.T("  → 最终端点：{0}", cfg.Embedding.ApiEndpoint));
+        Console.WriteLine(Lang.T("  → final endpoint: {0}", cfg.Embedding.ApiEndpoint));
     }
 
-    Console.Write(Lang.T("  模型名（如 nomic-embed-text / bge-m3 / text-embedding-3-small）〔当前：{0}〕：", cfg.Embedding.Model));
+    Console.Write(Lang.T("  model (e.g. nomic-embed-text / bge-m3 / text-embedding-3-small) [current: {0}]: ", cfg.Embedding.Model));
     string embModel = Console.ReadLine()?.Trim() ?? "";
     if (!string.IsNullOrEmpty(embModel)) cfg.Embedding.Model = embModel;
 
-    Console.Write(Lang.T("  向量维度（如 768/1024/1536，不确定可回车后由程序自动探测）〔当前：{0}〕：", cfg.Embedding.Dimensions));
+    Console.Write(Lang.T("  vector dimensions (e.g. 768/1024/1536, leave empty to auto-detect) [current: {0}]: ", cfg.Embedding.Dimensions));
     if (int.TryParse(Console.ReadLine()?.Trim(), out int embDim) && embDim > 0)
         cfg.Embedding.Dimensions = embDim;
 
-    Console.Write(Lang.T("  Embedding API Key（本地 Ollama 等无需 Key 可回车跳过；输入时不会显示，仅存系统凭据库）〔当前：{0}〕：",
-        CredHas("embedding_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
+    Console.Write(Lang.T("  Embedding API key (skip with Enter for local Ollama; hidden input, stored in OS credentials) [current: {0}]: ",
+        CredHas("embedding_api_key") ? Lang.T("set") : Lang.T("not set")));
     var embKey = ReadSecret();
     if (!string.IsNullOrEmpty(embKey)) CredSet("embedding_api_key", embKey);
 
     // --- LLM ---
-    Console.WriteLine(Lang.T("\n[2/3] LLM 服务（生成摘要用，OpenAI 兼容格式）："));
-    Console.Write(Lang.T("  端点（只需 https://host[:端口] 或 http://host:端口，自动补全 /v1）〔当前：{0}〕：", cfg.Llm.ApiEndpoint));
+    Console.WriteLine(Lang.T("\n[2/3] LLM service (for summaries, OpenAI-compatible format):"));
+    Console.Write(Lang.T("  endpoint (just https://host[:port] or http://host:port, /v1 auto-appended) [current: {0}]: ", cfg.Llm.ApiEndpoint));
     string llmEndpoint = Console.ReadLine()?.Trim() ?? "";
     if (!string.IsNullOrEmpty(llmEndpoint))
     {
         cfg.Llm.ApiEndpoint = EnsureV1Endpoint(llmEndpoint);
-        Console.WriteLine(Lang.T("  → 最终端点：{0}", cfg.Llm.ApiEndpoint));
+        Console.WriteLine(Lang.T("  → final endpoint: {0}", cfg.Llm.ApiEndpoint));
     }
 
-    Console.Write(Lang.T("  模型名（如 deepseek-chat / gpt-4o-mini / qwen2.5）〔当前：{0}〕：", cfg.Llm.Model));
+    Console.Write(Lang.T("  model (e.g. deepseek-chat / gpt-4o-mini / qwen2.5) [current: {0}]: ", cfg.Llm.Model));
     string llmModel = Console.ReadLine()?.Trim() ?? "";
     if (!string.IsNullOrEmpty(llmModel)) cfg.Llm.Model = llmModel;
 
-    Console.Write(Lang.T("  LLM API Key（输入时不会显示，仅存系统凭据库，回车跳过）："));
+    Console.Write(Lang.T("  LLM API key (hidden input, stored in OS credentials, Enter to skip): "));
     var llmKey = ReadSecret();
     if (!string.IsNullOrEmpty(llmKey)) CredSet("llm_api_key", llmKey);
 
     // --- 通用 ---
-    Console.Write(Lang.T("\n[3/3] 默认搜索相似度阈值（0-1，建议 0.7，本地 bge-m3 建议 0.5）〔当前：{0}〕：", cfg.Embedding.SearchThreshold));
+    Console.Write(Lang.T("\n[3/3] Default search similarity threshold (0-1, suggest 0.7; 0.5 for local bge-m3) [current: {0}]: ", cfg.Embedding.SearchThreshold));
     if (float.TryParse(Console.ReadLine()?.Trim(), out float thr)) cfg.Embedding.SearchThreshold = thr;
 
     SaveConfig(dbPath, cfg);
-    Console.WriteLine(Lang.T("\n配置已保存。你可以修改 ai_config.json 调整模型，API Key 已在系统凭据库中。"));
-    Console.WriteLine(Lang.T("注意：更换 Embedding 模型后需执行 rssreader --reindex 重新向量化。"));
+    Console.WriteLine(Lang.T("\nConfig saved. You can tweak ai_config.json for the model; API keys live in the OS credential store."));
+    Console.WriteLine(Lang.T("Note: after changing the Embedding model, run rssreader --reindex to re-embed."));
 }
 
 // 读取密码（不回显）——跨平台简易实现
@@ -3741,15 +3880,15 @@ string ReadSecret()
 void ShowConfig(string dbPath)
 {
     var cfg = LoadConfig(dbPath);
-    Console.WriteLine(Lang.T("===== AI 配置 ====="));
-    Console.WriteLine(Lang.T("Embedding：{0} / {1} ({2} 维)", cfg.Embedding.Provider, cfg.Embedding.Model, cfg.Embedding.Dimensions));
-    Console.WriteLine(Lang.T("  端点：{0}", cfg.Embedding.ApiEndpoint));
-    Console.WriteLine(Lang.T("  默认搜索阈值：{0}", cfg.Embedding.SearchThreshold));
-    Console.WriteLine(Lang.T("  API Key：{0}", CredHas("embedding_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
-    Console.WriteLine(Lang.T("LLM：{0} / {1}", cfg.Llm.Provider, cfg.Llm.Model));
-    Console.WriteLine(Lang.T("  端点：{0}", cfg.Llm.ApiEndpoint));
-    Console.WriteLine(Lang.T("  API Key：{0}", CredHas("llm_api_key") ? Lang.T("已设置") : Lang.T("未设置")));
-    Console.WriteLine(Lang.T("配置文件：{0}", ConfigPath(dbPath)));
+    Console.WriteLine(Lang.T("===== AI Config ====="));
+    Console.WriteLine(Lang.T("Embedding: {0} / {1} ({2} dims)", cfg.Embedding.Provider, cfg.Embedding.Model, cfg.Embedding.Dimensions));
+    Console.WriteLine(Lang.T("  endpoint: {0}", cfg.Embedding.ApiEndpoint));
+    Console.WriteLine(Lang.T("  default search threshold: {0}", cfg.Embedding.SearchThreshold));
+    Console.WriteLine(Lang.T("  API Key: {0}", CredHas("embedding_api_key") ? Lang.T("set") : Lang.T("not set")));
+    Console.WriteLine(Lang.T("LLM: {0} / {1}", cfg.Llm.Provider, cfg.Llm.Model));
+    Console.WriteLine(Lang.T("  endpoint: {0}", cfg.Llm.ApiEndpoint));
+    Console.WriteLine(Lang.T("  API Key: {0}", CredHas("llm_api_key") ? Lang.T("set") : Lang.T("not set")));
+    Console.WriteLine(Lang.T("Config file: {0}", ConfigPath(dbPath)));
 
     var warn = CheckDimensionMismatch(dbPath, cfg.Embedding);
     if (warn != null) Console.WriteLine($"\n{warn}");
@@ -3780,11 +3919,12 @@ static class TuiMdState
 }
 
 // ══════════ 语言 / 本地化支持 ══════════
-// 用法：Lang.T("你好") / Lang.T("共有 {0} 篇", n)
+// 用法示例：T("Hello") / T("Total {0} articles", n)（源码原文 = 英文）
 // 查找顺序：readwithhotsoup/languages/<代码>.json（首次启动已自动复制默认翻译，可直接编辑）
-//        → 内置中文默认值 → 原样返回
-// 语言文件格式（JSON 字典，键为原文，值为译文）：
-//   { "你好": "Hello", "共有 {0} 篇": "Total {0} articles" }
+//        → 英文原文（原样返回）
+// 语言文件格式（JSON 字典，键为英文原文，值为译文）：
+//   例如 { "Hello": "你好", "Total {0} articles": "共有 {0} 篇" }
+// 内置语言：zh-CN.json（英→中，默认界面）、en-US.json（英→英，即英文原文）
 static class Lang
 {
     public static string Code { get; private set; } = "zh-CN";

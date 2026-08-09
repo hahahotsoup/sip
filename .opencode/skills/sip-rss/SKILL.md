@@ -39,6 +39,7 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --reindex` | 更换 Embedding 模型后重新向量化 |
 | `sip --search <查询> [--feed 编号] [--threshold 0.7] [--json]` | 语义搜索（Embedding） |
 | `sip --grep <关键词>` | 全文搜索（标题/正文/摘要关键字匹配，不依赖 AI） |
+| `sip --show <编号>` | 原文直出：文章标题/来源/链接 + 原始正文打到标准输出（**读全文用这个**） |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要 |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
@@ -100,6 +101,18 @@ sip --search "关键词A" --threshold 0.5 --ignoresafeannouncement
 #### 合并结果
 
 多轮检索后合并去重，按出现频次/相关度排序，向用户呈现「标题 + 来源 + 链接 + 命中位置」。如果语义搜索返回的相似度普遍偏低但内容明显相关，应主动说明并降低阈值重试，不要因为默认阈值就漏掉相关文章。
+
+#### 读取全文
+
+搜索结果里的 `[编号]` 即文章 ID。**需要看某篇全文时**（总结、问答、引用），用 `sip --show <编号>` 把原始正文打到标准输出，例如：
+
+```bash
+sip --show 42 --ignoresafeannouncement        # 读 42 号文章全文（标题/来源/链接 + 原始 HTML 正文）
+sip --show 42 --lang en-US --ignoresafeannouncement
+```
+
+- `--show` 输出的是**未渲染的原始正文**（Content 原文，可能是 HTML），不需要再进 TUI 或调 `--preview`
+- 优先读 `--show` 拿到的正文来回答用户，而不是只依赖 `--grep`/`--search` 的摘要片段
 
 ## 常见问题
 
