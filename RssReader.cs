@@ -79,31 +79,63 @@ return await RunTui(dbPath);
 // 以下是所有方法，按调用顺序排列
 // ═══════════════════════════════════════════════════════════
 
-// 把 exe 旁的默认语言文件复制到 readwithhotsoup/languages/（只复制不存在的，保留用户修改）
-// 旧版本语言文件（键为中文）会自动覆盖为新的英文键格式
-void EnsureDefaultLanguages(string baseDir, string dataDir)
+// 把默认语言文件复制到 readwithhotsoup/languages/，确保 zh-CN / en-US 等官方翻译始终可用。
+// 优先级：① exe 旁 languages/ 文件夹（发布外置，可编辑）> ② 内嵌程序集资源（单文件自带）。
+// 只写入「缺失」或「旧格式（键为中文）」的文件，用户已编辑过的语言文件不会被覆盖。
+// 返回本次是否恢复过文件（用于提示用户优先使用 languages/ 文件夹）。
+bool EnsureDefaultLanguages(string baseDir, string dataDir)
 {
+    bool restored = false;
     try
     {
-        string src = Path.Combine(baseDir, "languages");
-        if (!Directory.Exists(src)) return;
         string dst = Path.Combine(dataDir, "languages");
         Directory.CreateDirectory(dst);
-        foreach (var f in Directory.GetFiles(src, "*.json"))
+
+        // ① exe 旁外置语言文件夹（发布/开发时复制出来的那份，用户可直接编辑）
+        string src = Path.Combine(baseDir, "languages");
+        if (Directory.Exists(src))
         {
-            string target = Path.Combine(dst, Path.GetFileName(f));
+            foreach (var f in Directory.GetFiles(src, "*.json"))
+            {
+                string target = Path.Combine(dst, Path.GetFileName(f));
+                if (!File.Exists(target)) { File.Copy(f, target); restored = true; }
+                else if (IsLegacyLangFile(target))
+                {
+                    // 旧格式（键为中文原文）→ 用新版英文键格式覆盖，避免界面回退英文
+                    try { File.Copy(f, target, overwrite: true); restored = true; } catch { }
+                }
+            }
+        }
+
+        // ② 内嵌资源兜底：单文件包里自带官方翻译，外置文件夹缺失时也能恢复
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            const string prefix = "sip-lang.";
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            string target = Path.Combine(dst, name.Substring(prefix.Length));
             if (!File.Exists(target))
             {
-                File.Copy(f, target);
-            }
-            else if (IsLegacyLangFile(target))
-            {
-                // 旧格式（键为中文原文）→ 用新版英文键格式覆盖，避免界面回退英文
-                try { File.Copy(f, target, overwrite: true); } catch { }
+                using var rs = asm.GetManifestResourceStream(name);
+                if (rs != null)
+                {
+                    using var ws = new FileStream(target, FileMode.Create, FileAccess.Write);
+                    rs.CopyTo(ws);
+                    restored = true;
+                }
             }
         }
     }
-    catch { /* 复制失败不影响主流程（可能只是没有默认语言文件） */ }
+    catch { /* 恢复失败不影响主流程 */ }
+
+    // 仅在实际恢复过语言文件时提示（避免每次启动刷屏、污染 --json 输出）。
+    // 提示走 stderr，告诉用户自定义翻译优先用 languages/ 文件夹。
+    if (restored)
+    {
+        Console.Error.WriteLine("已恢复默认语言文件 → " + Path.Combine(dataDir, "languages"));
+        Console.Error.WriteLine("自定义翻译请优先编辑该 languages/ 文件夹里的文件（内置副本仅作兜底，不会覆盖你的修改）");
+    }
+    return restored;
 }
 
 // 判断语言文件是否为旧格式：任何键包含中文（新版键应为英文）

@@ -12,7 +12,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 语言文件默认外置（发布时复制到 exe 旁 languages/，可编辑定制） -->
     <None Include="languages\**\*.json" />
+    <!-- 同时内嵌为程序集资源，单文件即自带官方翻译：数据目录缺失时自动恢复 -->
+    <EmbeddedResource Include="languages\**\*.json">
+      <LogicalName>sip-lang.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <!-- 语言文件用自定义复制（不走 CopyToOutputDirectory/CopyToPublishDirectory，避免单文件发布的 MSB3094 冲突）：

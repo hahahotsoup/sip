@@ -26,27 +26,36 @@
 
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download)
 
-### 编译运行
+### 编译运行（单文件）
+
+把源码直接发布成**一个单文件可执行程序**（`sip.exe` / `sip`），带上语言文件就能跑，不需要带一堆 dll：
 
 ```bash
 git clone https://github.com/hahahotsoup/rssreader-core.git
 cd rssreader-core
-dotnet build -c Release
-dotnet bin/Release/net10.0/sip.dll          # 进入 TUI 界面
-dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
+dotnet publish -c Release -r win-x64 --self-contained false \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugSymbols=false -o publish/win-x64
+./publish/win-x64/sip.exe          # 进入 TUI 界面（Windows）
+./publish/win-x64/sip.exe --help   # 或直接用 CLI
 ```
 
-程序名已从 `rssreader` 更名为 **`sip`**（输出为 `sip.exe`）。
+发布产物只有**一个 `sip.exe`**（单文件可执行程序，框架依赖，目标机需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)，体积很小）。
 
-> **数据目录**：无论开发模式还是打包版，**首次运行**都会在可执行文件旁自动创建 **`readwithhotsoup/`** 文件夹——SQLite 数据库 `rss.db`、AI 配置 `ai_config.json`、语言文件 `languages/` 等**所有数据都放在这里**（开发模式下即 `bin/Release/net10.0/readwithhotsoup/`）。备份/迁移时整个文件夹拷走即可。
+> **语言文件已内嵌**：`zh-CN.json` / `en-US.json` 等官方翻译会打进 exe 内部——就算你把整个发布目录只拷走一个 exe，首次（或每次数据目录缺失时）启动都会**自动恢复**默认语言，界面仍是中文。发布目录里的外置 `languages/` 文件夹是**给用户定制翻译用的**（改完即生效，内置副本不会覆盖你的修改）。
 
-> **打包发布（单文件）**：需要给别人用、不想带一堆 dll 时，执行 `powershell -ExecutionPolicy Bypass -File publish.ps1`，会为 Windows x64 / Linux x64 / macOS Intel / macOS Apple Silicon 各生成一个**单文件可执行程序**（框架依赖，目标机需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)，单文件体积很小）。只发布单个平台也可手动执行，例如：
->
-> ```bash
-> dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish/win-x64
-> ```
->
-> 发布产物 = `sip.exe`（或 `sip`）+ 一个 `languages/` 文件夹（默认翻译，用于复制到数据目录）。首次运行单文件版时，程序会在 exe 同级自动创建 **`readwithhotsoup/`** 文件夹，并把 `languages/` 复制进去；数据库、AI 配置、语言文件等**所有数据文件都放在 `readwithhotsoup/` 里**，备份/迁移时整个文件夹拷走即可。
+`-r win-x64` 换成目标平台即可，常见 RID：
+
+| 平台 | RID |
+|------|-----|
+| Windows x64 / ARM64 | `win-x64` / `win-arm64` |
+| Linux x64 / ARM64 | `linux-x64` / `linux-arm64` |
+| macOS Intel / Apple Silicon | `osx-x64` / `osx-arm64` |
+
+> **免装运行时版（self-contained）**：想发布给别人「拷走即跑」、不要求对方装 .NET 运行时，把 `--self-contained false` 改成 `--self-contained true` 再发布即可（体积约几十 MB，程序更独立）。
+
+> **一次性发布全部平台**：执行 `powershell -ExecutionPolicy Bypass -File publish.ps1`，会为 Windows x64 / Linux x64 / macOS Intel / macOS Apple Silicon 各生成一个单文件可执行程序，输出到 `publish/<平台>/`。
+
+> **数据目录**：无论哪种方式编译，**首次运行**都会在可执行文件旁自动创建 **`readwithhotsoup/`** 文件夹——SQLite 数据库 `rss.db`、AI 配置 `ai_config.json`、语言文件 `languages/` 等**所有数据都放在这里**（首次运行单文件版时会把发布目录里的 `languages/` 复制进来）。备份/迁移时整个文件夹拷走即可。
 
 ## 使用说明
 
@@ -189,7 +198,7 @@ sip -l                          # 每个源显示「频率 · 上次 · 下次�
 
 - 选择方式：`--lang <代码>` 参数 > `LANG` 环境变量 > 默认 `zh-CN`
 - 内置语言：`zh-CN.json`（英 → 中，默认界面）、`en-US.json`（英 → 英，即英文原文）
-- **存储位置**：所有语言文件都在 `readwithhotsoup/languages/` 里——首次启动程序会把 exe 旁的 `languages/`（zh-CN.json / en-US.json 等默认翻译）自动复制进去，之后**直接编辑数据目录里的文件即可**，改完即生效
+- **存储位置**：所有语言文件都在 `readwithhotsoup/languages/` 里——首次启动程序会把默认翻译（exe 旁的 `languages/` 或 **exe 内嵌的官方翻译**）自动复制进去，之后**直接编辑数据目录里的文件即可**，改完即生效。exe 旁那份 `languages/` 是给用户定制用的（优先级高于内嵌副本）；万一数据目录缺失/损坏，下次启动会从 exe 内嵌副本**自动恢复**，界面不会退回英文
 - **定制翻译**：把 `en-US.json`（英文原文）复制一份为 `readwithhotsoup/languages/你的代码.json`，把值改成你的语言，用 `--lang 你的代码` 加载即可，例如 `fr-FR.json` 后 `--lang fr-FR`
 - 查找顺序：`readwithhotsoup/languages/<代码>.json` → 英文原文（原样返回）
 - 旧版本语言文件（键为中文）会在启动时自动覆盖为新的英文键格式，无需手动处理
@@ -318,7 +327,7 @@ CLI 会输出文章差异（新增/修改），并把源与文章写入数据库
 ├── sip.csproj          # 项目文件（程序名 sip）
 ├── RssReader.cs        # 全部代码（单文件）
 ├── publish.ps1         # 单文件打包脚本（win/linux/mac 各平台）
-├── languages/          # 默认语言文件（发布时随 exe 一起，首次启动复制到数据目录）
+├── languages/          # 默认语言文件（编译/发布时复制到 exe 旁，同时内嵌进 exe 兜底）
 │   ├── zh-CN.json
 │   └── en-US.json
 ├── .opencode/skills/   # AI Agent 使用 CLI 的 skill（教 AI 调用 sip）
