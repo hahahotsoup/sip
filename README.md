@@ -17,7 +17,7 @@
 - **文章追踪**：自动检测文章的新增和修改，修改的文章会保留历史版本（带时间戳归档标记），不会丢失
 - **快照归档**：对订阅源加时间戳归档，保留某一时刻的完整快照，归档后的源不会被后续更新覆盖
 - **AI 能力**：Embedding 语义搜索（RAG）与 LLM 文章摘要，OpenAI 兼容接口（Ollama / DeepSeek / OpenAI 等）
-- **多语言**：用户界面文案全部外置到 `languages/*.json`，用 `--lang <代码>` 或 `LANG` 环境变量切换，可自行定制/翻译
+- **多语言**：用户界面文案全部外置到 `readwithhotsoup/languages/*.json`，用 `--lang <代码>` 或 `LANG` 环境变量切换，可自行定制/翻译
 - **跨平台**：基于 .NET，数据存储为单个 `.db` 文件，Mac/Linux/Windows 均可运行
 
 ## 快速开始
@@ -37,6 +37,8 @@ dotnet bin/Release/net10.0/sip.dll --help   # 或直接用 CLI
 ```
 
 程序名已从 `rssreader` 更名为 **`sip`**（输出为 `sip.exe`）。
+
+> **数据目录**：无论开发模式还是打包版，**首次运行**都会在可执行文件旁自动创建 **`readwithhotsoup/`** 文件夹——SQLite 数据库 `rss.db`、AI 配置 `ai_config.json`、语言文件 `languages/` 等**所有数据都放在这里**（开发模式下即 `bin/Release/net10.0/readwithhotsoup/`）。备份/迁移时整个文件夹拷走即可。
 
 > **打包发布（单文件）**：需要给别人用、不想带一堆 dll 时，执行 `powershell -ExecutionPolicy Bypass -File publish.ps1`，会为 Windows x64 / Linux x64 / macOS Intel / macOS Apple Silicon 各生成一个**单文件可执行程序**（框架依赖，目标机需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)，单文件体积很小）。只发布单个平台也可手动执行，例如：
 >
@@ -178,7 +180,7 @@ sip -l                          # 每个源显示「频率 · 上次 · 下次�
 
 ### 多语言（语言文件）
 
-所有用户可见文案都从 `languages/<代码>.json` 读取，键为中文原文、值为译文，缺失时回退原文。
+所有用户可见文案都从 `readwithhotsoup/languages/<代码>.json` 读取，键为中文原文、值为译文，缺失时回退原文。
 
 - 选择方式：`--lang <代码>` 参数 > `LANG` 环境变量 > 默认 `zh-CN`
 - **存储位置**：所有语言文件都在 `readwithhotsoup/languages/` 里——首次启动程序会把 exe 旁的 `languages/`（zh-CN.json / en-US.json 等默认翻译）自动复制进去，之后**直接编辑数据目录里的文件即可**，改完即生效
