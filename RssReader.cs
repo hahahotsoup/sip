@@ -1,4 +1,4 @@
-// ===== 引用外部包 =====
+﻿// ===== 引用外部包 =====
 // using 相当于导入工具包，每个包提供不同的工具
 // System.* 是 C# 自带的（网络、文件、文字处理）
 // CodeHollow.FeedReader 是第三方包，专门解析 RSS/Atom
@@ -105,6 +105,11 @@ bool EnsureDefaultLanguages(string baseDir, string dataDir)
                     // 旧格式（键为中文原文）→ 用新版英文键格式覆盖，避免界面回退英文
                     try { File.Copy(f, target, overwrite: true); restored = true; } catch { }
                 }
+                else
+                {
+                    // 新版文件：合并「内置有、本地缺」的 key（补上新翻译，不覆盖用户已改的 key）
+                    MergeLangMissingKeys(f, target);
+                }
             }
         }
 
@@ -139,18 +144,65 @@ bool EnsureDefaultLanguages(string baseDir, string dataDir)
     return restored;
 }
 
-// 判断语言文件是否为旧格式：任何键包含中文（新版键应为英文）
+// 判断语言文件是否为旧格式：键**全是中文**（旧格式键=中文原文；新版键以英文为主，
+// 允许个别中文源文本 key，如 slogan/同意短语，不算旧格式）
 bool IsLegacyLangFile(string path)
 {
     try
     {
         using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        bool hasAscii = false, hasCjk = false;
         foreach (var prop in doc.RootElement.EnumerateObject())
-            if (prop.Name.Any(c => c >= 0x4E00 && c <= 0x9FFF))
-                return true;
+        {
+            if (prop.Name.Any(c => c < 128)) hasAscii = true;
+            if (prop.Name.Any(c => c >= 0x4E00 && c <= 0x9FFF)) hasCjk = true;
+        }
+        return hasCjk && !hasAscii;
     }
-    catch { }
-    return false;
+    catch { return false; }
+}
+
+// 把内置语言文件里「本地缺失」的 key 补进本地文件（不覆盖用户已改的 key）
+void MergeLangMissingKeys(string builtinPath, string targetPath)
+{
+    try
+    {
+        var builtin = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(builtinPath)) as System.Text.Json.Nodes.JsonObject;
+        var local = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(targetPath)) as System.Text.Json.Nodes.JsonObject;
+        if (builtin == null || local == null) return;
+        var localKeys = new HashSet<string>();
+        CollectLangKeys(local, localKeys);
+        var missing = new List<KeyValuePair<string, string>>();
+        CollectLangLeaves(builtin, missing, localKeys);
+        if (missing.Count == 0) return;
+        foreach (var kv in missing) local[kv.Key] = kv.Value;
+        // 用不转义非 ASCII 的编码器，保留中文可读性（用户后续可直接编辑）
+        File.WriteAllText(targetPath, local.ToJsonString(new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        }));
+    }
+    catch { /* 合并失败不影响启动 */ }
+}
+
+void CollectLangKeys(System.Text.Json.Nodes.JsonObject obj, HashSet<string> keys)
+{
+    foreach (var p in obj)
+    {
+        if (p.Value is System.Text.Json.Nodes.JsonObject nested) CollectLangKeys(nested, keys);
+        else if (p.Value is System.Text.Json.Nodes.JsonValue) keys.Add(p.Key);
+    }
+}
+
+void CollectLangLeaves(System.Text.Json.Nodes.JsonObject obj, List<KeyValuePair<string, string>> missing, HashSet<string> localKeys)
+{
+    foreach (var p in obj)
+    {
+        if (p.Value is System.Text.Json.Nodes.JsonObject nested) CollectLangLeaves(nested, missing, localKeys);
+        else if (p.Value is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var s) && !localKeys.Contains(p.Key))
+            missing.Add(new KeyValuePair<string, string>(p.Key, s));
+    }
 }
 
 // CLI 命令结束后提示「有到期的订阅源」（不自动更新，只提醒用户手动 sip --sync）
@@ -172,24 +224,286 @@ void RemindDueFeeds(string[] args, string dbPath)
     catch { /* 提示失败不影响主命令与退出码 */ }
 }
 
+// ══════════ 全文抓取（fetch）：文件缓存，零改表 ══════════
+// 全文文本存 dataDir/fulltext/<itemId>.md；sidecar 向量存 fulltext/vecs.json；
+// 同意标记存 fulltext_consent.txt。fetch 不改 Items.Content、不产生新版本、
+// 不参与 diff/更新，仅是一次性"补充阅读"副作用。
+
+string FulltextDir() { string d = Path.Combine(dataDir, "fulltext"); Directory.CreateDirectory(d); return d; }
+string FulltextPath(long itemId) => Path.Combine(FulltextDir(), itemId + ".md");
+string FulltextVecsPath() => Path.Combine(FulltextDir(), "vecs.json");
+string FulltextConsentPath() => Path.Combine(dataDir, "fulltext_consent.txt");
+
+bool HasFulltextConsent() => File.Exists(FulltextConsentPath());
+void WriteFulltextConsent() => File.WriteAllText(FulltextConsentPath(), DateTime.Now.ToString("O"));
+
+// 内容是否过短（Content 或 Description 字符数 < 100 → 触发全文抓取）
+bool ContentTooShort(string content, string desc)
+{
+    string c = string.IsNullOrWhiteSpace(content) ? desc : content;
+    return c.Trim().Length < 100;
+}
+
+// 某文章内容是否过短（TUI 判断是否需二次确认用）
+bool ArticleContentShort(string dbPath, int itemId)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Content, Description FROM Items WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return true;
+        return ContentTooShort(r.IsDBNull(0) ? "" : r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1));
+    }
+    catch { return true; }
+}
+
+// 读取某文全文缓存；未缓存返回 null
+string? ReadFulltextCache(long itemId)
+{
+    string p = FulltextPath(itemId);
+    return File.Exists(p) ? File.ReadAllText(p) : null;
+}
+
+// 下载链接页并抽取"可读正文"（简单 readability：去 script/style/nav/footer 等，取可见文本）
+string? FetchAndExtract(string url)
+{
+    try
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
+        var html = client.GetStringAsync(url).GetAwaiter().GetResult();
+        var doc = new HtmlAgilityPack.HtmlDocument();
+        doc.LoadHtml(html);
+        foreach (var node in doc.DocumentNode.SelectNodes("//script | //style | //nav | //footer | //header | //aside | //form | //noscript") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>())
+            node.Remove();
+        var text = doc.DocumentNode.InnerText;
+        text = Regex.Replace(text, @"[ \t\r]+", " ");
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
+        return System.Net.WebUtility.HtmlDecode(text).Trim();
+    }
+    catch { return null; }
+}
+
+// 抓取核心（调用方已完成同意与二次确认）。
+// 返回 (全文, 退出码, 错误信息)；0=成功；错误时不再打 Console，由调用方展示
+(string? Text, int ExitCode, string? Error) DoFetchCore(string dbPath, int itemId)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT i.Link, i.Content, i.Description, i.FeedId FROM Items i WHERE i.Id = @id";
+    cmd.Parameters.AddWithValue("@id", itemId);
+    using var r = cmd.ExecuteReader();
+    if (!r.Read()) return (null, 3, Lang.T("Article {0} not found", itemId));
+    string link = r.IsDBNull(0) ? "" : r.GetString(0);
+    string content = r.IsDBNull(1) ? "" : r.GetString(1);
+    string desc = r.IsDBNull(2) ? "" : r.GetString(2);
+    int feedId = r.GetInt32(3);
+
+    string? cached = ReadFulltextCache(itemId);
+    if (cached != null) return (cached, 0, null);
+    if (string.IsNullOrWhiteSpace(link)) return (null, 1, Lang.T("No link, cannot fetch"));
+    string text = FetchAndExtract(link) ?? "";
+    if (string.IsNullOrWhiteSpace(text)) return (null, 2, Lang.T("Fetch failed"));
+    File.WriteAllText(FulltextPath(itemId), text);
+    TrimFulltextCache();
+    // 该源若已索引 → 用全文做 sidecar 向量（存 fulltext/vecs.json，不污染主 Vectors 表）
+    EmbedFulltextSidecar(dbPath, itemId, feedId, text);
+    return (text, 0, null);
+}
+
+// 抓取全文主入口（CLI）。返回 (全文, 退出码, 错误信息)。
+// yes=true（--yes）：跳过同意与二次确认（AI/脚本）。已缓存则直接返回缓存。
+(string? Text, int ExitCode, string? Error) FetchFulltext(string dbPath, int itemId, bool yes, bool force = false)
+{
+    // 先读元信息判断是否过短（用于二次确认）；不存在直接返回错误
+    string? content = null, desc = null, title = null;
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Content, Description, Title FROM Items WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return (null, 3, Lang.T("Article {0} not found", itemId));
+        content = r.IsDBNull(0) ? "" : r.GetString(0);
+        desc = r.IsDBNull(1) ? "" : r.GetString(1);
+        title = r.GetString(2);
+    }
+
+    // 同意流程（一次性）：短语按当前语言（en-US 用英文短语）
+    string agreePhrase = Lang.T("是的，我愿意与作者达成合理使用约定");
+    if (!HasFulltextConsent())
+    {
+        if (yes) WriteFulltextConsent();
+        else
+        {
+            Console.WriteLine(Lang.T("sip is a reading aid; article fetching is for personal reading/study only. You agree to respect the source's intellectual property and copyright. You alone bear any loss from malicious use."));
+            Console.Write(Lang.T("Type exactly to agree: {0}: ", agreePhrase));
+            string input = Console.ReadLine()?.Trim() ?? "";
+            if (input != agreePhrase)
+            {
+                Console.WriteLine(Lang.T("Not agreed, cancelled"));
+                return (null, 1, null);
+            }
+            WriteFulltextConsent();
+        }
+    }
+
+    // 二次确认：仅对"非过短"文章（原文已够长，多半是误触，明确告知）
+    if (!force && !ContentTooShort(content!, desc!) && !yes)
+    {
+        Console.Write(Lang.T("The original text is already long. Did you mean to fetch? Fetch anyway? (y/n) "));
+        if (!"y".Equals(Console.ReadLine()?.Trim().ToLower()))
+        {
+            Console.WriteLine(Lang.T("Cancelled"));
+            return (null, 1, null);
+        }
+    }
+
+    return DoFetchCore(dbPath, itemId);
+}
+
+// CLI：sip --fulltext <id> [--yes] [--json]
+void FulltextCli(string[] args, string dbPath)
+{
+    if (!int.TryParse(args[0], out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+    bool yes = args.Any(a => a.Equals("--yes", StringComparison.OrdinalIgnoreCase));
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var (text, code, err) = FetchFulltext(dbPath, itemId, yes);
+    if (text == null)
+    {
+        SetExit(code);
+        if (json && err != null)
+            JsonOut(new { success = false, error = new { code = code == 2 ? "FETCH_FAILED" : (code == 3 ? "ITEM_NOT_FOUND" : "CANCELLED"), message = err } });
+        else if (err != null) Console.WriteLine(err);
+        return;
+    }
+    if (json) JsonOut(new { success = true, itemId, cached = true, content = text });
+    else Console.WriteLine(text);
+}
+
+// —— sidecar 向量（方案甲）——
+
+List<(int ItemId, int FeedId, int ModelId, float[] Vector)> LoadFulltextVecs()
+{
+    string p = FulltextVecsPath();
+    if (!File.Exists(p)) return new();
+    try
+    {
+        var arr = JsonSerializer.Deserialize<List<FulltextVecEntry>>(File.ReadAllText(p));
+        return arr?.Select(e => (e.ItemId, e.FeedId, e.ModelId, e.Vector)).ToList() ?? new();
+    }
+    catch { return new(); }
+}
+
+void SaveFulltextVecs(List<(int ItemId, int FeedId, int ModelId, float[] Vector)> list)
+    => File.WriteAllText(FulltextVecsPath(), JsonSerializer.Serialize(list.Select(e => new FulltextVecEntry { ItemId = e.ItemId, FeedId = e.FeedId, ModelId = e.ModelId, Vector = e.Vector }).ToList()));
+
+// 该源是否已索引（Vectors 表里该 FeedId 是否有向量）
+bool FeedHasVectors(string dbPath, int feedId)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE FeedId = @f";
+        cmd.Parameters.AddWithValue("@f", feedId);
+        return Convert.ToInt64(cmd.ExecuteScalar()) > 0;
+    }
+    catch { return false; }
+}
+
+// 当前 embedding 模型 Id；无则返回 0
+int CurrentEmbeddingModelId(string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
+        var o = cmd.ExecuteScalar();
+        return o == null ? 0 : Convert.ToInt32(o);
+    }
+    catch { return 0; }
+}
+
+// fetch 后：若该源已索引，用全文算向量存 sidecar；失败静默
+void EmbedFulltextSidecar(string dbPath, int itemId, int feedId, string text)
+{
+    try
+    {
+        if (!FeedHasVectors(dbPath, feedId)) return;
+        var cfg = LoadConfig(dbPath);
+        var vec = SafeEmbed(text, cfg, json: false).GetAwaiter().GetResult();
+        if (vec == null) return;
+        int modelId = CurrentEmbeddingModelId(dbPath);
+        if (modelId <= 0) return;
+        var list = LoadFulltextVecs();
+        list.RemoveAll(e => e.ItemId == itemId);
+        list.Add((itemId, feedId, modelId, vec));
+        SaveFulltextVecs(list);
+    }
+    catch { /* 嵌入失败不影响抓取 */ }
+}
+
+// CLI：sip --fulltext <id> [--yes] [--json]
+// CLI：sip --purge-fulltext [id]（删全部或单篇缓存）
+void PurgeFulltextCli(string arg, string dbPath)
+{
+    if (string.IsNullOrWhiteSpace(arg))
+    {
+        Directory.Delete(FulltextDir(), recursive: true);
+        Directory.CreateDirectory(FulltextDir());
+        Console.WriteLine(Lang.T("All fulltext cache cleared"));
+        return;
+    }
+    if (!int.TryParse(arg, out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+    string p = FulltextPath(itemId);
+    if (File.Exists(p)) File.Delete(p);
+    var list = LoadFulltextVecs();
+    if (list.RemoveAll(e => e.ItemId == itemId) > 0) SaveFulltextVecs(list);
+    Console.WriteLine(Lang.T("Cleared cache for article {0}", itemId));
+}
+
+// ══════════ 阅读进度记忆（按文章记录滚动位置，文件存储，零改表）══════════
+string ReadingProgressPath() => Path.Combine(dataDir, "reading_progress.json");
+
+Dictionary<long, int> LoadReadingProgress()
+{
+    try
+    {
+        var d = JsonSerializer.Deserialize<Dictionary<string, int>>(File.ReadAllText(ReadingProgressPath()));
+        return d?.ToDictionary(kv => long.Parse(kv.Key), kv => kv.Value) ?? new Dictionary<long, int>();
+    }
+    catch { return new Dictionary<long, int>(); }
+}
+
+void SaveReadingProgress(Dictionary<long, int> map)
+{
+    try
+    {
+        File.WriteAllText(ReadingProgressPath(), JsonSerializer.Serialize(
+            map.ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
+            new JsonSerializerOptions { WriteIndented = true }));
+    }
+    catch { /* 保存失败不影响使用 */ }
+}
+
 // ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
     var cmd = args[0].ToLower();
 
-    // 文章预览：sip --preview <文章编号> → 独立预览界面，底部提示按 W 进入完整 TUI
-    if (cmd is "-p" or "--preview")
-    {
-        if (args.Length < 2 || !int.TryParse(args[1], out int pNum))
-        {
-            SetExit(); Console.WriteLine(Lang.T("Usage: sip --preview <article-id>"));
-            return;
-        }
-        await RunPreviewOrFullTui(pNum, dbPath);
-        return;
-    }
-
-    // 原文直出：sip --show <文章编号> → 把文章原始内容（标题/链接/正文原文）打到标准输出，供 AI 直接读取
+    // 原文阅读：sip --show <文章编号>
+    //   默认 → 全屏阅读界面（无侧栏，W 进入完整 TUI，Esc/Q 退出），给人读文章
+    //   --json → 原文 JSON 打到标准输出（未渲染），供 AI / 脚本读取
     if (cmd is "--show" or "--content")
     {
         if (args.Length < 2 || !int.TryParse(args[1], out int sNum))
@@ -197,7 +511,13 @@ async Task RunCli(string[] args, string dbPath)
             SetExit(); Console.WriteLine(Lang.T("Usage: sip --show <article-id>"));
             return;
         }
-        ShowArticleCli(sNum, dbPath);
+        bool json = args.Contains("--json", StringComparer.OrdinalIgnoreCase);
+        if (json) ShowArticleJson(sNum, dbPath);
+        else
+        {
+            if (!ArticleExists(sNum, dbPath)) { SetExit(); Console.WriteLine(Lang.T("Article {0} not found", sNum)); return; }
+            await RunFullscreenReader(sNum, dbPath);
+        }
         return;
     }
 
@@ -264,12 +584,15 @@ async Task RunCli(string[] args, string dbPath)
         case "--summary-all":
             await SummaryAllCli(dbPath);
             return;
+        case "--purge-fulltext":
+            PurgeFulltextCli(args.Length > 1 ? args[1] : "", dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
     bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
                     or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep"
-                    or "--versions" or "--history";
+                    or "--versions" or "--history" or "--fulltext" or "--diff" or "--export";
     if (args.Length < 2)
     {
         if (!needsArg) { SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
@@ -305,8 +628,20 @@ async Task RunCli(string[] args, string dbPath)
         case "--grep":
             GrepCli(args.Skip(1).ToArray(), dbPath);
             break;
+        case "--fulltext":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --fulltext <article-id> [--yes] [--json]")); return; }
+            FulltextCli(args.Skip(1).ToArray(), dbPath);
+            break;
         case "--versions" or "--history":
             ListVersionsCli(args[1], dbPath);
+            break;
+        case "--diff":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --diff <article-id> [vA vB] [--json]")); return; }
+            DiffCli(args.Skip(1).ToArray(), dbPath);
+            break;
+        case "--export":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --export <article-id | feed:number | all> [out.md | dir] [--yes]")); return; }
+            ExportCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--summary":
             SummaryCli(args[1], dbPath).Wait();
@@ -329,9 +664,12 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  -a, --archive    archive a feed (add timestamp)"));
     Console.WriteLine(Lang.T("  -una, --unarchive unarchive a feed"));
     Console.WriteLine(Lang.T("  -r, --remove     delete a feed (add --yes to skip confirmation)"));
-    Console.WriteLine(Lang.T("  -p, --preview    preview a single article (W = enter full TUI)"));
-    Console.WriteLine(Lang.T("  --show           print an article's raw content to stdout (for AI/scripts)"));
+    Console.WriteLine(Lang.T("  --show <id>      fullscreen reading (no sidebar; W = full TUI, Esc = exit); add --json to output raw content for AI/scripts"));
     Console.WriteLine(Lang.T("  --versions <id>  list all versions of an article (use --show <id> to view one)"));
+    Console.WriteLine(Lang.T("  --diff <id> [vA vB]  diff two versions of an article (default: last two); --json for structured output"));
+    Console.WriteLine(Lang.T("  --export <id | feed:N | all> [out.md|dir]  export article(s) as Markdown (--yes to skip confirm)"));
+    Console.WriteLine(Lang.T("  --fulltext <id>  fetch the article's full text to a local cache (--yes skip consent/confirm; --json)"));
+    Console.WriteLine(Lang.T("  --purge-fulltext [id]  clear the full-text cache"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -373,13 +711,13 @@ void PrintHelp()
 // 操作：↑↓ 选择，Enter 折叠/展开源或打开文章，←→ 切换树/正文，PageUp/PageDown 翻页，
 //       U 更新当前源，F6 全部更新，A 归档，R 去归档，X 删除，D 加源，S 搜索，Y 摘要，H 帮助，Q 退出
 #pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
-async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScreen = true)
+async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScreen = true, long preselectItemId = 0)
 {
     if (!appReady) Application.Init();
     try
     {
         // 开始界面：回车进入 / Q 退出
-        if (showStartScreen && !ShowStartScreen()) return 0;
+        if (showStartScreen && !ShowStartScreen(dbPath)) return 0;
 
         // —— 左侧：订阅源 + 文章 侧栏（文章标题自动换行显示）——
         // 侧栏为自绘 View：来源可展开/折叠，标题过长时自动换行（CJK 宽度感知）
@@ -387,7 +725,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             X = 0,
             Y = 0,
-            Width = Dim.Percent(30),
+            Width = Dim.Percent(24),
             Height = Dim.Fill() - 3,
             CanFocus = true,
             BorderStyle = LineStyle.Single,
@@ -397,8 +735,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
             HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
-            Active = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
-            HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
+            // 聚焦时选中行用清晰的亮青反色；正文区聚焦（阅读中）时选中行柔和变暗，不抢注意力
+            Active = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkCyan),
+            HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkCyan),
             Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
             HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
             Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
@@ -438,6 +777,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             contentView.SetFocus();
         }
 
+        // 沉浸阅读状态（ToggleImmersive 定义在 statusBar 之后，因为要用到它）
+        bool immersive = false;
+
         // 底部命令行：平时隐藏，按 Esc 唤出，Enter 执行后隐藏，再按 Esc 隐藏
         var cmdBar = new TextField
         {
@@ -459,7 +801,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             Visible = false
         };
 
-        // 主窗口
+        // 主窗口（先于 UpdateStats 声明，后者会更新窗口标题）
         var top = new Window
         {
             Title = " sip RSS Reader ",
@@ -469,11 +811,49 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             Height = Dim.Fill(),
         };
 
+        // 状态行（命令行隐藏时显示）：源数 · 文章位置/总数
+        var statsLabel = new Label
+        {
+            Text = "",
+            X = 1,
+            Y = Pos.AnchorEnd(2),
+            CanFocus = false,
+            Visible = true
+        };
+        void UpdateStats()
+        {
+            int feeds = 0, articles = 0;
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={dbPath}");
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = "SELECT (SELECT COUNT(*) FROM Feeds), (SELECT COUNT(*) FROM Items WHERE Status = 'active')";
+                using var rr = c.ExecuteReader();
+                if (rr.Read()) { feeds = rr.GetInt32(0); articles = rr.GetInt32(1); }
+            }
+            catch { }
+            var (cur, tot) = tree.ArticlePosition();
+            statsLabel.Text = Lang.T("feeds {0} · article {1}/{2}", feeds, cur, Math.Max(articles, tot));
+            top.Title = $" sip RSS Reader · {Lang.T("feeds {0}", feeds)} ";
+        }
+
         // 正文/概要模式 + 链接导航状态（供状态栏快捷键引用）
         bool contentMode = true;     // true=完整正文，false=文章概要
         bool linkNavMode = false;
         bool _syncing = false;       // 到期源自动同步进行中（防重入）
         int linkNavIndex = 0;
+
+        // —— 阅读进度记忆（按文章记住滚动位置；文件存储，零改表）——
+        var progressMap = LoadReadingProgress();
+        long _currentArticleId = 0;
+        int _pendingScrollY = -1;   // 等正文布局完成后恢复的滚动位置
+        void SaveCurrentScroll()
+        {
+            if (_currentArticleId == 0) return;
+            try { progressMap[_currentArticleId] = contentView.Viewport.Y; }
+            catch { }
+        }
 
         // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
         var statusBar = new StatusBar(new Shortcut[]
@@ -492,7 +872,33 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             new Shortcut(Key.Q, Lang.T("Quit"), () => top.RequestStop(), Lang.T("Exit program"))
         });
 
-        top.Add(tree, vDivider, contentView, cmdLabel, cmdBar, statusBar);
+        top.Add(tree, vDivider, contentView, cmdLabel, cmdBar, statsLabel, statusBar);
+
+        // 沉浸阅读：隐藏侧栏/分隔线/状态栏/状态行，正文占满全屏；再按 i 恢复
+        void ToggleImmersive()
+        {
+            immersive = !immersive;
+            tree.Visible = !immersive && !sidebarCollapsed;
+            vDivider.Visible = !immersive;
+            statusBar.Visible = !immersive;
+            statsLabel.Visible = !immersive && !cmdBar.Visible;
+            cmdBar.Visible = false;
+            cmdLabel.Visible = false;
+            if (immersive) contentView.X = 0;
+            else contentView.X = sidebarCollapsed ? 0 : Pos.Right(tree) + 2;
+            UpdateLinkNavTitle();
+            contentView.SetFocus();
+        }
+
+        // —— 侧栏宽度自适应：宽屏固定列宽（正文更宽更好读），窄屏退回比例 ——
+        const int WideSidebarWidth = 32;
+        const int WideThreshold = 130;   // 终端宽度 ≥ 此列数时用固定列宽
+        void ApplyResponsiveSidebar()
+        {
+            tree.Width = top.Frame.Width >= WideThreshold ? Dim.Absolute(WideSidebarWidth) : Dim.Percent(24);
+        }
+        top.FrameChanged += (s, e) => ApplyResponsiveSidebar();
+        ApplyResponsiveSidebar();
 
         void RebuildTree()
         {
@@ -525,13 +931,18 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             }
             tree.SetFeeds(feeds);
             tree.ExpandAll();
+            UpdateStats();
         }
 
         void ShowSelectedContent()
         {
+            UpdateStats();
+            SaveCurrentScroll();                       // 先记住上一篇的位置
             var n = tree.SelectedObject;
-            if (n == null || n.IsFeed) { contentView.Text = ""; return; }
-            contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth());
+            if (n == null || n.IsFeed) { contentView.Text = ""; _currentArticleId = 0; return; }
+            contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth(), showFetchHint: true);
+            _currentArticleId = n.ItemId;
+            _pendingScrollY = progressMap.TryGetValue(n.ItemId, out int y) ? y : -1;
             UpdateLinkNavTitle();
         }
 
@@ -798,6 +1209,11 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 ReadOnly = true, WordWrap = false
             };
             txt.Text = string.Join("\n",
+                Lang.T("j/k ↑↓    move up/down"),
+                Lang.T("l/Enter   open article / toggle feed"),
+                Lang.T("←         back (to sidebar)"),
+                Lang.T("Space/b   page down/up  ·  Ctrl+D/U half page"),
+                Lang.T("i         immersive reading (hide all UI)"),
                 Lang.T("U          update current feed"),
                 Lang.T("F6         update all feeds"),
                 Lang.T("A          archive current feed"),
@@ -812,7 +1228,6 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 Lang.T("Esc        open command line"),
                 Lang.T("H          show this help"),
                 Lang.T("Q          quit"),
-                Lang.T("Enter      feed: collapse/expand; article: open"),
                 Lang.T("← / →      switch sidebar/content"),
                 Lang.T("PageUp/Dn  page up/down"),
                 "",
@@ -838,22 +1253,22 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 ReadOnly = true, WordWrap = true
             };
             txt.Text = string.Join("\n",
-                "🍲 sip",
+                Lang.T("🍲 sip"),
                 "",
-                "——「品，你细品。」",
+                Lang.T("——「品，你细品。」"),
                 "",
-                "一个让你站着把信息喝了的 RSS 阅读器核心。",
+                Lang.T("一个让你站着把信息喝了的 RSS 阅读器核心。"),
                 "",
-                "功能：文件夹视图 TUI + 全功能 CLI",
-                "      · 全文搜索  --grep / 语义搜索 --search",
-                "      · 版本追踪 / 快照归档 / AI 摘要",
-                "      · 多语言（readwithhotsoup/languages/*.json）",
+                Lang.T("功能：文件夹视图 TUI + 全功能 CLI"),
+                Lang.T("      · 全文搜索  --grep / 语义搜索 --search"),
+                Lang.T("      · 版本追踪 / 快照归档 / AI 摘要"),
+                Lang.T("      · 多语言（readwithhotsoup/languages/*.json）"),
                 "",
-                "作者：hahahotsoup with ❤",
-                "thanks to deepseek + opencode",
+                Lang.T("作者：hahahotsoup with ❤"),
+                Lang.T("thanks to deepseek + opencode"),
                 "",
-                "博客：https://blog.hotsouprealm.top/atom.xml",
-                "关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾");
+                Lang.T("博客：https://blog.hotsouprealm.top/atom.xml"),
+                Lang.T("关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾"));
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -904,9 +1319,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             string extra = linkNavMode && TuiMdState.Links.Count > 0
                 ? $"  [ {linkNavIndex + 1}/{TuiMdState.Links.Count} ]  {TuiMdState.Links[linkNavIndex].Text}"
                 : "";
-            string modeTag = contentMode ? Lang.T("Content") : Lang.T("Overview");
-            if (sidebarCollapsed) modeTag = "◀ " + modeTag;
-            contentView.Title = " " + modeTag + (linkNavMode ? " (链接模式)" : "") + extra + " ";
+            string modeTag = immersive ? Lang.T("Immersive") : (contentMode ? Lang.T("Content") : Lang.T("Overview"));
+            if (sidebarCollapsed && !immersive) modeTag = "◀ " + modeTag;
+            string focusTag = contentView.HasFocus ? " ◉" : "";
+            contentView.Title = " " + modeTag + focusTag + (linkNavMode ? " (链接模式)" : "") + extra + " ";
         }
 
         void ToggleContentMode()
@@ -927,6 +1343,18 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 
         // —— 事件绑定 ——
         tree.SelectionChanged += (s, e) => ShowSelectedContent();
+        // 焦点变化时刷新正文标题栏的 ◉ 焦点标记（阅读区聚焦不再整块变色，靠它指示）
+        contentView.HasFocusChanged += (s, e) => UpdateLinkNavTitle();
+
+        // 正文内容尺寸就绪后再恢复滚动位置（直接 ScrollVertical 会因内容未布局被夹到 0）
+        contentView.ContentSizeChanged += (s, e) =>
+        {
+            if (_pendingScrollY > 0)
+            {
+                try { contentView.ScrollVertical(_pendingScrollY); } catch { }
+                _pendingScrollY = -1;
+            }
+        };
 
         // 鼠标点击正文中的链接直接打开
         contentView.LinkClicked += (s, e) =>
@@ -935,13 +1363,15 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             e.Handled = true;
         };
 
-        // 侧栏：Enter 折叠/展开源或确认文章；←/→ 切换栏；PageUp/PageDown 翻页；C 折叠侧栏；Esc 唤出命令行
+        // 侧栏：j/k 上下移动，l/Enter 展开源或打开文章，Space/b 翻页，C 折叠侧栏，
+        //       i 沉浸阅读，V 版本，Esc 命令行
         tree.KeyDown += (s, e) =>
         {
             var n = tree.SelectedObject;
-            if (e.KeyCode == KeyCode.Enter)
+            if (e.KeyCode == KeyCode.Enter || e.KeyCode == KeyCode.L)
             {
                 if (n != null && n.IsFeed) tree.Toggle(n);
+                else contentView.SetFocus();
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.CursorRight)
@@ -949,12 +1379,22 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 if (n is { IsFeed: false }) contentView.SetFocus();
                 e.Handled = true;
             }
-            else if (e.KeyCode == KeyCode.PageUp)
+            else if (e.KeyCode == KeyCode.CursorDown || e.KeyCode == KeyCode.J)
+            {
+                tree.MoveDown();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.CursorUp || e.KeyCode == KeyCode.K)
+            {
+                tree.MoveUp();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.PageUp || e.KeyCode == KeyCode.B)
             {
                 tree.MovePageUp();
                 e.Handled = true;
             }
-            else if (e.KeyCode == KeyCode.PageDown)
+            else if (e.KeyCode == KeyCode.PageDown || e.KeyCode == KeyCode.Space)
             {
                 tree.MovePageDown();
                 e.Handled = true;
@@ -962,6 +1402,17 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             else if (e.KeyCode == KeyCode.C)
             {
                 ToggleSidebar();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.I)
+            {
+                ToggleImmersive();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.M)
+            {
+                ShowFeedManager(dbPath);
+                RebuildTree();
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.V)
@@ -977,40 +1428,57 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             }
         };
 
-        // 正文栏：← 返回树；↑↓ 平滑滚动；PageUp/PageDown 小幅翻页；Esc 唤出命令行；
-        // 链接导航：Ctrl+O 进入/退出，Tab/Shift+Tab 切换链接，Enter 打开当前链接
+        // 正文栏：← 返回树；j/k/↑↓ 平滑滚动；Space/b/PageUp/PageDown 翻页；Ctrl+D/Ctrl+U 半页；
+        //       l/Enter 打开当前链接；i 沉浸阅读；C 折叠侧栏；V 版本；Esc 命令行
+        // 链接导航：Ctrl+O 进入/退出，Tab/Shift+Tab 切换链接，Enter/l 打开当前链接
         contentView.KeyDown += (s, e) =>
         {
             switch (e.KeyCode)
             {
                 case KeyCode.CursorLeft:
-                    if (!linkNavMode) { tree.SetFocus(); }
+                    if (linkNavMode) { /* 链接模式下 ← 不抢 */ }
+                    else if (immersive) ToggleImmersive();
+                    else if (!sidebarCollapsed) tree.SetFocus();
                     e.Handled = true;
                     break;
                 case KeyCode.CursorUp:
+                case KeyCode.K:
                     if (linkNavMode) { CycleLink(-1); }
                     else contentView.ScrollVertical(-1);
                     e.Handled = true;
                     break;
                 case KeyCode.CursorDown:
+                case KeyCode.J:
                     if (linkNavMode) { CycleLink(1); }
                     else contentView.ScrollVertical(1);
                     e.Handled = true;
                     break;
                 case KeyCode.PageUp:
+                case KeyCode.B:
                     contentView.ScrollVertical(-6);
                     e.Handled = true;
                     break;
                 case KeyCode.PageDown:
+                case KeyCode.Space:
                     contentView.ScrollVertical(6);
                     e.Handled = true;
                     break;
                 case KeyCode.Enter:
+                case KeyCode.L:
                     if (linkNavMode) OpenCurrentLink();
                     e.Handled = true;
                     break;
                 case KeyCode.C:
                     ToggleSidebar();
+                    e.Handled = true;
+                    break;
+                case KeyCode.I:
+                    ToggleImmersive();
+                    e.Handled = true;
+                    break;
+                case KeyCode.M:
+                    ShowFeedManager(dbPath);
+                    RebuildTree();
                     e.Handled = true;
                     break;
                 case KeyCode.V:
@@ -1037,6 +1505,18 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                         if (linkNavMode) CycleLink(1);
                         e.Handled = true;
                     }
+                    else if (e.IsCtrl && e.KeyCode == (KeyCode.D | KeyCode.CtrlMask))
+                    {
+                        // Ctrl+D：半页向下（vim 习惯）
+                        contentView.ScrollVertical(3);
+                        e.Handled = true;
+                    }
+                    else if (e.IsCtrl && e.KeyCode == (KeyCode.U | KeyCode.CtrlMask))
+                    {
+                        // Ctrl+U：半页向上（vim 习惯）
+                        contentView.ScrollVertical(-3);
+                        e.Handled = true;
+                    }
                     else if (e.KeyCode == KeyCode.G && !e.IsCtrl)
                     {
                         // G：切换「完整正文 / 文章概要」
@@ -1059,6 +1539,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             cmdBar.Visible = true;
             cmdLabel.Visible = true;
+            statsLabel.Visible = false;
             cmdBar.Text = "";
             cmdBar.SetFocus();
         }
@@ -1067,6 +1548,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             cmdBar.Visible = false;
             cmdLabel.Visible = false;
+            statsLabel.Visible = !immersive;
             cmdBar.Text = "";
             tree.SetFocus();
         }
@@ -1089,6 +1571,46 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             }
         };
 
+        // 全文抓取同意对话框（TUI）：要求输入指定短语，同意后写标记文件
+        bool FulltextConsentDialog()
+        {
+            if (HasFulltextConsent()) return true;
+            string phrase = Lang.T("是的，我愿意与作者达成合理使用约定");
+            var dlg = new Dialog { Title = " " + Lang.T("Consent") + " ", Width = 76, Height = 14 };
+            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 8, ReadOnly = true, CanFocus = false, WordWrap = true };
+            txt.Text = Lang.T("sip is a reading aid; article fetching is for personal reading/study only. You agree to respect the source's intellectual property and copyright. You alone bear any loss from malicious use.") + "\n\n" +
+                Lang.T("Type exactly to agree: {0}", phrase);
+            var input = new TextField { X = 0, Y = Pos.Bottom(txt), Width = Dim.Fill(2), Text = "" };
+            var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(input) + 1 };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(input) + 1 };
+            dlg.Add(input, txt, ok, cancel);
+            ok.Accepted += (s, e) => dlg.RequestStop();
+            cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+            input.Initialized += (s, e) => input.SetFocus();
+            Application.Run(dlg);
+            if (input.Text.Trim() == phrase)
+            {
+                WriteFulltextConsent();
+                return true;
+            }
+            return false;
+        }
+
+        // TUI：抓取当前/指定文章的全文
+        void FetchFulltextTui(int itemId)
+        {
+            if (!FulltextConsentDialog()) { Ask(Lang.T("Not agreed, cancelled"), Lang.T("OK")); return; }
+            if (!ArticleContentShort(dbPath, itemId))
+            {
+                // 原文已够长 → 提示可能是误触
+                int ans = Ask(Lang.T("The original text is already long. Did you mean to fetch? Fetch anyway?"), Lang.T("Fetch"), Lang.T("Cancel"));
+                if (ans != 0) return;
+            }
+            var (text, _, err) = DoFetchCore(dbPath, itemId);
+            ShowSelectedContent();   // 重新渲染（现在会显示原文 + 分界 + 全文）
+            if (text == null) Ask(err ?? Lang.T("Fetch failed"), Lang.T("OK"));
+        }
+
         // 执行命令行输入（复用 CLI 命令语法）
         void RunCommand(string input)
         {
@@ -1103,6 +1625,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     return;
                 case "h" or "help":
                     ShowHelpDialog();
+                    return;
+                case "manage":
+                    ShowFeedManager(dbPath);
+                    RebuildTree();
                     return;
                 case "u" or "-u" or "--update":
                     if (int.TryParse(arg, out int unum))
@@ -1137,6 +1663,19 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case "y" or "--summary":
                     SummarizeSelected();
                     return;
+                case "fetch" or "--fulltext":
+                {
+                    long fid = 0;
+                    if (!string.IsNullOrWhiteSpace(arg) && int.TryParse(arg, out int fnum)) fid = fnum;
+                    else
+                    {
+                        var sel = tree.SelectedObject;
+                        if (sel is { IsFeed: false }) fid = sel.ItemId;
+                        else { Ask(Lang.T("Select an article first to fetch"), Lang.T("OK")); return; }
+                    }
+                    FetchFulltextTui((int)fid);
+                    return;
+                }
                 case "init" or "--init":
                     InitConfigDialog();
                     return;
@@ -1406,6 +1945,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var cmd = conn.CreateCommand();
             cmd.CommandText = "DELETE FROM Vectors";
             cmd.ExecuteNonQuery();
+            // 换模型后旧 sidecar 向量（抓取全文的）同样失效，一并清空
+            if (File.Exists(FulltextVecsPath())) { try { File.Delete(FulltextVecsPath()); } catch { } }
             cmd.CommandText = "SELECT Id, FeedId, Title FROM Items WHERE Status = 'active'";
             using var r = cmd.ExecuteReader();
             var items = new List<(int Id, int FeedId, string Title)>();
@@ -1437,6 +1978,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 
         RebuildTree();
         tree.ExpandAll();
+        if (preselectItemId != 0) tree.SelectItem(preselectItemId);
         tree.SetFocus();
 
         // —— 到期源自动同步 ——
@@ -1493,6 +2035,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         });
 
         Application.Run(top);
+        SaveCurrentScroll();
+        SaveReadingProgress(progressMap);
         return 0;
     }
     finally
@@ -1503,15 +2047,16 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
 #pragma warning restore CS0618
 
 #pragma warning disable CS0618
-// ══════════ 外部 CLI 查看文章预览（sip --preview <文章编号>）═══════════
-// 独立预览界面：正文 + 底部提示「按 W 进入完整 TUI 程序」；W → 进入完整 TUI，Q/Esc → 返回
-async Task RunPreviewOrFullTui(int itemId, string dbPath)
+// ══════════ 外部 CLI 全屏阅读（sip --show <文章编号>）═══════════
+// 全屏阅读界面：无侧栏，正文 Markdown 渲染，底部提示「W 进入完整阅读器 · Esc 退出」；
+// W → 进入完整 TUI 并定位到当前文章，Esc/Q → 退出
+async Task RunFullscreenReader(int itemId, string dbPath)
 {
     Application.Init();
     try
     {
-        if (ShowArticlePreview(itemId, dbPath))
-            await RunTui(dbPath, appReady: true, showStartScreen: false);
+        if (ShowFullscreenReader(itemId, dbPath))
+            await RunTui(dbPath, appReady: true, showStartScreen: false, preselectItemId: itemId);
     }
     finally
     {
@@ -1519,7 +2064,7 @@ async Task RunPreviewOrFullTui(int itemId, string dbPath)
     }
 }
 
-bool ShowArticlePreview(int itemId, string dbPath)
+bool ShowFullscreenReader(int itemId, string dbPath)
 {
     var md = CreateMarkdownView();
     md.X = 0;
@@ -1527,12 +2072,12 @@ bool ShowArticlePreview(int itemId, string dbPath)
     md.Width = Dim.Fill();
     md.Height = Dim.Fill() - 1;
     md.CanFocus = true;
-    md.Title = " " + Lang.T("Article Preview") + " ";
+    md.Title = " " + Lang.T("Article") + " ";
     md.Text = BuildArticleMarkdown(itemId, contentMode: true, dbPath, 90);
 
     var hint = new Label
     {
-        Text = Lang.T("  Press W to enter the full TUI  ·  Q to go back  "),
+        Text = Lang.T("  Press W to enter the full reader  ·  Esc to exit  "),
         X = 0,
         Y = Pos.AnchorEnd(1),
         Width = Dim.Fill(),
@@ -1542,7 +2087,7 @@ bool ShowArticlePreview(int itemId, string dbPath)
 
     var top = new Window
     {
-        Title = " sip · " + Lang.T("Article Preview") + " ",
+        Title = " sip · " + Lang.T("Article") + " ",
         X = 0,
         Y = 0,
         Width = Dim.Fill(),
@@ -1574,7 +2119,205 @@ bool ShowArticlePreview(int itemId, string dbPath)
 }
 
 // 开始界面：全屏居中展示 slogan 与功能简介，回车进入 / Q 退出
-bool ShowStartScreen()
+// Dashboard 统计面板行（初始页数据）
+List<string> DashboardStats(string dbPath)
+{
+    var lines = new List<string>();
+    int feeds = 0, articles = 0, versions = 0, archived = 0, aiIndex = 0;
+    long dbSize = 0; string lastSync = "";
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT (SELECT COUNT(*) FROM Feeds), (SELECT COUNT(*) FROM Items WHERE Status='active'), (SELECT COUNT(*) FROM Items), (SELECT COUNT(*) FROM Items WHERE Status='archived'), (SELECT COUNT(*) FROM Vectors), (SELECT MAX(LastCheckedAt) FROM Feeds)";
+        using var r = cmd.ExecuteReader();
+        if (r.Read())
+        {
+            feeds = r.GetInt32(0); articles = r.GetInt32(1); versions = r.GetInt32(2);
+            archived = r.GetInt32(3); aiIndex = r.GetInt32(4);
+            lastSync = r.IsDBNull(5) ? "" : r.GetString(5);
+        }
+        dbSize = new FileInfo(dbPath).Length;
+    }
+    catch { }
+    lines.Add(Lang.T("──  Dashboard  ──"));
+    lines.Add(Lang.T("  订阅源 feeds      : {0}", feeds));
+    lines.Add(Lang.T("  文章 articles     : {0}", articles));
+    lines.Add(Lang.T("  版本 versions     : {0}", versions));
+    lines.Add(Lang.T("  归档 archived     : {0}", archived));
+    lines.Add(Lang.T("  AI 索引 index     : {0}", aiIndex));
+    lines.Add(Lang.T("  数据库 database   : {0:N1} MB", dbSize / 1048576.0));
+    lines.Add(Lang.T("  最近同步 last sync: {0}", lastSync.Length > 0 ? lastSync : Lang.T("never")));
+    return lines;
+}
+
+// 订阅源管理页（TUI：m 键 / manage 命令）
+void ShowFeedManager(string dbPath)
+{
+    // Dialog 全屏；列表用自绘 FeedManagerList，方向键/翻页由它自己处理，不会被吞
+    var top = new Dialog
+    {
+        Title = " " + Lang.T("Manage feeds") + " ",
+        X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill()
+    };
+    var list = new FeedManagerList
+    {
+        X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(2),
+        CanFocus = true
+    };
+    var hint = new Label
+    {
+        Text = Lang.T("  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · Esc 返回  "),
+        X = 0, Y = Pos.AnchorEnd(1), Width = Dim.Fill(), Height = 1, TextAlignment = Alignment.Center
+    };
+    top.Add(list, hint);
+
+    void Rebuild()
+    {
+        var rows = new List<(int Id, string Line)>();
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = @"
+                SELECT f.Id, f.Title, f.Schedule, f.LastCheckedAt,
+                       (SELECT COUNT(*) FROM Items WHERE FeedId = f.Id AND Status='active'),
+                       (SELECT COUNT(*) FROM Items WHERE FeedId = f.Id AND Status='archived')
+                FROM Feeds f ORDER BY f.Id";
+            using var r = c.ExecuteReader();
+            while (r.Read())
+            {
+                int id = r.GetInt32(0);
+                string title = r.GetString(1);
+                string sched = r.IsDBNull(2) ? "" : r.GetString(2);
+                string last = r.IsDBNull(3) ? "" : r.GetString(3);
+                int active = r.GetInt32(4); int arch = r.GetInt32(5);
+                string s = (string.IsNullOrWhiteSpace(sched) || sched.Equals("manual", StringComparison.OrdinalIgnoreCase)) ? Lang.T("manual") : sched;
+                string line = $"[{id}] {CjkSpace(title)}  · {s} · {Lang.T("last")} {last} · {active}/{arch}";
+                rows.Add((id, line));
+            }
+        }
+        list.SetRows(rows);
+    }
+
+    try
+    {
+        Rebuild();
+        top.Initialized += (s, e) => list.SetFocus();
+        top.KeyDown += (s, e) =>
+        {
+            int id = list.SelectedId;
+            // 方向键/翻页已由 list 自行处理，这里只处理动作键
+            if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+            else if (e.KeyCode == KeyCode.U) { if (id != 0) RefreshOneFeed(id, dbPath); Rebuild(); e.Handled = true; }
+            else if (e.KeyCode == KeyCode.A) { if (id != 0) { AddTimestampForRealId(id, dbPath); Rebuild(); } e.Handled = true; }
+            else if (e.KeyCode == KeyCode.R) { if (id != 0) { RemoveTimestampForRealId(id, dbPath); Rebuild(); } e.Handled = true; }
+            else if (e.KeyCode == KeyCode.X)
+            {
+                if (id != 0)
+                {
+                    if (MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("Delete feed {0}? This cannot be undone!", id), Lang.T("OK"), Lang.T("Cancel")) == 0)
+                    { DeleteFeedByRealId(id, dbPath); Rebuild(); }
+                }
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.S)
+            {
+                if (id != 0) { ScheduleManagerDialog(id, dbPath); Rebuild(); }
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.D)
+            {
+                AddFeedManagerDialog(dbPath);
+                Rebuild();
+                e.Handled = true;
+            }
+        };
+        Application.Run(top);
+    }
+    catch (Exception ex)
+    {
+        // 管理页出错不崩溃整个 TUI
+        MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("Manage page error: {0}", ex.Message), Lang.T("OK"));
+    }
+}
+
+// 管理页：设置某源更新计划（对话框）
+void ScheduleManagerDialog(int realId, string dbPath)
+{
+    var dlg = new Dialog { Title = " " + Lang.T("Update schedule") + " ", Width = 64, Height = 9 };
+    var lbl = new Label { Text = Lang.T("Schedule (30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual): "), X = 0, Y = 0 };
+    var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
+    var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = 3 };
+    var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = 3 };
+    dlg.Add(lbl, input, ok, cancel);
+    ok.Accepted += (s, e) => dlg.RequestStop();
+    cancel.Accepted += (s, e) => dlg.RequestStop();
+    Application.Run(dlg);
+    string expr = input.Text.Trim();
+    if (string.IsNullOrEmpty(expr)) return;
+    // SetFeedSchedule 收的是列表显示编号（ROW_NUMBER），先把真实 Id 换算回去
+    SetFeedSchedule(GetDisplayNum(realId, dbPath).ToString(), expr, dbPath);
+}
+
+// 真实源 Id → 列表显示编号（1,2,3...；找不到原样返回）
+int GetDisplayNum(int realId, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, ROW_NUMBER() OVER (ORDER BY Id) AS dn FROM Feeds";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            if (r.GetInt32(0) == realId) return r.GetInt32(1);
+    }
+    catch { }
+    return realId;
+}
+
+// 管理页：加源对话框（下载放后台，不阻塞 TUI）
+void AddFeedManagerDialog(string dbPath)
+{
+    var dlg = new Dialog { Title = " " + Lang.T("Add feed") + " " };
+    var lbl = new Label { Text = Lang.T("RSS URL: "), X = 0, Y = 0 };
+    var input = new TextField { X = 0, Y = 1, Width = Dim.Fill(2), Text = "" };
+    var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = 3 };
+    var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = 3 };
+    dlg.Add(lbl, input, ok, cancel);
+    dlg.Width = 60; dlg.Height = 7;
+    ok.Accepted += (s, e) => dlg.RequestStop();
+    cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+    Application.Run(dlg);
+    string url = input.Text.Trim();
+    if (string.IsNullOrWhiteSpace(url)) return;
+    // 后台下载，避免冻结管理页；完成后由用户按任意键刷新列表
+    _ = Task.Run(() =>
+    {
+        try { DownloadAndSaveToDb(url, dbPath).Wait(); } catch { }
+    });
+}
+
+// 全文缓存自动清理：超过阈值时按最旧先删（保留 --purge-fulltext 手动清）
+void TrimFulltextCache(int maxFiles = 200, long maxBytes = 200L * 1024 * 1024)
+{
+    try
+    {
+        var dir = FulltextDir();
+        var files = new DirectoryInfo(dir).GetFiles("*.md").ToList();
+        long total = files.Sum(f => f.Length);
+        if (files.Count <= maxFiles && total <= maxBytes) return;
+        foreach (var f in files.OrderBy(f => f.LastWriteTime).Take(files.Count - maxFiles))
+        {
+            try { f.Delete(); } catch { }
+        }
+    }
+    catch { /* 清理失败不影响主流程 */ }
+}
+
+bool ShowStartScreen(string dbPath)
 {
     var top = new Window
     {
@@ -1584,21 +2327,25 @@ bool ShowStartScreen()
         Width = Dim.Fill(),
         Height = Dim.Fill(),
     };
+    // slogan / 功能简介 + Dashboard 数据面板（同屏）
+    var lines = new List<string>
+    {
+        Lang.T("🍲 sip"),
+        "",
+        Lang.T("——「品，你细品。」"),
+        Lang.T("一个让你站着把信息喝了的 RSS 阅读器核心"),
+        "",
+        Lang.T("  订阅管理 · 全文搜索 · 语义搜索 · AI 摘要"),
+        Lang.T("  版本追踪 · 快照归档 · 多语言"),
+        ""
+    };
+    lines.AddRange(DashboardStats(dbPath));
+    lines.Add("");
+    lines.Add(Lang.T("  Enter 进入  ·  Q 退出  "));
+
     var sv = new StartScreenView
     {
-        Lines = new[]
-        {
-            "🍲 sip",
-            "",
-            "——「品，你细品。」",
-            "一个让你站着把信息喝了的 RSS 阅读器核心",
-            "",
-            "  订阅管理 · 全文搜索 · 语义搜索 · AI 摘要",
-            "  版本追踪 · 快照归档 · 多语言",
-            "",
-            "",
-            "  Enter 进入  ·  Q 退出  ",
-        }
+        Lines = lines.ToArray()
     };
     sv.X = 0;
     sv.Y = 0;
@@ -1636,15 +2383,16 @@ Markdown CreateMarkdownView()
         EnableSixelImages = false,   // 图片已转链接，关闭 Sixel 管线避免重绘卡顿
         ImageLoader = MarkdownImageLoader
     };
-    // 阅读配色：正文亮白、代码绿色、强调亮黄、链接亮青、选中高亮
+    // 阅读配色：正文亮白、代码绿色、强调亮黄、链接亮青
+    // 聚焦时正文保持白字黑底（不再整块变深蓝），靠标题栏 ◀/▶ 指示焦点，阅读更干净
     v.SetScheme(new Scheme
     {
         Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
         HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightCyan, StandardColor.Black),
         Active = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
         HotActive = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black, TextStyle.Bold),
-        Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
-        HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightCyan, StandardColor.DarkBlue),
+        Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
+        HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightCyan, StandardColor.Black),
         Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan),
         ReadOnly = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
         Code = new Terminal.Gui.Drawing.Attribute(StandardColor.Green, StandardColor.Black),
@@ -1660,12 +2408,16 @@ Markdown CreateMarkdownView()
 }
 
 // 把一篇文章渲染成 Markdown 字符串（TUI 正文区与 CLI 预览共用）
-string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wrapWidth)
+// showFetchHint=true（仅 TUI）：正文过短且未抓取全文时，提示输入 fetch
+string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wrapWidth, bool showFetchHint = false)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT Title, Content, Description, Link, PublishDate, Summary FROM Items WHERE Id = @id";
+    cmd.CommandText = @"
+        SELECT i.Title, i.Content, i.Description, i.Link, i.PublishDate, i.Summary, i.Author, f.Title
+        FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id
+        WHERE i.Id = @id";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
     if (!r.Read()) return Lang.T("(Article not found)");
@@ -1675,22 +2427,47 @@ string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wr
     string link = r.IsDBNull(3) ? "" : r.GetString(3);
     string pub = r.IsDBNull(4) ? "" : r.GetString(4);
     string aiSummary = r.IsDBNull(5) ? "" : r.GetString(5);
+    string author = r.IsDBNull(6) ? "" : r.GetString(6);
+    string feedTitle = r.IsDBNull(7) ? "" : r.GetString(7);
 
     var md = new StringBuilder();
-    md.AppendLine($"# **{EscapeMd(CjkSpace(title))}**");
+    // 标题独立成段，像文章标题（不再加粗，H1 已足够醒目）
+    md.AppendLine($"# {EscapeMd(CjkSpace(title))}");
     md.AppendLine();
-    // 元信息用引用块渲染为暗淡色，避免与正文抢注意力
-    if (!string.IsNullOrWhiteSpace(pub)) md.AppendLine($"> {EscapeMd(CjkSpace(pub))}");
-    if (!string.IsNullOrWhiteSpace(link)) md.AppendLine($"> {EscapeMd(CjkSpace(link))}");
+    // 元信息独立成块：作者 / 日期 / 来源，与正文分离，避免混在一起
+    var meta = new List<string>();
+    if (!string.IsNullOrWhiteSpace(author)) meta.Add($"**{Lang.T("Author")}**: {EscapeMd(CjkSpace(author))}");
+    if (!string.IsNullOrWhiteSpace(pub)) meta.Add($"**{Lang.T("Date")}**: {EscapeMd(CjkSpace(pub))}");
+    if (meta.Count > 0) md.AppendLine(string.Join("  ·  ", meta));
+    if (!string.IsNullOrWhiteSpace(link))
+        md.AppendLine($"**{Lang.T("Source")}**: [{(string.IsNullOrWhiteSpace(feedTitle) ? link : EscapeMd(CjkSpace(feedTitle)))}]({EscapeMdUrl(link)})");
+    else if (!string.IsNullOrWhiteSpace(feedTitle))
+        md.AppendLine($"**{Lang.T("Source")}**: {EscapeMd(CjkSpace(feedTitle))}");
     md.AppendLine();
     md.AppendLine("---");
     md.AppendLine();
 
     if (contentMode)
     {
-        // 完整正文模式
+        // 完整正文模式：Content（原文）在上，抓取全文在下（若有缓存），中间分界
         string body = string.IsNullOrWhiteSpace(content) ? desc : content;
         md.Append(HtmlToMarkdown(body, wrapWidth));
+        string? fulltext = ReadFulltextCache(itemId);
+        if (!string.IsNullOrWhiteSpace(fulltext))
+        {
+            md.AppendLine();
+            md.AppendLine("---");
+            md.AppendLine();
+            md.AppendLine("## " + Lang.T("Fetched full text"));
+            md.AppendLine();
+            md.AppendLine(EscapeMd(fulltext.Trim()));
+        }
+        else if (showFetchHint && ContentTooShort(content, desc))
+        {
+            // 摘要过短且未抓取 → 提示（仅 TUI，CLI 全屏没有命令行）
+            md.AppendLine();
+            md.AppendLine($"> {Lang.T("The summary is too short. Type fetch to get the full text.")}");
+        }
     }
     else
     {
@@ -2001,9 +2778,27 @@ void RemoveTimestampForRealId(int realId, string dbPath)
 // 按真实 Id 删除源（含文章与向量）
 void DeleteFeedByRealId(int realId, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
-    conn.Open();
-    var cmd = conn.CreateCommand();
+    // 先取该源全部文章 Id（用于清理全文缓存与 sidecar 向量）
+    var ids = new List<int>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Id FROM Items WHERE FeedId = @id";
+        c.Parameters.AddWithValue("@id", realId);
+        using var r = c.ExecuteReader();
+        while (r.Read()) ids.Add(r.GetInt32(0));
+    }
+    foreach (var id in ids)
+    {
+        string p = FulltextPath(id);
+        if (File.Exists(p)) { try { File.Delete(p); } catch { } }
+    }
+    RemoveFulltextVecs(ids);
+
+    using var db = new SqliteConnection($"Data Source={dbPath}");
+    db.Open();
+    var cmd = db.CreateCommand();
     cmd.CommandText = "DELETE FROM Vectors WHERE FeedId = @id";
     cmd.Parameters.AddWithValue("@id", realId);
     cmd.ExecuteNonQuery();
@@ -2011,6 +2806,16 @@ void DeleteFeedByRealId(int realId, string dbPath)
     cmd.ExecuteNonQuery();
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
+}
+
+// 从 sidecar vecs.json 移除指定 itemId（删文章/删源时清理孤儿向量）
+void RemoveFulltextVecs(List<int> itemIds)
+{
+    if (itemIds.Count == 0) return;
+    var list = LoadFulltextVecs();
+    int before = list.Count;
+    list.RemoveAll(e => itemIds.Contains(e.ItemId));
+    if (list.Count != before) SaveFulltextVecs(list);
 }
 
 // ══════════ 更新指定订阅源（A 菜单和 CLI 共用）═══════════
@@ -2321,6 +3126,9 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     titleCmd.Parameters.AddWithValue("@id", feedRealId);
     string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
     Console.WriteLine(Lang.T("── [{0}] {1} article list──", feedDisplayNum, feedTitle));
+    // 编号说明：左边是列表序号（1,2,3...），右边是文章全局真实 ID
+    //（--show / --versions / --summary 等命令用右边的 ID）
+    Console.WriteLine(Lang.T("  [seq/real] left = list sequence, right = global article ID (use the right one with --show/--versions/--summary)"));
 
     // 用 ROW_NUMBER 给文章编显示号（删后自动继位）；每个 Guid 只列最新一版，
     // 有历史版本的文章标题右侧加 ✎ 标记（TUI 里按 V 可查看全部版本）
@@ -2347,18 +3155,34 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     }
     while (reader.Read())
     {
-        int displayNum = reader.GetInt32(4);    // 第 5 列 DisplayNum
-        string title   = reader.GetString(1);   // 第 2 列 Title
-        int archived   = reader.GetInt32(6);    // 第 7 列 ArchivedCount
+        int realId = reader.GetInt32(0);        // 第 1 列真实 Id
+        string title = reader.GetString(1);     // 第 2 列 Title
+        int displayNum = reader.GetInt32(4);    // 第 5 列 DisplayNum（列表序号）
+        int archived = reader.GetInt32(6);      // 第 7 列 ArchivedCount
 
         string marker = archived > 0 ? " ✎" : "";
-        Console.WriteLine($"  [{displayNum}] {CjkSpace(title)}{marker}");
+        Console.WriteLine($"  [{displayNum}/{realId}] {CjkSpace(title)}{marker}");
     }
 }
 
-// ══════════ 原文直出（sip --show <文章编号>）：供 AI / 脚本直接读取 ═══════════
-// 不做任何渲染，标题/来源/链接/作者等元信息 + 原始正文（Content 原文）原样打到标准输出
-void ShowArticleCli(int itemId, string dbPath)
+// 文章是否存在（--show 全屏模式启动前检查，避免进空界面）
+bool ArticleExists(int itemId, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM Items WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        return Convert.ToInt64(cmd.ExecuteScalar()) > 0;
+    }
+    catch { return false; }
+}
+
+// ══════════ 原文 JSON 直出（sip --show <文章编号> --json）：供 AI / 脚本读取 ═══════════
+// 不做任何渲染，标题/来源/链接/作者等元信息 + 原始正文（Content 原文，空则 Description）原样输出
+void ShowArticleJson(int itemId, string dbPath)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2369,7 +3193,7 @@ void ShowArticleCli(int itemId, string dbPath)
         WHERE i.Id = @id";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) { SetExit(); Console.WriteLine(Lang.T("Article {0} not found", itemId)); return; }
+    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: true); return; }
 
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
@@ -2379,14 +3203,20 @@ void ShowArticleCli(int itemId, string dbPath)
     string author = r.IsDBNull(5) ? "" : r.GetString(5);
     string feed = r.IsDBNull(6) ? "" : r.GetString(6);
 
-    if (!string.IsNullOrWhiteSpace(title)) Console.WriteLine(Lang.T("Title: {0}", title));
-    if (!string.IsNullOrWhiteSpace(feed)) Console.WriteLine(Lang.T("Feed: {0}", feed));
-    if (!string.IsNullOrWhiteSpace(link)) Console.WriteLine(Lang.T("Link: {0}", link));
-    if (!string.IsNullOrWhiteSpace(pub)) Console.WriteLine(Lang.T("Published: {0}", pub));
-    if (!string.IsNullOrWhiteSpace(author)) Console.WriteLine(Lang.T("Author: {0}", author));
-    Console.WriteLine();
-    // 原始正文：优先完整 Content（原文），为空则退回 RSS 摘要
-    Console.WriteLine(string.IsNullOrWhiteSpace(content) ? desc : content);
+    JsonOut(new
+    {
+        success = true,
+        data = new
+        {
+            itemId,
+            title,
+            feed,
+            link,
+            published = pub,
+            author,
+            content = string.IsNullOrWhiteSpace(content) ? desc : content
+        }
+    });
 }
 
 // 查看文章版本历史 CLI：--versions <文章Id>（同 --show 的全局 Id）
@@ -2443,6 +3273,183 @@ void ListVersionsCli(string arg, string dbPath)
     }
     Console.WriteLine();
     Console.WriteLine(Lang.T("View a version's full text with sip --show <article-id>"));
+}
+
+// ══════════ Diff（sip --diff <id> [vA vB] [--json]）═══════════
+// 对比同一文章两个版本的正文（Content/Description）；不涉及抓取全文
+void DiffCli(string[] args, string dbPath)
+{
+    if (args.Length < 1 || !int.TryParse(args[0], out int itemId))
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --diff <article-id> [vA vB] [--json]")); return;
+    }
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var vers = args.Where(a => a.StartsWith("v", StringComparison.OrdinalIgnoreCase) && a.Length > 1 && int.TryParse(a[1..], out _))
+                   .Select(a => int.Parse(a[1..])).ToList();
+
+    // 查文章 + 所有版本正文
+    string guid;
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var gCmd = conn.CreateCommand();
+        gCmd.CommandText = "SELECT Guid FROM Items WHERE Id = @id";
+        gCmd.Parameters.AddWithValue("@id", itemId);
+        var o = gCmd.ExecuteScalar();
+        if (o == null) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return; }
+        guid = o.ToString() ?? "";
+    }
+    if (string.IsNullOrEmpty(guid))
+    {
+        if (json)
+            JsonOut(new { success = true, article = itemId, from = 0, to = 0, changes = Array.Empty<object>() });
+        else
+            Console.WriteLine(Lang.T("This article has no version history (no Guid)"));
+        return;
+    }
+
+    var rows = new List<(int Version, string Text)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Version, Content, Description FROM Items WHERE Guid = @g ORDER BY Version";
+        cmd.Parameters.AddWithValue("@g", guid);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            rows.Add((r.GetInt32(0), string.IsNullOrWhiteSpace(r.IsDBNull(1) ? "" : r.GetString(1))
+                ? (r.IsDBNull(2) ? "" : r.GetString(2)) : r.GetString(1)));
+    }
+    if (rows.Count < 2)
+    {
+        if (json)
+            JsonOut(new { success = true, article = itemId, from = 0, to = 0, changes = Array.Empty<object>() });
+        else
+            Console.WriteLine(Lang.T("This article has only one version, no change history"));
+        return;
+    }
+
+    // 选定两个版本：指定 vA vB，或默认最后两个
+    (int va, int vb) = SelectDiffVersions(rows, vers);
+    var rowA = rows.FirstOrDefault(x => x.Version == va);
+    var rowB = rows.FirstOrDefault(x => x.Version == vb);
+    if (rowA.Text == null || rowB.Text == null)
+    {
+        ReportError("VERSION_NOT_FOUND", Lang.T("Version {0} or {1} not found", va, vb), json: json);
+        return;
+    }
+
+    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(rowA.Text, rowB.Text);
+
+    if (json)
+    {
+        // 把 DiffPlex 的 Deleted/Inserted 相邻配对成 replace；其余为 insert/delete
+        var lines = diff.Lines;
+        var changes = new List<object>();
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (lines[i].Type == ChangeType.Unchanged) continue;
+            if (lines[i].Type == ChangeType.Deleted && i + 1 < lines.Count && lines[i + 1].Type == ChangeType.Inserted)
+            {
+                changes.Add(new { type = "replace", before = lines[i].Text, after = lines[i + 1].Text });
+                i++;
+            }
+            else if (lines[i].Type == ChangeType.Deleted)
+                changes.Add(new { type = "delete", before = lines[i].Text, after = "" });
+            else if (lines[i].Type == ChangeType.Inserted)
+                changes.Add(new { type = "insert", before = "", after = lines[i].Text });
+        }
+        JsonOut(new { article = itemId, from = va, to = vb, changes });
+        return;
+    }
+
+    Console.WriteLine(Lang.T("v{0} → v{1}", va, vb));
+    Console.WriteLine();
+    foreach (var line in diff.Lines)
+    {
+        switch (line.Type)
+        {
+            case ChangeType.Inserted: Console.WriteLine($"+ {line.Text}"); break;
+            case ChangeType.Deleted: Console.WriteLine($"- {line.Text}"); break;
+            case ChangeType.Modified: Console.WriteLine($"~ {line.Text}"); break;
+        }
+    }
+}
+
+// 从请求的 v 后缀选两个版本；不足则默认取最后两个（按版本号）
+(int, int) SelectDiffVersions(List<(int Version, string Text)> rows, List<int> vers)
+{
+    if (vers.Count >= 2) return (vers[0], vers[1]);
+    var byVer = rows.OrderBy(x => x.Version).ToList();
+    if (byVer.Count >= 2) return (byVer[^2].Version, byVer[^1].Version);
+    return (byVer[0].Version, byVer[0].Version);
+}
+
+// ══════════ Markdown 导出（sip --export <id | feed:N | all> [out.md|dir] [--yes]）═══════════
+// 导出 = 屏幕所见（BuildArticleMarkdown：原文 + 分界 + 抓取全文，若有缓存）
+void ExportCli(string[] args, string dbPath)
+{
+    bool yes = args.Any(a => a.Equals("--yes", StringComparison.OrdinalIgnoreCase));
+    var pos = args.Where(a => !a.StartsWith("--")).ToList();
+    if (pos.Count == 0)
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --export <article-id | feed:number | all> [out.md | dir] [--yes]")); return;
+    }
+    string target = pos[0];
+    string outPath = pos.Count > 1 ? pos[1] : "";
+
+    if (target.Equals("all", StringComparison.OrdinalIgnoreCase))
+    {
+        if (!yes)
+        {
+            Console.Write(Lang.T("You sure? This will produce a lot of files. Export all? (y/n) "));
+            if (!"y".Equals(Console.ReadLine()?.Trim().ToLower())) { Console.WriteLine(Lang.T("Cancelled")); return; }
+        }
+        ExportArticlesToDir(GetActiveItemIds(dbPath, null), outPath, dbPath);
+        return;
+    }
+    if (target.StartsWith("feed:", StringComparison.OrdinalIgnoreCase))
+    {
+        if (!int.TryParse(target["feed:".Length..].Trim(), out int fd)) { SetExit(); Console.WriteLine(Lang.T("Bad format. Correct: {0}", "--export feed:3")); return; }
+        int feedReal = GetRealId(fd, dbPath);
+        if (feedReal == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number {0} not found", fd)); return; }
+        ExportArticlesToDir(GetActiveItemIds(dbPath, feedReal), outPath, dbPath);
+        return;
+    }
+    if (!int.TryParse(target, out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+    if (!ArticleExists(itemId, dbPath)) { SetExit(); Console.WriteLine(Lang.T("Article {0} not found", itemId)); return; }
+    string md = BuildArticleMarkdown(itemId, true, dbPath, 90);
+    if (string.IsNullOrWhiteSpace(outPath)) outPath = itemId + ".md";
+    File.WriteAllText(outPath, md);
+    Console.WriteLine(Lang.T("Exported to {0}", outPath));
+}
+
+// 取 active 文章 Id；feedReal=null 表示全部
+List<int> GetActiveItemIds(string dbPath, int? feedReal)
+{
+    var list = new List<int>();
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id FROM Items WHERE Status = 'active'" + (feedReal.HasValue ? " AND FeedId = @fid" : "") + " ORDER BY Id";
+    if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
+    using var r = cmd.ExecuteReader();
+    while (r.Read()) list.Add(r.GetInt32(0));
+    return list;
+}
+
+void ExportArticlesToDir(List<int> itemIds, string dir, string dbPath)
+{
+    if (string.IsNullOrWhiteSpace(dir)) dir = "sip-export";
+    Directory.CreateDirectory(dir);
+    int ok = 0;
+    foreach (var id in itemIds)
+    {
+        string md = BuildArticleMarkdown(id, true, dbPath, 90);
+        File.WriteAllText(Path.Combine(dir, id + ".md"), md);
+        ok++;
+    }
+    Console.WriteLine(Lang.T("Exported {0} articles to {1}", ok, dir));
 }
 
 // ══════════ 列表方法：显示数据库中所有订阅源 ══════════
@@ -3536,6 +4543,8 @@ async Task ReindexCli(string dbPath)
 
     cmd.CommandText = "DELETE FROM Vectors";
     cmd.ExecuteNonQuery();
+    // 换模型后旧 sidecar 向量（抓取全文的）同样失效，一并清空
+    if (File.Exists(FulltextVecsPath())) { try { File.Delete(FulltextVecsPath()); } catch { } }
 
     int modelId = EnsureModel(dbPath, cfg.Embedding);
     cmd.CommandText = "SELECT Id, FeedId, Title FROM Items WHERE Status = 'active'";
@@ -3877,7 +4886,46 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
             });
         }
     }
+
+    // 合并 sidecar（抓取全文向量）：只补主表没有的 itemId
+    var seen = new HashSet<int>(results.Select(h => h.ItemId));
+    foreach (var (sid, sfeed, smodel, svec) in LoadFulltextVecs())
+    {
+        if (smodel != modelId || seen.Contains(sid)) continue;
+        if (feedReal.HasValue && sfeed != feedReal.Value) continue;
+        float score = CosineSimilarity(vec, svec);
+        if (score < thr) continue;
+        var hit = GetSearchHitForItem(dbPath, sid, score);
+        if (hit != null) { results.Add(hit); seen.Add(sid); }
+    }
+
     return results.OrderByDescending(h => h.Score).Take(20).ToList();
+}
+
+// 按 itemId 取搜索结果条目（sidecar 向量命中用）
+SearchHit? GetSearchHitForItem(string dbPath, int itemId, float score)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT i.Title, i.Description, i.Link, i.FeedId, f.Title FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id AND i.Status = 'active'";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return new SearchHit
+        {
+            ItemId = itemId,
+            Title = r.GetString(0),
+            Description = r.IsDBNull(1) ? "" : r.GetString(1),
+            Link = r.IsDBNull(2) ? "" : r.GetString(2),
+            FeedId = r.GetInt32(3),
+            FeedTitle = r.IsDBNull(4) ? "" : r.GetString(4),
+            Score = score
+        };
+    }
+    catch { return null; }
 }
 
 // 按真实 Id 更新单个源（TUI 用）
@@ -3897,6 +4945,24 @@ void RefreshOneFeed(int realId, string dbPath)
 // 按 Guid 删除整篇文章（含全部历史版本与向量）
 void DeleteArticleByGuid(string guid, string dbPath)
 {
+    // 先取该 Guid 全部 Id（清理全文缓存与 sidecar 向量）
+    var ids = new List<int>();
+    using (var q = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        q.Open();
+        var c = q.CreateCommand();
+        c.CommandText = "SELECT Id FROM Items WHERE Guid = @g";
+        c.Parameters.AddWithValue("@g", guid);
+        using var r = c.ExecuteReader();
+        while (r.Read()) ids.Add(r.GetInt32(0));
+    }
+    foreach (var id in ids)
+    {
+        string p = FulltextPath(id);
+        if (File.Exists(p)) { try { File.Delete(p); } catch { } }
+    }
+    RemoveFulltextVecs(ids);
+
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
@@ -4214,18 +5280,35 @@ static class Lang
 
         try
         {
-            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
-            if (loaded != null)
-            {
-                _custom.Clear();
-                foreach (var kv in loaded) _custom[kv.Key] = kv.Value;
-            }
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            _custom.Clear();
+            Flatten(doc.RootElement, _custom);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"加载语言文件失败：{ex.Message}");
         }
         _loaded = true;
+    }
+
+    // 递归展平：兼容旧扁平文件（值全为字符串）与嵌套分组文件
+    // 分组名（如 ui/start/help）只是组织分类，叶子用「英文源文本 → 译文」。
+    static void Flatten(JsonElement el, Dictionary<string, string> target)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.String:
+                break; // 由上层赋值，这里不处理
+            case JsonValueKind.Object:
+                foreach (var prop in el.EnumerateObject())
+                {
+                    if (prop.Value.ValueKind == JsonValueKind.String)
+                        target[prop.Name] = prop.Value.GetString() ?? prop.Name;
+                    else if (prop.Value.ValueKind == JsonValueKind.Object)
+                        Flatten(prop.Value, target);
+                }
+                break;
+        }
     }
 
     public static string T(string key)
@@ -4310,6 +5393,74 @@ class DueFeed
 // 这里自绘一个轻量侧栏：来源可展开/折叠，标题按列宽换行（CJK 宽度感知），
 // 提供与旧 TreeView 用法一致的接口（SelectedObject/SetFeeds/Toggle/...），
 // 便于正文区、状态栏等其余代码无感替换。
+class FeedManagerList : View
+{
+    public List<(int Id, string Line)> Rows { get; private set; } = new();
+    public int Selected { get; private set; }
+    public event EventHandler? SelectionChanged;
+
+    public int SelectedId => Selected < Rows.Count ? Rows[Selected].Id : 0;
+
+    public void SetRows(List<(int Id, string Line)> rows)
+    {
+        Rows = rows;
+        Selected = Math.Clamp(Selected, 0, Math.Max(0, Rows.Count - 1));
+        SetNeedsDraw();
+    }
+
+    public void MoveTo(int delta)
+    {
+        if (Rows.Count == 0) return;
+        int before = Selected;
+        Selected = Math.Clamp(Selected + delta, 0, Rows.Count - 1);
+        if (Selected != before) { SelectionChanged?.Invoke(this, EventArgs.Empty); SetNeedsDraw(); }
+    }
+
+    // 方向键/PageUp/PageDown/Home/End 都由本视图单独处理，不被外层吞掉
+    protected override bool OnKeyDown(Key key)
+    {
+        if (Rows.Count == 0) return false;
+        switch (key.KeyCode)
+        {
+            case KeyCode.CursorDown:
+            case KeyCode.J: MoveTo(1); return true;
+            case KeyCode.CursorUp:
+            case KeyCode.K: MoveTo(-1); return true;
+            case KeyCode.PageDown: MoveTo(Math.Max(1, Viewport.Height - 1)); return true;
+            case KeyCode.PageUp: MoveTo(-Math.Max(1, Viewport.Height - 1)); return true;
+            case KeyCode.Home: MoveTo(-Rows.Count); return true;
+            case KeyCode.End: MoveTo(Rows.Count); return true;
+            default: return false;
+        }
+    }
+
+    protected override bool OnDrawingContent(DrawContext? context)
+    {
+        int w = Viewport.Width, h = Viewport.Height;
+        SetAttribute(GetAttributeForRole(VisualRole.Normal));
+        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
+        int top = Math.Max(0, Selected - h / 2);   // 让选中行尽量居中
+        for (int i = top; i < Math.Min(Rows.Count, top + h); i++)
+        {
+            int sy = i - top;
+            bool sel = i == Selected;
+            SetAttribute(sel
+                ? GetAttributeForRole(HasFocus ? VisualRole.Focus : VisualRole.Active)
+                : GetAttributeForRole(VisualRole.Normal));
+            string line = (sel ? "> " : "  ") + Rows[i].Line;
+            int cols = line.GetColumns();
+            if (cols > w) line = line[..Math.Max(0, w - 1)] + "…";
+            AddStr(0, sy, line);
+        }
+        return true;
+    }
+}
+
+// ══════════ 自绘侧栏（订阅源 + 文章，标题自动换行）═══════════
+// Terminal.Gui 的 TreeView 每行只能画一行，长标题会被截断；
+// 这里自绘一个轻量侧栏：来源可展开/折叠，标题按列宽换行（CJK 宽度感知），
+// 提供与旧 TreeView 用法一致的接口（SelectedObject/SetFeeds/Toggle/...），
+// 便于正文区、状态栏等其余代码无感替换。
 class SidebarRow
 {
     public TuiNode Node { get; set; } = new();
@@ -4384,6 +5535,39 @@ class SidebarView : View
     public void MovePageUp() => MoveSelection(-Math.Max(1, Viewport.Height));
 
     public void MovePageDown() => MoveSelection(Math.Max(1, Viewport.Height));
+
+    public void MoveDown() => MoveSelection(1);
+
+    public void MoveUp() => MoveSelection(-1);
+
+    // 定位到指定文章（外部 CLI 全屏阅读按 W 进完整 TUI 时定位当前文章）；找不到返回 false
+    public bool SelectItem(long itemId)
+    {
+        for (int i = 0; i < _rows.Count; i++)
+        {
+            if (!_rows[i].IsFeed && _rows[i].Node.ItemId == itemId)
+            {
+                _sel = i;
+                OnSelectionChanged();
+                EnsureSelectedVisible();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 当前选中文章在全部文章中的位置（不含源行）；选中的是源时返回该源前最后一篇的位置
+    public (int Current, int Total) ArticlePosition()
+    {
+        int cur = 0, total = 0;
+        for (int i = 0; i < _rows.Count; i++)
+        {
+            if (_rows[i].IsFeed) continue;
+            total++;
+            if (i <= _sel) cur = total;
+        }
+        return (cur, total);
+    }
 
     void RebuildRows()
     {
@@ -4613,6 +5797,9 @@ class SearchHit
     public int FeedId { get; set; }
     public float Score { get; set; }
 }
+
+// 全文搜索结果条目
+class FulltextVecEntry { public int ItemId { get; set; } public int FeedId { get; set; } public int ModelId { get; set; } public float[] Vector { get; set; } = Array.Empty<float>(); }
 
 // 全文搜索结果条目
 class GrepSnippetResult

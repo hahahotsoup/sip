@@ -57,8 +57,12 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --reindex` | 更换 Embedding 模型后重新向量化 |
 | `sip --search <查询> [--feed 编号] [--threshold 0.7] [--json]` | 语义搜索（Embedding） |
 | `sip --grep <关键词> [--limit N] [--max-snippets N] [--json] [--full]` | 全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）；默认输出「编号+标题+出现次数+±50 字符片段」，有上限不刷屏；`--json` 结构化、`--full` 输出整篇摘要 |
-| `sip --show <编号>` | 原文直出：文章标题/来源/链接 + 原始正文打到标准输出（**读全文用这个**） |
-| `sip --versions <编号>` | 列出文章的全部历史版本（含状态与时间）；用 `--show <版本编号>` 查看某版原文 |
+| `sip --show <编号> --json` | 原文 JSON 直出：标题/来源/链接/时间/作者 + 原始正文（未渲染）打到标准输出（**AI 读全文用这个**）。⚠️ 裸 `sip --show <编号>` 是全屏阅读界面（给人读的，会占用终端），**AI 一律加 `--json`** |
+| `sip --versions <编号>` | 列出文章的全部历史版本（含状态与时间）；用 `--show <版本编号> --json` 查看某版原文 |
+| `sip --diff <编号> [vA vB] [--json]` | 对比同一文章两个版本的正文（默认最近两版）；`--json` 给结构化 diff（`{from,to,changes:[{type,before,after}]}`） |
+| `sip --export <编号 | feed:N | all> [out.md|目录] --yes` | 把文章导出为 Markdown；`--yes` 跳过全部导出的确认 |
+| `sip --fulltext <编号> --yes --json` | 抓取文章**全文**到本地缓存并输出（RSS 摘要过短时用）；`--yes` 跳过同意/确认。⚠️ 全文抓取涉及抓取源站页面，需显式同意；不改数据库、不参与版本比对 |
+| `sip --purge-fulltext [编号]` | 清除全文缓存 |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要 |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
@@ -98,7 +102,7 @@ sip --summary 12 --ignoresafeannouncement # 生成摘要
 
 #### 原则
 
-1. **先用全文搜索确认命中**：`--grep` 是精确关键字匹配（标题/正文/摘要），不依赖 AI、无阈值问题，最适合先跑。**默认就是安全的片段模式**：每篇只出「编号+标题+出现次数+±50 字符片段」（上限 20 篇 × 10 段），不会把大源正文灌进上下文；命中太多可加 `--limit N`，需要结构化结果用 `--json`，要某篇完整摘要再用 `--show <编号>`。
+1. **先用全文搜索确认命中**：`--grep` 是精确关键字匹配（标题/正文/摘要），不依赖 AI、无阈值问题，最适合先跑。**默认就是安全的片段模式**：每篇只出「编号+标题+出现次数+±50 字符片段」（上限 20 篇 × 10 段），不会把大源正文灌进上下文；命中太多可加 `--limit N`，需要结构化结果用 `--json`，要某篇完整正文用 `--show <编号> --json`。
 2. **再用语义搜索扩展**：`--search` 按语义相似度找「意思相近但字面不同」的文章，能补全文搜索漏掉的。
 3. **多次换关键词**：不要只搜一次。围绕主题拆出 3~6 个不同的关键词/短语/同义词/英文原文，逐个检索，合并去重。
 4. **留意阈值**：`--search` 的 `--threshold`（默认 0.7）控制返回底线。阈值太高结果太少、太低噪声多，要**根据结果数量动态调整**。
@@ -136,26 +140,27 @@ sip --search "关键词A" --threshold 0.5 --ignoresafeannouncement
 
 #### 读取全文
 
-搜索结果里的 `[编号]` 即文章 ID。**需要看某篇全文时**（总结、问答、引用），用 `sip --show <编号>` 把原始正文打到标准输出，例如：
+搜索结果里的 `[编号]` 即文章真实 ID。**需要看某篇全文时**（总结、问答、引用），用 `sip --show <编号> --json` 把原始正文打到标准输出，例如：
 
 ```bash
-sip --show 42 --ignoresafeannouncement        # 读 42 号文章全文（标题/来源/链接 + 原始 HTML 正文）
-sip --show 42 --lang en-US --ignoresafeannouncement
+sip --show 42 --json --ignoresafeannouncement        # 读 42 号文章全文（JSON：标题/来源/链接/时间/作者 + 原始 HTML 正文）
+sip --show 42 --json --lang en-US --ignoresafeannouncement
 ```
 
-- `--show` 输出的是**未渲染的原始正文**（Content 原文，可能是 HTML），不需要再进 TUI 或调 `--preview`
-- 优先读 `--show` 拿到的正文来回答用户，而不是只依赖 `--grep`/`--search` 的摘要片段
+- `--show <编号> --json` 输出的是**未渲染的原始正文**（`content` 字段是 HTML 原文），可直接给 AI 读
+- ⚠️ **裸 `sip --show <编号>`（不带 `--json`）会进入全屏阅读界面**，占用终端等待按键——AI 场景一律带 `--json`，不要裸跑
+- 优先用 `--show ... --json` 拿到的正文来回答用户，而不是只依赖 `--grep`/`--search` 的摘要片段
 
 #### 查看历史版本
 
-文章作者改过内容时会保留多个版本（TUI 里标题带 ✎）。CLI 用 `--versions <编号>` 列出全部版本（版本号/状态/时间/标题，`←` 标记当前版），想读某版原文用 `--show <该版本的编号>`：
+文章作者改过内容时会保留多个版本（TUI 里标题带 ✎）。CLI 用 `--versions <编号>` 列出全部版本（版本号/状态/时间/标题，`←` 标记当前版），想读某版原文用 `--show <该版本的编号> --json`：
 
 ```bash
 sip --versions 42 --ignoresafeannouncement   # 列出 42 号文章的所有历史版本
-sip --show 87 --ignoresafeannouncement       # 读 87 号（可能是某个历史版本）的全文
+sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个历史版本）的全文
 ```
 
-注意：`--versions` 传的是 `--show`/`--grep` 结果里的**全局文章 ID**；每个版本是独立的数据库行、各有自己的 ID，只有 `--show <版本ID>` 才能看到旧版正文。文章只有一版时输出提示（退出码 0，不算错误）。
+注意：`--versions` 传的是 `--show`/`--grep` 结果里的**全局文章 ID**；每个版本是独立的数据库行、各有自己的 ID，只有 `--show <版本ID> --json` 才能看到旧版正文。文章只有一版时输出提示（退出码 0，不算错误）。`sip -l <源编号>` 列表里的编号是 `[列表序号/真实ID]` 双格式，用 `--show`/`--versions` 等命令时取**右边**的真实 ID。
 
 ## 常见问题
 
@@ -167,3 +172,6 @@ sip --show 87 --ignoresafeannouncement       # 读 87 号（可能是某个历�
 ## 交互说明
 
 无参数运行 `sip` 会进入 TUI（三键键盘导航），AI 场景一律走 CLI（带参数），不要进 TUI。
+
+- TUI 里按 `M`（或命令行 `manage`）是**订阅源管理页**（给人用的，AI 不需要）。
+- TUI 命令行 `fetch` = 抓当前文章全文；**首次使用全文抓取需要用户输入同意短语**（一次性，交互式）。AI 一律用 `sip --fulltext <id> --yes` 跳过同意与二次确认——**不要代用户在 TUI 里操作同意流程**，需要抓全文时告诉用户或直接跑 CLI 带 `--yes`。
