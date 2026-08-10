@@ -232,7 +232,7 @@ sip --summary-all                   # 为所有未生成摘要的文章生成摘
 | `--index` | 为选中订阅源的文章批量生成 Embedding 向量，写入 SQLite 的 `Vectors` 表 |
 | `--reindex` | 更换 Embedding 模型（维度变化）后，清除旧向量并全量重建 |
 | `--search <查询>` | 对查询做 Embedding，与库中向量计算余弦相似度，按阈值过滤并排序输出；可选 `--feed 编号`、`--threshold 0.7`、`--json` |
-| `--grep <关键词>` | 全文搜索：在标题/正文/摘要做关键字匹配（SQL LIKE），不依赖 AI，适合精确查找与兜底；加 `--brief` 截断正文摘要（避免大源刷屏）、`--json` 结构化输出 |
+| `--grep <关键词>` | 全文搜索：在标题/正文/摘要做关键字匹配（SQL LIKE），不依赖 AI，适合精确查找与兜底；默认输出「编号+标题+出现次数+±50 字符片段」，有上限不会刷屏（`--limit N` / `--max-snippets N` / `--json` / `--full`） |
 | `--summary <编号>` | 为单篇文章调用 LLM 生成摘要；`feed:<编号>` 为该源全部文章逐个生成 |
 | `--summary-all` | 为所有 `Summary` 为空的文章生成摘要 |
 

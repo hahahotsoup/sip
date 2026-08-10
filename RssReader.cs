@@ -346,7 +346,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --index          embed articles (interactive selection)"));
     Console.WriteLine(Lang.T("  --reindex        re-embed after changing the embedding model"));
     Console.WriteLine(Lang.T("  --search <query> [--feed number] [--threshold 0.7] [--json] semantic search (all feeds without --feed)"));
-    Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)"));
+    Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)"));
     Console.WriteLine(Lang.T("  --summary <id>   summarize one article; use feed:<number> for all articles of a feed"));
     Console.WriteLine(Lang.T("  --summary-all    summarize all articles without a summary"));
     Console.WriteLine();
@@ -3637,16 +3637,76 @@ void SearchCli(string[] args, string dbPath)
 }
 
 // 全文搜索 CLI：在标题/正文/摘要里做关键字匹配（类似 VS Code 全文搜索，不依赖 AI）
-// 支持 --json（结构化输出给脚本/AI）与 --brief（摘要截断，避免上下文洪水）
+// 默认「片段模式」：每篇只出 编号 + 标题 + 出现次数 + 上下 50 字符的片段，输出有上限、不会爆上下文；
+// --full 恢复旧模式（整篇摘要），--json 结构化输出
 void GrepCli(string[] args, string dbPath)
 {
     var flags = args.Skip(1).ToArray();
     bool json = flags.Contains("--json", StringComparer.OrdinalIgnoreCase);
-    bool brief = flags.Contains("--brief", StringComparer.OrdinalIgnoreCase);
+    bool full = flags.Contains("--full", StringComparer.OrdinalIgnoreCase);
+    int limit = 20, maxSnippets = 10;
+    for (int i = 0; i < flags.Length; i++)
+    {
+        if (flags[i].Equals("--limit", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Length && int.TryParse(flags[i + 1], out int l))
+            limit = Math.Max(1, l);
+        if (flags[i].Equals("--max-snippets", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Length && int.TryParse(flags[i + 1], out int ms))
+            maxSnippets = Math.Max(1, ms);
+    }
     string keyword = args[0];
 
-    var hits = DoGrep(keyword, dbPath);
+    var hits = DoGrep(keyword, dbPath, limit);
     if (hits == null) return;
+
+    // --full：整篇摘要直出（旧行为，显式 opt-in）
+    if (full)
+    {
+        if (json)
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    query = keyword,
+                    results = hits.Select(h => new
+                    {
+                        itemId = h.ItemId,
+                        title = h.Title,
+                        description = h.Description,
+                        link = h.Link,
+                        feedTitle = h.FeedTitle
+                    }),
+                    total = hits.Count
+                }
+            });
+        }
+        else
+        {
+            Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, hits.Count));
+            foreach (var h in hits)
+            {
+                Console.WriteLine($"  [{h.ItemId}] {h.Title}");
+                Console.WriteLine(Lang.T("      source: {0} | {1}", h.FeedTitle, h.Link));
+                if (!string.IsNullOrEmpty(h.Description))
+                    Console.WriteLine(Lang.T("      summary: {0}", h.Description));
+            }
+        }
+        return;
+    }
+
+    // 片段模式：每篇统计出现次数 + 取前 maxSnippets 个 ±50 字符片段
+    var items = new List<GrepSnippetResult>();
+    foreach (var h in hits)
+    {
+        string haystack = h.Title + "\n" + StripHtml(string.IsNullOrWhiteSpace(h.Content) ? h.Description : h.Content)
+                          + (string.IsNullOrWhiteSpace(h.Summary) ? "" : "\n" + h.Summary);
+        var (snippets, total) = ExtractGrepSnippets(haystack, keyword, radius: 50, max: maxSnippets);
+        items.Add(new GrepSnippetResult
+        {
+            ItemId = h.ItemId, Title = h.Title, Link = h.Link, FeedTitle = h.FeedTitle,
+            Count = total, Snippets = snippets, TotalSnippets = total
+        });
+    }
 
     if (json)
     {
@@ -3656,51 +3716,87 @@ void GrepCli(string[] args, string dbPath)
             data = new
             {
                 query = keyword,
-                results = hits.Select(h => new
+                results = items.Select(r => new
                 {
-                    itemId = h.ItemId,
-                    title = h.Title,
-                    description = BriefText(h.Description, brief),
-                    link = h.Link,
-                    feedTitle = h.FeedTitle
+                    itemId = r.ItemId,
+                    title = r.Title,
+                    count = r.Count,
+                    totalSnippets = r.TotalSnippets,
+                    snippets = r.Snippets,
+                    link = r.Link,
+                    feedTitle = r.FeedTitle
                 }),
-                total = hits.Count
+                total = items.Count
             }
         });
         return;
     }
 
-    Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, hits.Count));
-    foreach (var h in hits)
+    Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, items.Count));
+    foreach (var r in items)
     {
-        Console.WriteLine($"  [{h.ItemId}] {h.Title}");
-        Console.WriteLine(Lang.T("      source: {0} | {1}", h.FeedTitle, h.Link));
-        if (!string.IsNullOrEmpty(h.Description))
-            Console.WriteLine(Lang.T("      summary: {0}", BriefText(h.Description, brief)));
+        Console.WriteLine($"  [{r.ItemId}] {r.Title} ({Lang.T("{0} occurrences", r.Count)})");
+        for (int i = 0; i < r.Snippets.Count; i++)
+            Console.WriteLine($"    {i + 1}. {r.Snippets[i]}");
+        if (r.TotalSnippets > r.Snippets.Count)
+            Console.WriteLine(Lang.T("    …({0} more, view full text with sip --show {1})", r.TotalSnippets - r.Snippets.Count, r.ItemId));
     }
 }
 
-// --brief 时把正文截断到 200 字符，避免 grep 大源时把 agent 上下文灌爆
-string BriefText(string text, bool brief, int maxLen = 200)
-    => brief && text.Length > maxLen ? text[..maxLen] + "..." : text;
+// 在纯文本 haystack 里大小写不敏感地找出 keyword 的所有出现位置，
+// 每个位置取 [i-radius, i+radius+len] 的窗口；相邻窗口重叠时合并；
+// 只保留前 max 段（超出返回 total 让调用方知道还有多少）
+(List<string> Snippets, int Total) ExtractGrepSnippets(string haystack, string keyword, int radius, int max)
+{
+    if (string.IsNullOrEmpty(haystack) || string.IsNullOrEmpty(keyword)) return (new List<string>(), 0);
+
+    int kwLen = keyword.Length;
+    var ranges = new List<(int Start, int End)>();
+    int from = 0, total = 0;
+    while (true)
+    {
+        int idx = haystack.IndexOf(keyword, from, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0) break;
+        total++;
+
+        int start = Math.Max(0, idx - radius);
+        int end = Math.Min(haystack.Length, idx + kwLen + radius);
+        // 与上一个窗口重叠 → 扩展合并，避免重复文本
+        if (ranges.Count > 0 && start <= ranges[^1].End)
+        {
+            var last = ranges[^1];
+            ranges[^1] = (last.Start, Math.Max(last.End, end));
+        }
+        else if (ranges.Count < max)
+        {
+            ranges.Add((start, end));
+        }
+        // 超过 max 后不再新增窗口，但继续统计总出现次数（total 是真实的全部次数）
+        from = idx + kwLen;
+    }
+    var snippets = ranges.Select(r => haystack[r.Start..r.End]).ToList();
+    return (snippets, total);
+}
 
 // 全文搜索核心逻辑（CLI 与 TUI 共用）：SQL LIKE 匹配标题/正文/摘要
-List<GrepHit>? DoGrep(string keyword, string dbPath)
+// limit：命中数上限（TUI 传默认 200；CLI 默认 --limit 20）
+List<GrepHit>? DoGrep(string keyword, string dbPath, int limit = 200)
 {
     if (string.IsNullOrWhiteSpace(keyword)) { SetExit(); Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        SELECT i.Id, i.Title, i.Description, i.Link, f.Title AS FeedTitle
+        SELECT i.Id, i.Title, i.Description, i.Content, i.Summary, i.Link, f.Title AS FeedTitle
         FROM Items i
         JOIN Feeds f ON i.FeedId = f.Id
         WHERE i.Status = 'active'
           AND (i.Title LIKE @kw OR i.Content LIKE @kw OR i.Description LIKE @kw OR i.Summary LIKE @kw)
         ORDER BY i.Id
-        LIMIT 200
+        LIMIT @limit
     ";
     cmd.Parameters.AddWithValue("@kw", "%" + keyword + "%");
+    cmd.Parameters.AddWithValue("@limit", Math.Max(1, limit));
     var hits = new List<GrepHit>();
     using (var r = cmd.ExecuteReader())
     {
@@ -3711,14 +3807,16 @@ List<GrepHit>? DoGrep(string keyword, string dbPath)
                 ItemId = r.GetInt32(0),
                 Title = r.GetString(1),
                 Description = r.IsDBNull(2) ? "" : r.GetString(2),
-                Link = r.IsDBNull(3) ? "" : r.GetString(3),
-                FeedTitle = r.GetString(4)
+                Content = r.IsDBNull(3) ? "" : r.GetString(3),
+                Summary = r.IsDBNull(4) ? "" : r.GetString(4),
+                Link = r.IsDBNull(5) ? "" : r.GetString(5),
+                FeedTitle = r.GetString(6)
             });
         }
     }
     // Description 可能是 HTML，转纯文本便于阅读
     for (int i = 0; i < hits.Count; i++)
-        hits[i] = new GrepHit { ItemId = hits[i].ItemId, Title = hits[i].Title, Description = StripHtml(hits[i].Description), Link = hits[i].Link, FeedTitle = hits[i].FeedTitle };
+        hits[i] = new GrepHit { ItemId = hits[i].ItemId, Title = hits[i].Title, Description = StripHtml(hits[i].Description), Content = hits[i].Content, Summary = hits[i].Summary, Link = hits[i].Link, FeedTitle = hits[i].FeedTitle };
     return hits;
 }
 
@@ -4517,11 +4615,25 @@ class SearchHit
 }
 
 // 全文搜索结果条目
+class GrepSnippetResult
+{
+    public int ItemId { get; set; }
+    public string Title { get; set; } = "";
+    public string Link { get; set; } = "";
+    public string FeedTitle { get; set; } = "";
+    public int Count { get; set; }
+    public List<string> Snippets { get; set; } = new();
+    public int TotalSnippets { get; set; }
+}
+
+// 全文搜索结果条目
 class GrepHit
 {
     public int ItemId { get; set; }
     public string Title { get; set; } = "";
-    public string Description { get; set; } = "";
+    public string Description { get; set; } = "";   // 已转纯文本的摘要（TUI 渲染用）
+    public string Content { get; set; } = "";        // 原始正文（HTML，CLI 片段模式用）
+    public string Summary { get; set; } = "";        // AI 摘要（CLI 片段模式拼进 haystack）
     public string Link { get; set; } = "";
     public string FeedTitle { get; set; } = "";
 }

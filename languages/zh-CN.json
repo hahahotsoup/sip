@@ -5,6 +5,7 @@
   "      source: {0} | similarity: {1:P1}": "      来源：{0} | 相似度：{1:P1}",
   "      summary: {0}...": "      摘要：{0}...",
   "    ✓ updated": "    ✓ 已更新",
+  "    …({0} more, view full text with sip --show {1})": "    …还有 {0} 处未显示，用 sip --show {1} 查看全文",
   "    ✗ {0}": "    ✗ {0}",
   "  [{0}/{1}] failed: {2}": "  [{0}/{1}] 失败：{2}",
   "  [archived] {0} author changed content, old version kept": "  [已归档] {0} 作者修改了内容，旧版已保留",
@@ -24,7 +25,7 @@
   "  endpoint (just https://host[:port] or http://host:port, /v1 auto-appended) [current: {0}]: ": "  端点（只需 https://host[:端口] 或 http://host:端口，自动补全 /v1）〔当前：{0}〕：",
   "  endpoint: {0}": "  端点：{0}",
   "  failed: {0}": "  失败：{0}",
-  "  --grep <keyword>   full-text search (title/content/summary, no AI needed)": "  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）",
+  "  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)": "  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）；默认输出 编号+标题+出现次数+±50字符片段，有上限（--limit N / --max-snippets N / --json / --full）",
   "  -h, --help       show this help": "  -h, --help       显示此帮助",
   "  --ignoresafeannouncement   skip safety banner, data only (for scripts / AI agents)": "  --ignoresafeannouncement   跳过安全横幅等提示，仅输出数据（供脚本 / AI Agent 调用）",
   "  --index          embed articles (interactive selection)": "  --index          对文章做 Embedding 向量化（交互式选择）",
@@ -73,6 +74,7 @@
   "{0} days": "{0} 天",
   "{0} days ago": "{0} 天前",
   "{0} deleted": "{0}已删除",
+  "{0} occurrences": "出现 {0} 次",
   "{0} deleted by author, but archived for you": "{0} 篇被作者删掉了，但是我们已经帮你存档了",
   "{0} feeds are due, run sip --sync to update": "有 {0} 个订阅源已到期，运行 sip --sync 可更新",
   "{0} feeds are due, syncing...": "有 {0} 个到期的订阅源，开始同步...",
@@ -325,7 +327,6 @@
   "      source: {0} | {1}": "      来源：{0} | {1}",
   "      summary: {0}": "      摘要：{0}",
   "  -r, --remove     delete a feed (add --yes to skip confirmation)": "  -r, --remove     删除订阅源（加 --yes 跳过确认）",
-  "  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)": "  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI；加 --brief 截断正文 / --json 结构化输出）",
   "  --versions <id>  list all versions of an article (use --show <id> to view one)": "  --versions <编号> 列出文章的全部历史版本（用 --show <编号> 查看某版原文）",
   "🔐 Security notice": "🔐 安全提醒"
 }

@@ -5,6 +5,7 @@
   "      source: {0} | similarity: {1:P1}": "      来源：{0} | 相似度：{1:P1}（眼睛睁大点看清楚了喵~瞎了不成？）",
   "      summary: {0}...": "      摘要：{0}...（本喵帮你总结好了，还不快感恩戴德~）",
   "    ✓ updated": "    ✓ 更新完了喵~（别磨蹭了，杂鱼！）",
+  "    …({0} more, view full text with sip --show {1})": "    …还有 {0} 处没显示喵~想看全文用 sip --show {1}（快去看！）",
   "    ✗ {0}": "    ✗ {0}（废物喵~又失败了，你还能干啥？）",
   "  [{0}/{1}] failed: {2}": "  [{0}/{1}] 失败：{2}（真够丢人的喵~这都搞不定，杂鱼！）",
   "  [archived] {0} author changed content, old version kept": "  [已归档] {0} 作者改了内容，旧版本喵帮你留着呢~还不快谢我喵！",
@@ -74,6 +75,7 @@
   "{0} days": "{0} 天喵~（好久哦）",
   "{0} days ago": "{0} 天前喵~（那时候你还在玩泥巴吧）",
   "{0} deleted": "{0} 已删除喵~（没了哦）",
+  "{0} occurrences": "出现了 {0} 次喵~",
   "{0} deleted by author, but archived for you": "{0} 篇被作者删掉了喵~但是本喵帮你存档了，贴心吧？",
   "{0} feeds are due, run sip --sync to update": "有 {0} 个订阅源已到期喵~运行sip --sync更新，快去！",
   "{0} feeds are due, syncing...": "有 {0} 个到期的订阅源喵~开始同步...别急",
@@ -326,6 +328,6 @@
   "      source: {0} | {1}": "      来源：{0} | {1}（来自喵~）",
   "      summary: {0}": "      摘要：{0}（这是喵~）",
   "  -r, --remove     delete a feed (add --yes to skip confirmation)": "  -r, --remove     删除订阅源（加 --yes 跳过确认，一键删掉喵~）",
-  "  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)": "  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI；加 --brief 截断正文 / --json 结构化输出，清爽喵~）",
+  "  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)": "  --grep <关键词>   全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）；默认给 编号+标题+出现次数+±50字符片段，不爆上下文喵~（--limit N / --max-snippets N / --json / --full）",
   "🔐 Security notice": "🔐 安全提醒（看好了喵~）"
 }

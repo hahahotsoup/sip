@@ -5,6 +5,7 @@
   "      source: {0} | similarity: {1:P1}": "      source: {0} | similarity: {1:P1}",
   "      summary: {0}...": "      summary: {0}...",
   "    ✓ updated": "    ✓ updated",
+  "    …({0} more, view full text with sip --show {1})": "    …({0} more, view full text with sip --show {1})",
   "    ✗ {0}": "    ✗ {0}",
   "  [{0}/{1}] failed: {2}": "  [{0}/{1}] failed: {2}",
   "  [archived] {0} author changed content, old version kept": "  [archived] {0} author changed content, old version kept",
@@ -74,6 +75,7 @@
   "{0} days": "{0} days",
   "{0} days ago": "{0} days ago",
   "{0} deleted": "{0} deleted",
+  "{0} occurrences": "{0} occurrences",
   "{0} deleted by author, but archived for you": "{0} deleted by author, but archived for you",
   "{0} feeds are due, run sip --sync to update": "{0} feeds are due, run sip --sync to update",
   "{0} feeds are due, syncing...": "{0} feeds are due, syncing...",
@@ -326,6 +328,6 @@
   "      source: {0} | {1}": "      source: {0} | {1}",
   "      summary: {0}": "      summary: {0}",
   "  -r, --remove     delete a feed (add --yes to skip confirmation)": "  -r, --remove     delete a feed (add --yes to skip confirmation)",
-  "  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)": "  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)",
+  "  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)": "  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)",
   "🔐 Security notice": "🔐 Security notice"
 }
