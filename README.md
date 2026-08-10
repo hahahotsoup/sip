@@ -153,9 +153,10 @@ sip --lang en-US -l     # 切换英文界面
 | `-u` | `--update` | 更新指定订阅源（编号） |
 | `-a` | `--archive` | 归档当前快照（加时间戳） |
 | `-una` | `--unarchive` | 去归档（检查同名冲突） |
-| `-r` | `--remove` | 删除订阅源及其全部文章与向量 |
+| `-r` | `--remove` | 删除订阅源及其全部文章与向量（加 `--yes`/`-y` 跳过确认，供脚本/AI 非交互使用） |
 | `-p` | `--preview` | 预览单篇文章（`--grep`/`--search` 输出的文章编号），底部按 `W` 进入完整 TUI |
 | `--show` | | 原文直出：把文章元信息 + 原始正文打到标准输出（供 AI/脚本读取） |
+| `--versions <编号>` | | 列出文章的全部历史版本（同一 Guid 的 v1/v2/…，含状态与时间）；想看某版原文用 `--show <该版本的编号>` |
 | `--sync` | | 只更新「到期」的订阅源（可选 `--feed 编号` 限定单个），输出每个源的 上次/下次 |
 | `--update-all` | | 强制更新所有订阅源（等价 TUI 的 `F6`） |
 | `--schedule` | | 设置某源更新计划：`--schedule <编号> <表达式>` |
@@ -231,7 +232,7 @@ sip --summary-all                   # 为所有未生成摘要的文章生成摘
 | `--index` | 为选中订阅源的文章批量生成 Embedding 向量，写入 SQLite 的 `Vectors` 表 |
 | `--reindex` | 更换 Embedding 模型（维度变化）后，清除旧向量并全量重建 |
 | `--search <查询>` | 对查询做 Embedding，与库中向量计算余弦相似度，按阈值过滤并排序输出；可选 `--feed 编号`、`--threshold 0.7`、`--json` |
-| `--grep <关键词>` | 全文搜索：在标题/正文/摘要做关键字匹配（SQL LIKE），不依赖 AI，适合精确查找与兜底 |
+| `--grep <关键词>` | 全文搜索：在标题/正文/摘要做关键字匹配（SQL LIKE），不依赖 AI，适合精确查找与兜底；加 `--brief` 截断正文摘要（避免大源刷屏）、`--json` 结构化输出 |
 | `--summary <编号>` | 为单篇文章调用 LLM 生成摘要；`feed:<编号>` 为该源全部文章逐个生成 |
 | `--summary-all` | 为所有 `Summary` 为空的文章生成摘要 |
 
@@ -260,7 +261,39 @@ sip --summary-all                   # 为所有未生成摘要的文章生成摘
 - **索引幂等**：`--index` 只处理「还没有向量」的 active 文章（`Vectors` 表对 `(ItemId, ModelId)` 有唯一约束），重复执行不会重复生成
 - **搜索阈值**：默认 0.7（`ai_config.json` 的 `SearchThreshold`），可按需用 `--threshold` 覆盖；本地 bge-m3 的命中分数通常落在 0.5~0.6，建议设 0.5 左右
 - **摘要缓存**：`Items.Summary` 非空即视为已生成并跳过，不会重复调用 LLM；想重新生成需先清空该字段（`--summary-all` 同理）
-- **模型健康检查**：Embedding / LLM 不可用时返回明确错误码（`MODEL_UNAVAILABLE` / `API_KEY_MISSING` / `API_KEY_INVALID` 等），不会静默失败
+- **模型健康检查**：Embedding / LLM 不可用时返回明确错误码，不会静默失败，也不会丢失内部原始异常（`AiException` 为 `public` + `[Serializable]`，含 `Code` / `Suggestion` / `Details` 三个字段，完整序列化 + 标准构造 + `ToString()` 重载方便日志排查）
+
+#### 错误码说明
+
+AI 命令失败时统一通过 `AiException`（或等价输出）上报结构化错误码，`--json` 模式下错误以 `{"error": {"code": "...", ...}}` 形式返回。完整错误码表：
+
+| 错误码 | 触发场景 |
+|--------|----------|
+| `MODEL_UNAVAILABLE` | Embedding / LLM 服务返回 HTTP 错误状态码 |
+| `INVALID_RESPONSE` | Embedding 服务返回了非 JSON 内容 |
+| `INVALID_JSON` | LLM 返回了无法解析的 JSON |
+| `EMPTY_RESPONSE` | LLM 返回内容为空 |
+| `API_KEY_INVALID` | LLM 请求被拒（如 401 / 403，密钥无效） |
+| `NETWORK_ERROR` | 网络无法访问 Embedding / LLM 服务（另有 `Suggestion` 提示检查网络或端点） |
+| `NO_INDEX` | 尚未运行 `--index`，或当前模型还没有任何向量 |
+| `FEED_NOT_FOUND` | 指定的订阅源编号不存在 |
+| `ITEM_NOT_FOUND` | 指定的文章编号不存在 |
+| `EMPTY_QUERY` | 搜索关键词为空 |
+
+> 说明：`AiException` 实现了序列化（`GetObjectData` 会把三个自定义字段写入）并遵循 .NET 异常规范（无参 / `message` / `message+innerException` / 序列化构造齐全），捕获 `ex.Code`、`ex.Suggestion`、`ex.Details` 即可拿到完整错误信息，`ex.ToString()` 会一次性打印「错误码 + 消息 + 建议 + 详情 + 原始堆栈」。
+
+#### 退出码（脚本 / AI 判断成败）
+
+CLI 命令成功时退出码为 `0`，失败时按类别返回非零退出码，shell 脚本可用 `sip -u 1 && echo OK` 这类惯用法：
+
+| 退出码 | 含义 |
+|--------|------|
+| `0` | 成功（含正常取消，如 `-r` 确认时回答 n） |
+| `1` | 通用错误（参数/用法错误、未知命令、数据库错误、部分更新失败） |
+| `2` | 网络 / 服务不可达（`NETWORK_ERROR`、`MODEL_UNAVAILABLE`、下载超时） |
+| `3` | 资源未就绪（AI 未配置、API Key 缺失/无效、`NO_INDEX`、源/文章不存在、空查询） |
+
+> `--json` 模式下错误仍会先输出结构化 `{"success": false, "error": {...}}`，再以对应的非零退出码退出，两者可配合使用。
 
 #### 常见问题
 

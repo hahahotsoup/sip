@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Runtime.Serialization;
 using CodeHollow.FeedReader;
 using DiffPlex;
 using DiffPlex.DiffBuilder;
@@ -69,7 +70,7 @@ if (args.Length > 0)
 {
     await RunCli(args, dbPath);
     RemindDueFeeds(args, dbPath);
-    return 0;
+    return AiState.ExitCode;
 }
 
 // ══════════ TUI 模式（无参数时进入）══════════
@@ -181,7 +182,7 @@ async Task RunCli(string[] args, string dbPath)
     {
         if (args.Length < 2 || !int.TryParse(args[1], out int pNum))
         {
-            Console.WriteLine(Lang.T("Usage: rssreader --preview <article-id>"));
+            SetExit(); Console.WriteLine(Lang.T("Usage: sip --preview <article-id>"));
             return;
         }
         await RunPreviewOrFullTui(pNum, dbPath);
@@ -193,7 +194,7 @@ async Task RunCli(string[] args, string dbPath)
     {
         if (args.Length < 2 || !int.TryParse(args[1], out int sNum))
         {
-            Console.WriteLine(Lang.T("Usage: rssreader --show <article-id>"));
+            SetExit(); Console.WriteLine(Lang.T("Usage: sip --show <article-id>"));
             return;
         }
         ShowArticleCli(sNum, dbPath);
@@ -211,9 +212,9 @@ async Task RunCli(string[] args, string dbPath)
         if (args.Length >= 2)
         {
             // -l 后面带编号 → 列出该源的文章
-            if (!int.TryParse(args[1], out int lNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            if (!int.TryParse(args[1], out int lNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
             int feedRealId = GetRealId(lNum, dbPath);
-            if (feedRealId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+            if (feedRealId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
             ListArticlesFromDb(feedRealId, lNum, dbPath);
         }
         else
@@ -228,7 +229,7 @@ async Task RunCli(string[] args, string dbPath)
     {
         if (args.Length < 3)
         {
-            Console.WriteLine(Lang.T("Usage: rssreader --schedule <id> <expr>; expr like 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual"));
+            SetExit(); Console.WriteLine(Lang.T("Usage: sip --schedule <id> <expr>; expr like 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual"));
             return;
         }
         SetFeedSchedule(args[1], args[2], dbPath);
@@ -267,47 +268,51 @@ async Task RunCli(string[] args, string dbPath)
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
     bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
-                    or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep";
+                    or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep"
+                    or "--versions" or "--history";
     if (args.Length < 2)
     {
-        if (!needsArg) { Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
-        Console.WriteLine(Lang.T("Missing argument. Usage: rssreader {0} <arg>", cmd));
+        if (!needsArg) { SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
+        SetExit(); Console.WriteLine(Lang.T("Missing argument. Usage: sip {0} <arg>", cmd));
         return;
     }
 
     switch (cmd)
     {
         case "-u" or "--update":
-            if (!int.TryParse(args[1], out int aNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            if (!int.TryParse(args[1], out int aNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
             UpdateFeed(aNum, dbPath).Wait();
             break;
         case "-d" or "--download":
             DownloadCli(args[1], dbPath);
             break;
         case "-a" or "--archive":
-            if (!int.TryParse(args[1], out int tNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            if (!int.TryParse(args[1], out int tNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
             AddTimestamp(tNum, dbPath);
             break;
         case "-una" or "--unarchive":
-            if (!int.TryParse(args[1], out int uNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            if (!int.TryParse(args[1], out int uNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
             RemoveTimestamp(uNum, dbPath);
             break;
         case "-r" or "--remove":
-            if (!int.TryParse(args[1], out int dNum)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
-            DeleteFeed(dNum, dbPath);
+            if (!int.TryParse(args[1], out int dNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            DeleteFeed(dNum, dbPath, args.Contains("--yes", StringComparer.OrdinalIgnoreCase) || args.Contains("-y", StringComparer.OrdinalIgnoreCase));
             break;
         case "--search":
-            if (args.Length < 2) { Console.WriteLine(Lang.T("Usage: rssreader --search <query> [--feed number] [--threshold 0.7] [--json]")); return; }
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --search <query> [--feed number] [--threshold 0.7] [--json]")); return; }
             SearchCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--grep":
-            GrepCli(args[1], dbPath);
+            GrepCli(args.Skip(1).ToArray(), dbPath);
+            break;
+        case "--versions" or "--history":
+            ListVersionsCli(args[1], dbPath);
             break;
         case "--summary":
             SummaryCli(args[1], dbPath).Wait();
             break;
         default:
-            Console.WriteLine(Lang.T("Unknown command: {0}", cmd));
+            SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd));
             PrintHelp();
             break;
     }
@@ -315,7 +320,7 @@ async Task RunCli(string[] args, string dbPath)
 
 void PrintHelp()
 {
-    Console.WriteLine(Lang.T("Usage: rssreader <command> [args]"));
+    Console.WriteLine(Lang.T("Usage: sip <command> [args]"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Commands:"));
     Console.WriteLine(Lang.T("  -l, --list       list all feeds"));
@@ -323,9 +328,10 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  -d, --download   download a new RSS feed (URL)"));
     Console.WriteLine(Lang.T("  -a, --archive    archive a feed (add timestamp)"));
     Console.WriteLine(Lang.T("  -una, --unarchive unarchive a feed"));
-    Console.WriteLine(Lang.T("  -r, --remove     delete a feed"));
+    Console.WriteLine(Lang.T("  -r, --remove     delete a feed (add --yes to skip confirmation)"));
     Console.WriteLine(Lang.T("  -p, --preview    preview a single article (W = enter full TUI)"));
     Console.WriteLine(Lang.T("  --show           print an article's raw content to stdout (for AI/scripts)"));
+    Console.WriteLine(Lang.T("  --versions <id>  list all versions of an article (use --show <id> to view one)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -340,18 +346,18 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --index          embed articles (interactive selection)"));
     Console.WriteLine(Lang.T("  --reindex        re-embed after changing the embedding model"));
     Console.WriteLine(Lang.T("  --search <query> [--feed number] [--threshold 0.7] [--json] semantic search (all feeds without --feed)"));
-    Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed)"));
+    Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed; add --brief to truncate / --json for structured output)"));
     Console.WriteLine(Lang.T("  --summary <id>   summarize one article; use feed:<number> for all articles of a feed"));
     Console.WriteLine(Lang.T("  --summary-all    summarize all articles without a summary"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Examples:"));
-    Console.WriteLine(Lang.T("  rssreader -l"));
-    Console.WriteLine(Lang.T("  rssreader -d https://example.com/rss"));
-    Console.WriteLine(Lang.T("  rssreader -u 1"));
-    Console.WriteLine(Lang.T("  rssreader -a 1"));
-    Console.WriteLine(Lang.T("  rssreader --search \"LLM Agent\" --feed 1 --json"));
-    Console.WriteLine(Lang.T("  rssreader --summary 12"));
-    Console.WriteLine(Lang.T("  rssreader --summary feed:3"));
+    Console.WriteLine(Lang.T("  sip -l"));
+    Console.WriteLine(Lang.T("  sip -d https://example.com/rss"));
+    Console.WriteLine(Lang.T("  sip -u 1"));
+    Console.WriteLine(Lang.T("  sip -a 1"));
+    Console.WriteLine(Lang.T("  sip --search \"LLM Agent\" --feed 1 --json"));
+    Console.WriteLine(Lang.T("  sip --summary 12"));
+    Console.WriteLine(Lang.T("  sip --summary feed:3"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Global options:"));
     Console.WriteLine(Lang.T("  --ignoresafeannouncement   skip safety banner, data only (for scripts / AI agents)"));
@@ -579,14 +585,16 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             sb.AppendLine(Lang.T("Enter a number to view that version, 0 to cancel"));
 
             var dlg = new Dialog { Title = " " + Lang.T("Version History") + " ", Width = 60, Height = 14 };
-            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 9, ReadOnly = true };
+            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 9, ReadOnly = true, CanFocus = false };
             txt.Text = sb.ToString();
             var input = new TextField { X = 0, Y = Pos.Bottom(txt), Width = 5, Text = "" };
             var ok = new Button { Text = Lang.T("View"), IsDefault = true, X = 0, Y = Pos.Bottom(input) + 1 };
             var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(input) + 1 };
-            dlg.Add(txt, input, ok, cancel);
+            // input 第一个加入 + 列表只读不抢焦点 → 打开对话框时光标就在输入框上，直接敲数字即可
+            dlg.Add(input, txt, ok, cancel);
             ok.Accepted += (s, e) => dlg.RequestStop();
             cancel.Accepted += (s, e) => { input.Text = ""; dlg.RequestStop(); };
+            input.Initialized += (s, e) => input.SetFocus();
             Application.Run(dlg);
 
             if (int.TryParse(input.Text.Trim(), out int idx) && idx >= 1 && idx <= versions.Count)
@@ -2009,7 +2017,7 @@ void DeleteFeedByRealId(int realId, string dbPath)
 async Task UpdateFeed(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2022,29 +2030,45 @@ async Task UpdateFeed(int displayNum, string dbPath)
     string url = r.GetString(1);
     r.Close();
 
-    if (IsArchived(title)) { Console.WriteLine(Lang.T("{0} is archived and cannot be updated", title)); return; }
+    if (IsArchived(title)) { SetExit(); Console.WriteLine(Lang.T("{0} is archived and cannot be updated", title)); return; }
 
     try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine(Lang.T("Update complete")); }
-    catch (TaskCanceledException) { Console.WriteLine(Lang.T("Download timed out; check your network or the URL")); }
-    catch (HttpRequestException) { Console.WriteLine(Lang.T("Network request failed, the URL may be dead")); }
-    catch (SqliteException ex) { Console.WriteLine(Lang.T("Database error: {0}", ex.Message)); }
-    catch (Exception ex) { Console.WriteLine(Lang.T("Unknown error: {0}", ex.Message)); }
+    catch (TaskCanceledException) { ReportError("NETWORK_ERROR", Lang.T("Download timed out; check your network or the URL"), Lang.T("Check your network connection or the URL")); }
+    catch (HttpRequestException ex) { ReportError("NETWORK_ERROR", Lang.T("Network request failed, the URL may be dead"), Lang.T("Check the URL or your network connection"), ex.Message); }
+    catch (SqliteException ex) { SetExit(); Console.WriteLine(Lang.T("Database error: {0}", ex.Message)); }
+    catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("Unknown error: {0}", ex.Message)); }
 }
 
 // CLI 模式下载（同步等待异步方法）
 void DownloadCli(string url, string dbPath)
 {
-    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine(Lang.T("Download complete")); }
-    catch (Exception ex) { Console.WriteLine(Lang.T("Error: {0}", ex.Message)); }
+    Exception? err = null;
+    try { DownloadAndSaveToDb(url, dbPath).Wait(); Console.WriteLine(Lang.T("Download complete")); return; }
+    catch (AggregateException ae) { err = ae.GetBaseException(); }   // .Wait() 会把异常包成 AggregateException
+    catch (Exception ex) { err = ex; }
+
+    switch (err)
+    {
+        case TaskCanceledException:
+            ReportError("NETWORK_ERROR", Lang.T("Download timed out; check your network or the URL"), Lang.T("Check your network connection or the URL"));
+            break;
+        case HttpRequestException http:
+            ReportError("NETWORK_ERROR", Lang.T("Network request failed, the URL may be dead"), Lang.T("Check the URL or your network connection"), http.Message);
+            break;
+        default:
+            SetExit();
+            Console.WriteLine(Lang.T("Error: {0}", err?.Message ?? ""));
+            break;
+    }
 }
 
 // ══════════ 更新计划（CLI）═══════════
 // 设置某源的更新计划表达式；无效表达式会给出提示
 void SetFeedSchedule(string displayNum, string expr, string dbPath)
 {
-    if (!int.TryParse(displayNum, out int dn)) { Console.WriteLine(Lang.T("The number must be numeric")); return; }
+    if (!int.TryParse(displayNum, out int dn)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
     int realId = GetRealId(dn, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     string raw = (expr ?? "").Trim();
     if (raw.Length == 0 || raw.Equals("manual", StringComparison.OrdinalIgnoreCase))
@@ -2063,6 +2087,7 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
     var s = TryParseSchedule(raw);
     if (s == null)
     {
+        SetExit();
         Console.WriteLine(Lang.T("Invalid schedule expression: {0}; e.g. 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual", raw));
         return;
     }
@@ -2088,7 +2113,7 @@ async Task SyncCli(string[] extra, string dbPath)
         if (extra[i] == "--feed" && i + 1 < extra.Length && int.TryParse(extra[++i], out int f))
             feedReal = GetRealId(f, dbPath);
 
-    if (feedReal.HasValue && feedReal.Value == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (feedReal.HasValue && feedReal.Value == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     var now = DateTime.Now;
     var due = feedReal.HasValue
@@ -2142,6 +2167,7 @@ async Task SyncCli(string[] extra, string dbPath)
         }
     }
     Console.WriteLine(Lang.T("Sync done: {0} ok, {1} failed", ok, fail));
+    if (fail > 0) SetExit();
 }
 
 // --update-all：强制更新所有订阅源（等价 TUI F6）
@@ -2177,6 +2203,7 @@ async Task UpdateAllCli(string dbPath)
         }
     }
     Console.WriteLine(Lang.T("Update done: {0} ok, {1} failed", ok, fail));
+    if (fail > 0) SetExit();
 }
 
 // ══════════ 建表方法 ══════════
@@ -2342,7 +2369,7 @@ void ShowArticleCli(int itemId, string dbPath)
         WHERE i.Id = @id";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) { Console.WriteLine(Lang.T("Article {0} not found", itemId)); return; }
+    if (!r.Read()) { SetExit(); Console.WriteLine(Lang.T("Article {0} not found", itemId)); return; }
 
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
@@ -2360,6 +2387,62 @@ void ShowArticleCli(int itemId, string dbPath)
     Console.WriteLine();
     // 原始正文：优先完整 Content（原文），为空则退回 RSS 摘要
     Console.WriteLine(string.IsNullOrWhiteSpace(content) ? desc : content);
+}
+
+// 查看文章版本历史 CLI：--versions <文章Id>（同 --show 的全局 Id）
+// 列出同一 Guid 的所有版本；想看某版原文，用 sip --show <该版本的 Id>
+void ListVersionsCli(string arg, string dbPath)
+{
+    if (!int.TryParse(arg, out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var gCmd = conn.CreateCommand();
+    gCmd.CommandText = "SELECT Guid, Title FROM Items WHERE Id = @id";
+    gCmd.Parameters.AddWithValue("@id", itemId);
+    using var gr = gCmd.ExecuteReader();
+    if (!gr.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId)); return; }
+    string guid = gr.IsDBNull(0) ? "" : gr.GetString(0);
+    string title = gr.GetString(1);
+    gr.Close();
+
+    if (string.IsNullOrEmpty(guid))
+    {
+        Console.WriteLine(Lang.T("This article has no version history (no Guid)"));
+        return;
+    }
+
+    var cmd = conn.CreateCommand();
+    cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt, Title FROM Items WHERE Guid = @g ORDER BY Version DESC";
+    cmd.Parameters.AddWithValue("@g", guid);
+    using var r = cmd.ExecuteReader();
+    var list = new List<(long Id, int Version, string Status, string At, string T)>();
+    while (r.Read())
+        list.Add((r.GetInt64(0), r.GetInt32(1), r.GetString(2), r.IsDBNull(3) ? "" : r.GetString(3), r.GetString(4)));
+
+    if (list.Count <= 1)
+    {
+        Console.WriteLine(Lang.T("This article has only one version, no change history"));
+        return;
+    }
+
+    Console.WriteLine(Lang.T("Version history of: {0}", title));
+    foreach (var (id, ver, status, at, t) in list)
+    {
+        string tag = status switch
+        {
+            "active" => Lang.T("current"),
+            "archived" => Lang.T("archived"),
+            "deleted" => Lang.T("deleted"),
+            _ => ""
+        };
+        string when = at.Length > 0 && TryParseIso(at) is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : "";
+        string sep = when.Length > 0 ? " · " : "";
+        string mark = id == itemId ? " ←" : "";
+        Console.WriteLine($"  [{id}] v{ver}  {tag}{sep}{when}  {t}{mark}");
+    }
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("View a version's full text with sip --show <article-id>"));
 }
 
 // ══════════ 列表方法：显示数据库中所有订阅源 ══════════
@@ -2737,10 +2820,10 @@ async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = true)
     if (pending == 0) return;
 
     // 自动同步 / 后台检查时跳过 y/n 询问，不打扰、不卡输入
-    if (!ask) { Console.WriteLine(Lang.T("{0} new articles not embedded (auto-sync, skipped; use rssreader --index when needed)", pending)); return; }
+    if (!ask) { Console.WriteLine(Lang.T("{0} new articles not embedded (auto-sync, skipped; use sip --index when needed)", pending)); return; }
 
     Console.WriteLine(Lang.T("This feed has {0} new articles not yet embedded. Add to semantic search ({1})? (y/n)", pending, cfg.Embedding.Model));
-    if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("Skipped, run rssreader --index later if needed")); return; }
+    if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("Skipped, run sip --index later if needed")); return; }
 
     cmd.CommandText = "SELECT Id, Title FROM Items WHERE FeedId = @fid AND Status = 'active' AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = Items.Id)";
     using var r = cmd.ExecuteReader();
@@ -2838,10 +2921,11 @@ int GetRealId(int displayNum, string dbPath)
 }
 
 // ══════════ 删除订阅源 + 它的所有文章 ══════════
-void DeleteFeed(int displayNum, string dbPath)
+// 删除订阅源；yes=true（--yes/-y）跳过确认，供脚本/AI 非交互使用
+void DeleteFeed(int displayNum, string dbPath, bool yes = false)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2859,11 +2943,14 @@ void DeleteFeed(int displayNum, string dbPath)
     int itemCount = reader.GetInt32(1);
     reader.Close();
 
-    Console.Write(Lang.T("Delete {0} and its {1} articles? (y/n)", title, itemCount));
-    if (!"y".Equals(Console.ReadLine()?.Trim().ToLower()))
+    if (!yes)
     {
-        Console.WriteLine(Lang.T("Cancelled"));
-        return;
+        Console.Write(Lang.T("Delete {0} and its {1} articles? (y/n)", title, itemCount));
+        if (!"y".Equals(Console.ReadLine()?.Trim().ToLower()))
+        {
+            Console.WriteLine(Lang.T("Cancelled"));
+            return;
+        }
     }
 
     // 2. 先删该源的向量和文章
@@ -2885,7 +2972,7 @@ void DeleteFeed(int displayNum, string dbPath)
 void AddTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -2919,7 +3006,7 @@ void AddTimestamp(int displayNum, string dbPath)
 void RemoveTimestamp(int displayNum, string dbPath)
 {
     int realId = GetRealId(displayNum, dbPath);
-    if (realId == 0) { Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -3184,9 +3271,23 @@ void EnsureAiPrompted()
 // ══════════ JSON 输出辅助 ══════════
 void JsonOut(object obj) => Console.WriteLine(JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true }));
 
+// 退出码分类（脚本/AI 用 exit code 判断成败）：
+//   0=成功  1=通用错误（参数/用法/数据库）  2=网络/服务不可达  3=资源未就绪（AI 未配置/密钥缺失/无索引/找不到）
+int ExitCodeFor(string code) => code switch
+{
+    "NETWORK_ERROR" or "MODEL_UNAVAILABLE" => 2,
+    "API_KEY_MISSING" or "API_KEY_INVALID" or "NO_INDEX"
+        or "FEED_NOT_FOUND" or "ITEM_NOT_FOUND" or "EMPTY_QUERY" => 3,
+    _ => 1,
+};
+
+// 设置退出码（取最严重的：同一次调用里若有多次失败不会被较低严重度的覆盖）
+void SetExit(int code = 1) => AiState.ExitCode = Math.Max(AiState.ExitCode, code);
+
 // 自然语言报错 + JSON 双格式
 void ReportError(string code, string message, string? suggestion = null, string? details = null, bool json = false)
 {
+    SetExit(ExitCodeFor(code));
     if (json)
     {
         JsonOut(new { success = false, error = new { code, message, suggestion, details } });
@@ -3536,24 +3637,57 @@ void SearchCli(string[] args, string dbPath)
 }
 
 // 全文搜索 CLI：在标题/正文/摘要里做关键字匹配（类似 VS Code 全文搜索，不依赖 AI）
-void GrepCli(string keyword, string dbPath)
+// 支持 --json（结构化输出给脚本/AI）与 --brief（摘要截断，避免上下文洪水）
+void GrepCli(string[] args, string dbPath)
 {
+    var flags = args.Skip(1).ToArray();
+    bool json = flags.Contains("--json", StringComparer.OrdinalIgnoreCase);
+    bool brief = flags.Contains("--brief", StringComparer.OrdinalIgnoreCase);
+    string keyword = args[0];
+
     var hits = DoGrep(keyword, dbPath);
     if (hits == null) return;
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                query = keyword,
+                results = hits.Select(h => new
+                {
+                    itemId = h.ItemId,
+                    title = h.Title,
+                    description = BriefText(h.Description, brief),
+                    link = h.Link,
+                    feedTitle = h.FeedTitle
+                }),
+                total = hits.Count
+            }
+        });
+        return;
+    }
+
     Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, hits.Count));
     foreach (var h in hits)
     {
         Console.WriteLine($"  [{h.ItemId}] {h.Title}");
-        Console.WriteLine($"      来源：{h.FeedTitle} | {h.Link}");
+        Console.WriteLine(Lang.T("      source: {0} | {1}", h.FeedTitle, h.Link));
         if (!string.IsNullOrEmpty(h.Description))
-            Console.WriteLine($"      摘要：{h.Description}");
+            Console.WriteLine(Lang.T("      summary: {0}", BriefText(h.Description, brief)));
     }
 }
+
+// --brief 时把正文截断到 200 字符，避免 grep 大源时把 agent 上下文灌爆
+string BriefText(string text, bool brief, int maxLen = 200)
+    => brief && text.Length > maxLen ? text[..maxLen] + "..." : text;
 
 // 全文搜索核心逻辑（CLI 与 TUI 共用）：SQL LIKE 匹配标题/正文/摘要
 List<GrepHit>? DoGrep(string keyword, string dbPath)
 {
-    if (string.IsNullOrWhiteSpace(keyword)) { Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
+    if (string.IsNullOrWhiteSpace(keyword)) { SetExit(); Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
@@ -3602,14 +3736,14 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
     var modelCmd = conn.CreateCommand();
     modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
     var modelObj = modelCmd.ExecuteScalar();
-    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("No vector index yet, run rssreader --index first"), json: json); return null; }
+    if (modelObj == null) { ReportError("NO_INDEX", Lang.T("No vector index yet, run sip --index first"), json: json); return null; }
     int modelId = Convert.ToInt32(modelObj);
 
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE ModelId = @m";
     cmd.Parameters.AddWithValue("@m", modelId);
     long count = (long)cmd.ExecuteScalar()!;
-    if (count == 0) { ReportError("NO_INDEX", Lang.T("The current model has no vectors yet, run rssreader --index first"), json: json); return null; }
+    if (count == 0) { ReportError("NO_INDEX", Lang.T("The current model has no vectors yet, run sip --index first"), json: json); return null; }
 
     cmd.Parameters.Clear();
     cmd.CommandText = @"
@@ -3773,11 +3907,12 @@ async Task SummaryCli(string arg, string dbPath)
     {
         if (!int.TryParse(arg["feed:".Length..].Trim(), out int feedDisplay))
         {
+            SetExit();
             Console.WriteLine(Lang.T("Bad format. Correct: {0}", "--summary feed:3"));
             return;
         }
         int feedReal = GetRealId(feedDisplay, dbPath);
-        if (feedReal == 0) { Console.WriteLine(Lang.T("Feed number {0} not found", feedDisplay)); return; }
+        if (feedReal == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number {0} not found", feedDisplay)); return; }
 
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
@@ -3804,7 +3939,7 @@ async Task SummaryCli(string arg, string dbPath)
     }
 
     // 单篇文章
-    if (!int.TryParse(arg, out int sumId)) { Console.WriteLine(Lang.T("Usage: rssreader --summary <article-number | feed:number>")); return; }
+    if (!int.TryParse(arg, out int sumId)) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --summary <article-number | feed:number>")); return; }
     await SummarizeItem(dbPath, sumId);
 }
 
@@ -3889,7 +4024,7 @@ void InitAiConfigInteractive(string dbPath)
 
     SaveConfig(dbPath, cfg);
     Console.WriteLine(Lang.T("\nConfig saved. You can tweak ai_config.json for the model; API keys live in the OS credential store."));
-    Console.WriteLine(Lang.T("Note: after changing the Embedding model, run rssreader --reindex to re-embed."));
+    Console.WriteLine(Lang.T("Note: after changing the Embedding model, run sip --reindex to re-embed."));
 }
 
 // 读取密码（不回显）——跨平台简易实现
@@ -3938,6 +4073,7 @@ static class AiState
 {
     public static bool Warned = false;
     public static bool IgnoreAnnouncement = false;  // --ignoresafeannouncement：跳过安全横幅等多余输出
+    public static int ExitCode = 0;  // CLI 退出码（脚本/AI 用 exit code 判断成败；0=成功，非零=失败）
 }
 
 // TUI 图片缓存（URL → 字节）
@@ -4080,6 +4216,7 @@ class SidebarRow
 {
     public TuiNode Node { get; set; } = new();
     public bool IsFeed { get; set; }
+    public bool IsLastChild { get; set; }   // 是否为父源下最后一篇文章（决定 └─ / ├─ 与续行竖线）
     public List<string> Lines { get; set; } = new();
 }
 
@@ -4157,8 +4294,8 @@ class SidebarView : View
         {
             _rows.Add(new SidebarRow { Node = f, IsFeed = true });
             if (_expanded.Contains(f.FeedId) && _articles.TryGetValue(f.FeedId, out var arts))
-                foreach (var a in arts)
-                    _rows.Add(new SidebarRow { Node = a, IsFeed = false });
+                for (int i = 0; i < arts.Count; i++)
+                    _rows.Add(new SidebarRow { Node = arts[i], IsFeed = false, IsLastChild = i == arts.Count - 1 });
         }
         _sel = _rows.Count == 0 ? 0 : Math.Clamp(_sel, 0, _rows.Count - 1);
         _layoutDirty = true;
@@ -4169,14 +4306,30 @@ class SidebarView : View
         if (!_layoutDirty && _layoutWidth == width) return;
         _layoutWidth = width;
         _layoutDirty = false;
-        int textWidth = Math.Max(1, width);
         foreach (var row in _rows)
         {
-            string prefix = row.IsFeed
-                ? (_expanded.Contains(row.Node.FeedId) ? "▼ " : "▶ ")
-                : "  ";
-            var wrapped = Terminal.Gui.Text.TextFormatter.WordWrapText(prefix + row.Node.Title, textWidth);
-            row.Lines = wrapped.Count > 0 ? wrapped : new List<string> { "" };
+            // 树状前缀：源用 ▼/▶ 折叠箭头，文章用 ├/└/│ 表示层级；
+            // 前缀和续行缩进都按显示列宽算，保证换行的续行与首行文字对齐
+            string prefix, continuation;
+            if (row.IsFeed)
+            {
+                prefix = _expanded.Contains(row.Node.FeedId) ? "▼ " : "▶ ";
+                continuation = "  ";
+            }
+            else
+            {
+                prefix = row.IsLastChild ? "  └─ " : "  ├─ ";
+                continuation = "  │  ";
+            }
+
+            // 只对标题本体换行，再分别拼前缀（首行）与续行缩进（其余行）
+            int prefixCols = prefix.GetColumns();
+            var wrapped = Terminal.Gui.Text.TextFormatter.WordWrapText(row.Node.Title, Math.Max(1, width - prefixCols));
+            if (wrapped.Count == 0) wrapped = new List<string> { "" };
+            var lines = new List<string>(wrapped.Count);
+            for (int i = 0; i < wrapped.Count; i++)
+                lines.Add(i == 0 ? prefix + wrapped[i] : continuation + wrapped[i]);
+            row.Lines = lines;
         }
         if (_scrollTop >= TotalLines() && TotalLines() > 0)
             _scrollTop = Math.Max(0, TotalLines() - 1);
@@ -4374,16 +4527,46 @@ class GrepHit
 }
 
 // ══════════ 自定义异常 ══════════
-class AiException : Exception
+#pragma warning disable SYSLIB0051
+[Serializable]
+public class AiException : Exception
 {
-    public string Code { get; }
-    public string? Suggestion { get; }
-    public string? Details { get; }
-    public AiException(string code, string message, string? suggestion = null, string? details = null)
-        : base(message)
+    public string Code { get; private set; } = string.Empty;
+    public string? Suggestion { get; private set; }
+    public string? Details { get; private set; }
+
+    public AiException() : base() { }
+
+    public AiException(string message) : base(message) { }
+
+    public AiException(string code, string message, string? suggestion = null, string? details = null, Exception? innerException = null)
+        : base(message, innerException)
     {
         Code = code;
         Suggestion = suggestion;
         Details = details;
     }
+
+    protected AiException(SerializationInfo info, StreamingContext context)
+        : base(info, context)
+    {
+        Code = info.GetString(nameof(Code)) ?? string.Empty;
+        Suggestion = info.GetString(nameof(Suggestion));
+        Details = info.GetString(nameof(Details));
+    }
+
+    [Obsolete]
+    public override void GetObjectData(SerializationInfo info, StreamingContext context)
+    {
+        base.GetObjectData(info, context);
+        info.AddValue(nameof(Code), Code);
+        info.AddValue(nameof(Suggestion), Suggestion);
+        info.AddValue(nameof(Details), Details);
+    }
+
+    public override string ToString()
+    {
+        return $"错误码：{Code}，消息：{Message}，建议：{Suggestion}，详情：{Details}\n{base.ToString()}";
+    }
 }
+#pragma warning restore SYSLIB0051
