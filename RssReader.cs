@@ -1265,7 +1265,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 Lang.T("      · 多语言（readwithhotsoup/languages/*.json）"),
                 "",
                 Lang.T("作者：hahahotsoup with ❤"),
-                Lang.T("thanks to deepseek + opencode"),
+                Lang.T("thanks to deepseek + opencode + chatgpt"),
                 "",
                 Lang.T("博客：https://blog.hotsouprealm.top/atom.xml"),
                 Lang.T("关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾"));
