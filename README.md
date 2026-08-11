@@ -191,7 +191,7 @@ dotnet publish -c Release -r win-x64 --self-contained false \
 
 ### ai skill
 
-代码里的 [https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss](https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss) 内含一份 skill，直接喂给 AI 即可。
+代码里的 [https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss](https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss) 内含一份 skill，直接喂给 AI 即可。也可以直接从 [Releases](https://github.com/hahahotsoup/sipintui/releases) 下载 `sip-skill.zip`（与各平台单文件一起提供）。
 
 ---
 
