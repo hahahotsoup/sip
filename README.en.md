@@ -72,7 +72,7 @@ Feed the agent three things:
 2. **The `sip-rss` skill** (`.opencode/skills/sip-rss/SKILL.md` or `sip-skill.zip`)
 3. **A system prompt** (see Wiki, making the agent retrieve only via `sip --search/--grep/--show/--summary`)
 
-> Telegram and Discord are natively supported by OpenClaw; QQ and WeChat need third-party bridges (OneBot/go-cqhttp, Wechaty, etc.). Full steps, prompt, and examples: [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html).
+> Telegram and Discord are natively supported by OpenClaw; QQ and WeChat need third-party bridges (OneBot/go-cqhttp, Wechaty, etc.). Full steps, prompt, and examples: [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/en/usage/bot-integration.html).
 
 ---
 
@@ -143,7 +143,7 @@ After wiring up OpenClaw / Cherry Studio, mention it in a group:
 @bot Find me articles about "LLM Agent"
 ```
 
-The agent automatically runs `sip --today` / `sip --search`, answering only from sources you trust. See [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html).
+The agent automatically runs `sip --today` / `sip --search`, answering only from sources you trust. See [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/en/usage/bot-integration.html).
 
 ---
 
