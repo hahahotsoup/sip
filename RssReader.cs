@@ -73,6 +73,7 @@ if (args.Length > 0)
 {
     await RunCli(args, dbPath);
     RemindDueFeeds(args, dbPath);
+    RemindDueInsights(args, dbPath);
     TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
     return AiState.ExitCode;
 }
@@ -510,7 +511,7 @@ void EmbedFulltextSidecar(string dbPath, int itemId, int feedId, string text)
     {
         if (!FeedHasVectors(dbPath, feedId)) return;
         var cfg = LoadConfig(dbPath);
-        var vec = SafeEmbed(text, cfg, json: false).GetAwaiter().GetResult();
+        var vec = SafeEmbed(text, cfg, json: false, articleId: itemId, sourceId: feedId).GetAwaiter().GetResult();
         if (vec == null) return;
         int modelId = CurrentEmbeddingModelId(dbPath);
         if (modelId <= 0) return;
@@ -534,7 +535,7 @@ void EnsureFulltextSidecar(string dbPath, int itemId, int feedId, string text)
         var list = LoadFulltextVecs();
         if (list.Any(e => e.ItemId == itemId && e.ModelId == modelId)) return;
         var cfg = LoadConfig(dbPath);
-        var vec = SafeEmbed(text, cfg, json: false).GetAwaiter().GetResult();
+        var vec = SafeEmbed(text, cfg, json: false, articleId: itemId, sourceId: feedId).GetAwaiter().GetResult();
         if (vec == null) return;
         list.RemoveAll(e => e.ItemId == itemId);
         list.Add((itemId, feedId, modelId, vec));
@@ -556,7 +557,7 @@ int BackfillFulltextSidecars(string dbPath, List<(int Id, int FeedId)> items)
         if (list.Any(e => e.ItemId == id && e.ModelId == modelId) || toAdd.Any(e => e.ItemId == id)) continue;
         string? ft = ReadFulltextCache(id);
         if (ft == null) continue;
-        var vec = SafeEmbed(ft, cfg, json: false).GetAwaiter().GetResult();
+        var vec = SafeEmbed(ft, cfg, json: false, articleId: id, sourceId: feedId).GetAwaiter().GetResult();
         if (vec == null) continue;
         toAdd.Add((id, feedId, modelId, vec));
     }
@@ -914,8 +915,24 @@ bool ToggleSignal(int itemId, bool ai, string? reason, string dbPath)
     e.UpdatedAt = DateTime.Now.ToString("O");
     if (!e.UserLike && !e.AiLike) map.Remove(key); else map[key] = e;
     SaveSignals(map);
-    TelemetryService.Record("article_like", articleId: itemId, data: new { actor = ai ? "ai" : "user", liked });
+    TelemetryService.Record("article_like", articleId: itemId, sourceId: GetArticleFeedId(itemId, dbPath), data: new { actor = ai ? "ai" : "user", liked });
     return liked;
+}
+
+// 文章归属的源 Id（供遥测把点赞归因到源；找不到返回 null）
+int? GetArticleFeedId(int itemId, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT FeedId FROM Items WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", itemId);
+        var o = c.ExecuteScalar();
+        return o == null ? null : Convert.ToInt32(o);
+    }
+    catch { return null; }
 }
 
 // CLI：sip --like <id> [--ai [reason]]（切换）
@@ -1399,6 +1416,13 @@ async Task RunCli(string[] args, string dbPath)
         case "--today":
             TodayCli(args.Skip(1).ToArray(), dbPath);
             return;
+        case "--insights":
+            InsightsCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--insights-interval":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --insights-interval <7d|30d|off>")); return; }
+            InsightsIntervalCli(args[1], dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
@@ -1503,6 +1527,8 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
     Console.WriteLine(Lang.T("  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)"));
     Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)"));
+    Console.WriteLine(Lang.T("  --insights [--window N d] [--json]  reading report (facts per feed; needs telemetry ON; decisions are yours)"));
+    Console.WriteLine(Lang.T("  --insights-interval <7d|30d|off>  schedule the report reminder (due popup in TUI)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -1819,6 +1845,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             new Shortcut(Key.S, Lang.T("Search"), () => SearchDialog(), Lang.T("Semantic search (same as CLI --search)")),
             new Shortcut(Key.Y, Lang.T("Summary"), () => SummarizeSelected(), Lang.T("Summarize current article (same as CLI --summary)")),
             new Shortcut(Key.G, Lang.T("Overview"), () => ToggleContentMode(), Lang.T("Toggle content/overview")),
+                new Shortcut(Key.P, Lang.T("Report"), () => ShowInsightsPage(dbPath), Lang.T("Reading report (needs telemetry ON)")),
                 new Shortcut(Key.Q, Lang.T("Quit"), QuitApp, Lang.T("Exit program"))
         });
 
@@ -2447,6 +2474,11 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     RebuildTree();
                     e.Handled = true;
                     break;
+                case KeyCode.P:
+                    ShowInsightsPage(dbPath);
+                    RebuildTree();
+                    e.Handled = true;
+                    break;
                 case KeyCode.V:
                 {
                     var nv = tree.SelectedObject;
@@ -2619,6 +2651,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case "manage":
                     ShowFeedManager(dbPath);
                     RebuildTree();
+                    return;
+                case "report" or "insights":
+                    ShowInsightsPage(dbPath);
                     return;
                 case "u" or "-u" or "--update":
                     if (int.TryParse(arg, out int unum))
@@ -2903,7 +2938,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 int ok = 0, fail = 0;
                 foreach (var a in articles)
                 {
-                    var vec = SafeEmbed(a.Title, cfg).GetAwaiter().GetResult();
+                    var vec = SafeEmbed(a.Title, cfg, articleId: a.Id, sourceId: realId).GetAwaiter().GetResult();
                     if (vec == null) { fail++; Console.WriteLine(Lang.T("  failed: {0}", a.Title)); continue; }
                     if (vec.Length != cfg.Embedding.Dimensions)
                     {
@@ -2951,7 +2986,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 int ok = 0, fail = 0;
                 foreach (var it in items)
                 {
-                    var vec = SafeEmbed(it.Title, cfg).GetAwaiter().GetResult();
+                    var vec = SafeEmbed(it.Title, cfg, articleId: it.Id, sourceId: it.FeedId).GetAwaiter().GetResult();
                     if (vec == null) { fail++; continue; }
                     if (vec.Length != cfg.Embedding.Dimensions)
                     {
@@ -3017,6 +3052,16 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             SyncDueFeeds();
             return false;
         });
+        // 报告到期且遥测开启 → 启动时自动弹出阅读情况报告页（用户决策，或 Esc 关闭）
+        if (TelemetryService.IsEnabled && IsInsightsDue(DateTime.Now))
+        {
+            Application.AddTimeout(TimeSpan.FromMilliseconds(250), () =>
+            {
+                ShowInsightsPage(dbPath);
+                RebuildTree();
+                return false;
+            });
+        }
         // 后台检查：程序开着期间每 15 分钟查一次到期源（没到期不请求，几乎零开销）
         Application.AddTimeout(TimeSpan.FromMinutes(15), () =>
         {
@@ -5101,7 +5146,7 @@ async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = true)
     int ok = 0, fail = 0;
     foreach (var a in articles)
     {
-        var vec = await SafeEmbed(a.Title, cfg);
+        var vec = await SafeEmbed(a.Title, cfg, articleId: a.Id, sourceId: (int)feedId);
         if (vec == null) { fail++; continue; }
         if (vec.Length != cfg.Embedding.Dimensions)
         {
@@ -5593,7 +5638,7 @@ void ReportError(string code, string message, string? suggestion = null, string?
 // ══════════ Embedding 服务（OpenAI 兼容格式，端点可自定义）═══════════
 // 统一走 POST {endpoint}/embeddings：Ollama(/v1)、DeepSeek、OpenAI 及任何
 // 兼容服务均可；API Key 可选（本地 Ollama 不需要，填了才带 Bearer 头）
-async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
+async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg, int? articleId = null, int? sourceId = null)
 {
     var sw = System.Diagnostics.Stopwatch.StartNew();
     bool ok = false;
@@ -5626,18 +5671,18 @@ async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
     }
     finally
     {
-        // 遥测：记录 ai_call（不记 prompt/响应内容）
-        TelemetryService.RecordAiCall("embedding", cfg.Embedding.Provider, cfg.Embedding.Model, ok, sw.ElapsedMilliseconds);
+        // 遥测：记录 ai_call（不记 prompt/响应内容）；带文章/源归属
+        TelemetryService.RecordAiCall("embedding", cfg.Embedding.Provider, cfg.Embedding.Model, ok, sw.ElapsedMilliseconds, articleId, sourceId);
     }
 }
 
 // 模型调用失败时：捕获并自然语言报错，停止使用该模型
-async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false)
+async Task<float[]?> SafeEmbed(string text, AiConfig cfg, bool json = false, int? articleId = null, int? sourceId = null)
 {
     try
     {
         EnsureAiPrompted();
-        return await GetEmbeddingAsync(text, cfg);
+        return await GetEmbeddingAsync(text, cfg, articleId, sourceId);
     }
     catch (HttpRequestException ex)
     {
@@ -5805,7 +5850,7 @@ async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     for (int i = 0; i < articles.Count; i++)
     {
         var a = articles[i];
-        var vec = await SafeEmbed(a.Title, cfg);
+        var vec = await SafeEmbed(a.Title, cfg, articleId: a.Id, sourceId: a.FeedId);
         if (vec == null) { fail++; Console.WriteLine(Lang.T("  [{0}/{1}] failed: {2}", i + 1, articles.Count, a.Title)); continue; }
         if (vec.Length != cfg.Embedding.Dimensions)
         {
@@ -5854,7 +5899,7 @@ async Task ReindexCli(string dbPath)
     int ok = 0, fail = 0;
     foreach (var item in items)
     {
-        var vec = await SafeEmbed(item.Title, cfg);
+        var vec = await SafeEmbed(item.Title, cfg, articleId: item.Id, sourceId: item.FeedId);
         if (vec == null) { fail++; continue; }
         SaveVector(dbPath, item.FeedId, item.Id, modelId, vec);
         ok++;
@@ -6148,7 +6193,7 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
     var cfg = LoadConfig(dbPath);
     float thr = threshold ?? cfg.Embedding.SearchThreshold;
 
-    var vec = SafeEmbed(query, cfg, json).GetAwaiter().GetResult();
+    var vec = SafeEmbed(query, cfg, json, sourceId: feedReal).GetAwaiter().GetResult();
     if (vec == null) return null;
 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -6291,7 +6336,7 @@ void DeleteArticleByGuid(string guid, string dbPath)
 
 // （SearchHit 类见文件末尾类型区）
 // ══════════ LLM 摘要服务（OpenAI 兼容，端点可自定义）═══════════
-async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
+async Task<string?> CallLlmAsync(string prompt, AiConfig cfg, int? articleId = null, int? sourceId = null)
 {
     var sw = System.Diagnostics.Stopwatch.StartNew();
     bool ok = false;
@@ -6327,8 +6372,8 @@ async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
     }
     finally
     {
-        // 遥测：记录 ai_call（不记 prompt/响应内容）
-        TelemetryService.RecordAiCall("llm", cfg.Llm.Provider, cfg.Llm.Model, ok, sw.ElapsedMilliseconds);
+        // 遥测：记录 ai_call（不记 prompt/响应内容）；带文章/源归属（供报告按源统计）
+        TelemetryService.RecordAiCall("llm", cfg.Llm.Provider, cfg.Llm.Model, ok, sw.ElapsedMilliseconds, articleId, sourceId);
     }
 }
 
@@ -6339,7 +6384,7 @@ async Task<(bool Ok, string? Summary)> SummarizeItem(string dbPath, int itemId, 
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
     var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT Title, Content, Description, Summary FROM Items WHERE Id = @id AND Status = 'active'";
+    cmd.CommandText = "SELECT Title, Content, Description, Summary, FeedId FROM Items WHERE Id = @id AND Status = 'active'";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
     if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return (false, null); }
@@ -6347,6 +6392,7 @@ async Task<(bool Ok, string? Summary)> SummarizeItem(string dbPath, int itemId, 
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
     string desc = r.IsDBNull(2) ? "" : r.GetString(2);
     string existing = r.IsDBNull(3) ? "" : r.GetString(3);
+    int feedId = r.GetInt32(4);
     r.Close();
 
     if (!string.IsNullOrEmpty(existing))
@@ -6363,7 +6409,7 @@ async Task<(bool Ok, string? Summary)> SummarizeItem(string dbPath, int itemId, 
     try
     {
         EnsureAiPrompted();
-        var summary = await CallLlmAsync(prompt, cfg);
+        var summary = await CallLlmAsync(prompt, cfg, articleId: itemId, sourceId: feedId);
         if (summary == null) throw new AiException("EMPTY_RESPONSE", Lang.T("LLM returned empty"), Lang.T("Retry or check the model config"));
 
         var upd = conn.CreateCommand();
@@ -6585,6 +6631,340 @@ void ShowConfig(string dbPath)
 // ══════════════════════════════════════════════════════════
 
 // 进程内 AI 状态
+// ══════════ 阅读情况报告（Insights）：遥测事实汇总，决定在用户 ══════════
+string SettingsPath() => Path.Combine(dataDir, "sip_settings.json");
+
+SipSettings LoadSettings()
+{
+    try
+    {
+        if (File.Exists(SettingsPath()))
+            return JsonSerializer.Deserialize<SipSettings>(File.ReadAllText(SettingsPath())) ?? new SipSettings();
+    }
+    catch { }
+    return new SipSettings();
+}
+
+void SaveSettings(SipSettings s)
+{
+    try
+    {
+        File.WriteAllText(SettingsPath(), JsonSerializer.Serialize(s,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+// 解析报告间隔：off / 0 → null；Nd → N 天；否则 null（无效）
+int? TryParseInsightsInterval(string raw)
+{
+    string r = (raw ?? "").Trim();
+    if (r.Length == 0 || r.Equals("off", StringComparison.OrdinalIgnoreCase) || r == "0") return null;
+    var m = Regex.Match(r, @"^(\d+)\s*d$", RegexOptions.IgnoreCase);
+    if (m.Success)
+    {
+        int d = int.Parse(m.Groups[1].Value);
+        return d >= 1 ? d : null;
+    }
+    return null;
+}
+
+// 报告是否「到期」（上次生成时间 + 间隔 <= now）。未生成过或间隔 off → false
+bool IsInsightsDue(DateTime now)
+{
+    var s = LoadSettings();
+    int? days = TryParseInsightsInterval(s.InsightsInterval);
+    if (days == null) return false;
+    if (string.IsNullOrEmpty(s.LastInsightsAt)) return false;
+    if (TryParseIso(s.LastInsightsAt) is not DateTime last) return false;
+    return now - last >= TimeSpan.FromDays(days.Value);
+}
+
+// CLI 末尾报告到期提醒（仿 RemindDueFeeds：不污染 --json）
+void RemindDueInsights(string[] args, string dbPath)
+{
+    try
+    {
+        if (args.Contains("--json", StringComparer.OrdinalIgnoreCase)) return;
+        if (!TelemetryService.IsEnabled) return;
+        if (!IsInsightsDue(DateTime.Now)) return;
+        Console.WriteLine(Lang.T("你的阅读情况报告已就绪，运行 sip --insights 查看"));
+    }
+    catch { }
+}
+
+// 按源统计点赞（来自 signals，不受遥测限制）：FeedId → (userLikes, aiLikes)
+Dictionary<int, (int User, int Ai)> BuildFeedLikeStats(string dbPath)
+{
+    var result = new Dictionary<int, (int, int)>();
+    try
+    {
+        var signals = LoadSignals();
+        var ids = signals.Keys.Where(k => int.TryParse(k, out _)).Select(int.Parse).Distinct().ToList();
+        if (ids.Count == 0) return result;
+        var feedOf = new Dictionary<int, int>();
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT Id, FeedId FROM Items WHERE Id IN (" + string.Join(",", ids) + ")";
+            using var r = c.ExecuteReader();
+            while (r.Read()) feedOf[r.GetInt32(0)] = r.GetInt32(1);
+        }
+        foreach (var kv in signals)
+        {
+            if (!int.TryParse(kv.Key, out int itemId)) continue;
+            if (!feedOf.TryGetValue(itemId, out int fid)) continue;
+            result.TryGetValue(fid, out var cur);
+            if (kv.Value.UserLike) cur.Item1++;
+            if (kv.Value.AiLike) cur.Item2++;
+            result[fid] = cur;
+        }
+    }
+    catch { }
+    return result;
+}
+
+// 单源规则提示：候选动作 + 一句数据依据（仅观察，不替你决定）
+(string Action, string Basis) RuleHint(int feedId, string schedule, DateTime? lastChecked, long active, long opened, long completed, long skipped, Dictionary<int, (int FailCount, string LastError, string LastOkAt)> health)
+{
+    health.TryGetValue(feedId, out var h);
+    int fail = h.FailCount;
+    string healthText = FeedHealthText(feedId, schedule, lastChecked, DateTime.Now);
+    if (fail > 0)
+        return (Lang.T("建议退订"), Lang.T("近期拉取失败 {0} 次，可能已失效", fail));
+    if (healthText == Lang.T("⚠ 长期未更新"))
+        return (Lang.T("建议退订"), Lang.T("长期未更新"));
+    if (opened == 0)
+        return (active > 0 ? Lang.T("可考虑精简") : Lang.T("无文章"), Lang.T("窗口内未打开任何一篇（订阅 {0} 篇）", active));
+    double rate = completed / (double)Math.Max(1, opened);
+    if (rate < 0.4 && active > 10)
+        return (Lang.T("可考虑精简"), Lang.T("打开 {0} 篇仅读完 {1} 篇，完成率低且订阅量大", opened, completed));
+    if (rate >= 0.6 && opened >= 3)
+        return (Lang.T("保留"), Lang.T("窗口内打开 {0} 篇、读完 {1} 篇，投入度高", opened, completed));
+    return (Lang.T("按需调整"), Lang.T("窗口内打开 {0} 篇、读完 {1} 篇", opened, completed));
+}
+
+// 构建报告数据
+List<InsightsFeed> BuildInsights(string dbPath, int windowDays)
+{
+    var feeds = new List<(int Id, string Title, string Schedule, DateTime? LastChecked, long Active)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT f.Id, f.Title, f.Schedule, f.LastCheckedAt,
+                   (SELECT COUNT(*) FROM Items WHERE FeedId = f.Id AND Status = 'active')
+            FROM Feeds f ORDER BY f.Id";
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            feeds.Add((r.GetInt32(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2),
+                r.IsDBNull(3) ? null : TryParseIso(r.GetString(3)), r.GetInt64(4)));
+    }
+
+    var reading = TelemetryService.FeedReadingStats(windowDays);
+    var aiCalls = TelemetryService.FeedAiCallStats(windowDays);
+    var likes = BuildFeedLikeStats(dbPath);
+    var health = LoadFeedHealth();
+
+    var list = new List<InsightsFeed>();
+    foreach (var f in feeds)
+    {
+        reading.TryGetValue(f.Id, out var rd);
+        aiCalls.TryGetValue(f.Id, out var ac);
+        likes.TryGetValue(f.Id, out var lk);
+        long backlog = Math.Max(0, f.Active - rd.Opened);
+        var (action, basis) = RuleHint(f.Id, f.Schedule, f.LastChecked, f.Active, rd.Opened, rd.Completed, rd.Skipped, health);
+        list.Add(new InsightsFeed
+        {
+            FeedId = f.Id,
+            Title = f.Title,
+            Schedule = f.Schedule,
+            Active = f.Active,
+            Backlog = backlog,
+            Opened = rd.Opened,
+            Completed = rd.Completed,
+            Skipped = rd.Skipped,
+            UserLikes = lk.User,
+            AiLikes = lk.Ai,
+            LlmCalls = ac.Llm,
+            EmbeddingCalls = ac.Embedding,
+            Health = FeedHealthText(f.Id, f.Schedule, f.LastChecked, DateTime.Now),
+            Action = action,
+            Basis = basis
+        });
+    }
+    return list;
+}
+
+// 全局 AI 调用概况文本
+string AiCallSummary(int windowDays)
+{
+    var (total, ok, fail, llm, emb) = TelemetryService.GlobalAiCallStats(windowDays);
+    if (total == 0) return Lang.T("窗口内暂无 AI 调用");
+    return Lang.T("AI 调用 {0} 次 · 摘要/对话 {1} · 嵌入 {2} · 成功 {3} · 失败 {4}", total, llm, emb, ok, fail);
+}
+
+// CLI：sip --insights [--window N d] [--json]
+void InsightsCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    int window = 30;
+    for (int i = 0; i < args.Length - 1; i++)
+        if (args[i].Equals("--window", StringComparison.OrdinalIgnoreCase) && TryParseInsightsInterval(args[i + 1]) is int w)
+            window = w;
+
+    if (!TelemetryService.IsEnabled)
+    {
+        ReportError("TELEMETRY_OFF", Lang.T("阅读情况报告需要先开启遥测"), Lang.T("运行 sip telemetry enable 后重试"), json: json);
+        return;
+    }
+
+    var list = BuildInsights(dbPath, window);
+    var (total, ok, fail, llm, emb) = TelemetryService.GlobalAiCallStats(window);
+
+    // 记录本次报告时间（用于下次到期判定）
+    var s = LoadSettings();
+    s.LastInsightsAt = DateTime.Now.ToString("O");
+    SaveSettings(s);
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                windowDays = window,
+                generatedAt = DateTime.Now.ToString("O"),
+                aiCalls = new { total, success = ok, fail, llm, embedding = emb },
+                feeds = list.Select(x => new
+                {
+                    id = x.FeedId, title = x.Title, schedule = x.Schedule,
+                    active = x.Active, backlog = x.Backlog,
+                    opened = x.Opened, completed = x.Completed, skipped = x.Skipped,
+                    completionRate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) : 0,
+                    userLikes = x.UserLikes, aiLikes = x.AiLikes,
+                    llmCalls = x.LlmCalls, embeddingCalls = x.EmbeddingCalls,
+                    health = x.Health, action = x.Action, basis = x.Basis
+                })
+            }
+        });
+        return;
+    }
+
+    Console.WriteLine("──────────────────────────────────────────");
+    Console.WriteLine(Lang.T("阅读情况报告（窗口 {0} 天）· {1}", window, DateTime.Now.ToString("yyyy-MM-dd HH:mm")));
+    Console.WriteLine(AiCallSummary(window));
+    Console.WriteLine(Lang.T("事实仅供参考，决定在你 —— 可邀请 Agent 协助，或按 a/x 当场调整。"));
+    Console.WriteLine("──────────────────────────────────────────");
+    if (list.Count == 0) { Console.WriteLine(Lang.T("尚无订阅源")); return; }
+    foreach (var x in list)
+    {
+        string rate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) + "%" : "—";
+        string health = x.Health == Lang.T("正常") ? "" : "  " + x.Health;
+        Console.WriteLine($"[{x.FeedId}] {CjkSpace(StripControlChars(x.Title))}{health}");
+        Console.WriteLine($"   订阅 {x.Active} 篇 · 未读积压 {x.Backlog}");
+        Console.WriteLine($"   打开 {x.Opened} · 读完 {x.Completed} · 完成率 {rate} · 跳过 {x.Skipped}");
+        Console.WriteLine($"   ♥ 你点赞 {x.UserLikes} · 🤖 AI 点赞 {x.AiLikes}" + (x.LlmCalls > 0 || x.EmbeddingCalls > 0 ? $" · AI 摘要 {x.LlmCalls} 次" : ""));
+        Console.WriteLine($"   观察：{x.Action} —— {x.Basis}（由你决定）");
+    }
+}
+
+// CLI：sip --insights-interval <7d|30d|off>
+void InsightsIntervalCli(string arg, string dbPath)
+{
+    if (TryParseInsightsInterval(arg) == null && !arg.Equals("off", StringComparison.OrdinalIgnoreCase))
+    {
+        SetExit();
+        Console.WriteLine(Lang.T("无效间隔，应为 7d / 30d / off 之一"));
+        return;
+    }
+    var s = LoadSettings();
+    s.InsightsInterval = arg.Trim().ToLowerInvariant();
+    SaveSettings(s);
+    int? days = TryParseInsightsInterval(arg);
+    Console.WriteLine(arg.Trim().Equals("off", StringComparison.OrdinalIgnoreCase)
+        ? Lang.T("已关闭报告定时提醒")
+        : Lang.T("报告定时提醒已设为每 {0} 天一次（遥测开启时到期会提醒）", days ?? 0));
+}
+
+// TUI 报告页（卡片式）：j/k 移动 · a 归档 · x 删除 · Esc 返回
+#pragma warning disable CS0618
+void ShowInsightsPage(string dbPath)
+{
+    var top = new Dialog
+    {
+        Title = " " + Lang.T("阅读情况报告") + " ",
+        X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill()
+    };
+
+    if (!TelemetryService.IsEnabled)
+    {
+        var n = new Label
+        {
+            Text = Lang.T("阅读情况报告需要先开启遥测（仅本地、不上传）。运行 sip telemetry enable 后再试。"),
+            X = 0, Y = 0, Width = Dim.Fill(), Height = 1
+        };
+        var ok = new Button { Text = Lang.T("OK"), X = 0, Y = 2, IsDefault = true };
+        top.Add(n, ok);
+        ok.Accepted += (s, e) => top.RequestStop();
+        top.KeyDown += (s, e) => { if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; } };
+        Application.Run(top);
+        return;
+    }
+
+    var view = new InsightsView { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
+    var hint = new Label
+    {
+        Text = Lang.T("  j/k 移动 · a 归档 · x 删除 · Esc 返回  "),
+        X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1, TextAlignment = Alignment.Center
+    };
+    top.Add(view, hint);
+
+    void Rebuild()
+    {
+        var list = BuildInsights(dbPath, 30);
+        view.SetFeeds(list);
+        // 记录本次查看时间（供到期判定）
+        var s = LoadSettings();
+        s.LastInsightsAt = DateTime.Now.ToString("O");
+        SaveSettings(s);
+    }
+
+    try
+    {
+        Rebuild();
+        top.Initialized += (s, e) => view.SetFocus();
+        top.KeyDown += (s, e) =>
+        {
+            int fid = view.SelectedFeedId;
+            if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+            else if (e.KeyCode == KeyCode.A)
+            {
+                if (fid != 0) { AddTimestampForRealId(fid, dbPath); Rebuild(); }
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.X)
+            {
+                if (fid != 0)
+                {
+                    if (MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("Delete feed {0}? This cannot be undone!", fid), Lang.T("OK"), Lang.T("Cancel")) == 0)
+                    { DeleteFeedByRealId(fid, dbPath); Rebuild(); }
+                }
+                e.Handled = true;
+            }
+        };
+        Application.Run(top);
+    }
+    catch (Exception ex)
+    {
+        MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("报告页出错: {0}", ex.Message), Lang.T("OK"));
+    }
+}
+#pragma warning restore CS0618
+
 static class AiState
 {
     public static bool Warned = false;
@@ -6677,6 +7057,7 @@ static class Lang
         catch (FormatException) { return s; }
     }
 }
+
 
 // ══════════ AI 配置模型（ai_config.json，非敏感信息）═══════════
 class AiConfig
@@ -7395,8 +7776,10 @@ static class TelemetryService
         if (_buffer.Count >= 50) Flush();
     }
 
-    public static void RecordAiCall(string operation, string provider, string model, bool success, long durationMs)
-        => Record("ai_call", data: new { operation, provider, model, success, durationMs });
+    // 记录 AI 调用；articleId/sourceId 可选，用于把调用归因到具体文章/源（精细到文章与源）
+    public static void RecordAiCall(string operation, string provider, string model, bool success, long durationMs,
+                                    int? articleId = null, int? sourceId = null)
+        => Record("ai_call", articleId: articleId, sourceId: sourceId, data: new { operation, provider, model, success, durationMs });
 
     // 批量落库（best-effort；连续失败 → 本会话降级停用）
     static void Flush()
@@ -7525,6 +7908,217 @@ static class TelemetryService
         }
         catch { }
         return list;
+    }
+
+    // ── 阅读行为聚合（按源，窗口内）──
+    // 返回 FeedId → (opened, completed, skipped)；窗口按事件 timestamp 过滤；损坏/关闭时返回空
+    public static Dictionary<int, (long Opened, long Completed, long Skipped)> FeedReadingStats(int windowDays)
+    {
+        var map = new Dictionary<int, (long, long, long)>();
+        try
+        {
+            if (!IsEnabled) return map;
+            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = @"
+                SELECT source_id,
+                       SUM(CASE WHEN type = 'article_open' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN type = 'article_complete' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN type = 'article_skip' THEN 1 ELSE 0 END)
+                FROM telemetry_events
+                WHERE timestamp >= @cut AND source_id IS NOT NULL
+                GROUP BY source_id";
+            c.Parameters.AddWithValue("@cut", cutoff);
+            using var r = c.ExecuteReader();
+            while (r.Read())
+            {
+                int fid = r.GetInt32(0);
+                map[fid] = (r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    // ── AI 调用聚合（按源，窗口内）──
+    // 返回 FeedId → { llm (摘要/对话) 次数, embedding 次数, 成功数 }；全局（无源）不计入
+    public static Dictionary<int, (long Llm, long Embedding, long Success)> FeedAiCallStats(int windowDays)
+    {
+        var map = new Dictionary<int, (long, long, long)>();
+        try
+        {
+            if (!IsEnabled) return map;
+            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = @"
+                SELECT source_id,
+                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.operation') = 'llm' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.operation') = 'embedding' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.success') = 1 THEN 1 ELSE 0 END)
+                FROM telemetry_events
+                WHERE type = 'ai_call' AND timestamp >= @cut AND source_id IS NOT NULL
+                GROUP BY source_id";
+            c.Parameters.AddWithValue("@cut", cutoff);
+            using var r = c.ExecuteReader();
+            while (r.Read())
+            {
+                int fid = r.GetInt32(0);
+                map[fid] = (r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    // ── AI 调用全局统计（窗口内，含无源调用）──
+    // 返回 (总次数, 成功数, 失败数)；另按 operation 计数（llm/embedding/其他）
+    public static (long Total, long Success, long Fail, long Llm, long Embedding) GlobalAiCallStats(int windowDays)
+    {
+        try
+        {
+            if (!IsEnabled) return (0, 0, 0, 0, 0);
+            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = @"
+                SELECT COUNT(*),
+                       SUM(CASE WHEN json_extract(data_json, '$.success') = 1 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN json_extract(data_json, '$.success') = 0 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN json_extract(data_json, '$.operation') = 'llm' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN json_extract(data_json, '$.operation') = 'embedding' THEN 1 ELSE 0 END)
+                FROM telemetry_events
+                WHERE type = 'ai_call' AND timestamp >= @cut";
+            c.Parameters.AddWithValue("@cut", cutoff);
+            using var r = c.ExecuteReader();
+            if (r.Read())
+                return (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4));
+        }
+        catch { }
+        return (0, 0, 0, 0, 0);
+    }
+}
+
+// 报告数据行（卡片）
+class InsightsFeed
+{
+    public int FeedId { get; set; }
+    public string Title { get; set; } = "";
+    public string Schedule { get; set; } = "";
+    public long Active { get; set; }
+    public long Backlog { get; set; }
+    public long Opened { get; set; }
+    public long Completed { get; set; }
+    public long Skipped { get; set; }
+    public int UserLikes { get; set; }
+    public int AiLikes { get; set; }
+    public long LlmCalls { get; set; }
+    public long EmbeddingCalls { get; set; }
+    public string Health { get; set; } = "";
+    public string Action { get; set; } = "";
+    public string Basis { get; set; } = "";
+}
+
+// 应用设置
+class SipSettings
+{
+    public string InsightsInterval { get; set; } = "off";
+    public string LastInsightsAt { get; set; } = "";
+}
+
+// ══════════ 报告卡片视图（每源一张卡片，j/k 移动）═══════════
+class InsightsView : View
+{
+    public List<InsightsFeed> Feeds { get; private set; } = new();
+    public int Selected { get; private set; }
+    public event EventHandler? SelectionChanged;
+
+    public int SelectedFeedId => Selected < Feeds.Count ? Feeds[Selected].FeedId : 0;
+
+    public void SetFeeds(List<InsightsFeed> feeds)
+    {
+        Feeds = feeds;
+        Selected = Math.Clamp(Selected, 0, Math.Max(0, Feeds.Count - 1));
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+        SetNeedsDraw();
+    }
+
+    public void MoveTo(int delta)
+    {
+        if (Feeds.Count == 0) return;
+        int before = Selected;
+        Selected = Math.Clamp(Selected + delta, 0, Feeds.Count - 1);
+        if (Selected != before) { SelectionChanged?.Invoke(this, EventArgs.Empty); SetNeedsDraw(); }
+    }
+
+    // 卡片固定 6 行：标题 / 订阅积压 / 打开读完 / 点赞+AI调用 / 观察 / 分隔线
+    int CardHeight => 6;
+
+    List<string> CardLines(InsightsFeed x)
+    {
+        string rate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) + "%" : "—";
+        string health = x.Health == Lang.T("正常") ? "" : "  " + x.Health;
+        string ai = (x.LlmCalls > 0 || x.EmbeddingCalls > 0) ? $" · AI 摘要 {x.LlmCalls} 次" : "";
+        return new List<string>
+        {
+            $"[{x.FeedId}] {x.Title}{health}",
+            $"    订阅 {x.Active} 篇 · 未读积压 {x.Backlog}",
+            $"    打开 {x.Opened} · 读完 {x.Completed} · 完成率 {rate} · 跳过 {x.Skipped}",
+            $"    ♥ 你点赞 {x.UserLikes} · 🤖 AI 点赞 {x.AiLikes}{ai}",
+            $"    观察：{x.Action} —— {x.Basis}（由你决定）",
+            "──────────────────────"
+        };
+    }
+
+    protected override bool OnKeyDown(Key key)
+    {
+        if (Feeds.Count == 0) return false;
+        switch (key.KeyCode)
+        {
+            case KeyCode.CursorDown:
+            case KeyCode.J: MoveTo(1); return true;
+            case KeyCode.CursorUp:
+            case KeyCode.K: MoveTo(-1); return true;
+            case KeyCode.PageDown: MoveTo(Math.Max(1, Viewport.Height / CardHeight)); return true;
+            case KeyCode.PageUp: MoveTo(-Math.Max(1, Viewport.Height / CardHeight)); return true;
+            case KeyCode.Home: MoveTo(-Feeds.Count); return true;
+            case KeyCode.End: MoveTo(Feeds.Count); return true;
+            default: return false;
+        }
+    }
+
+    protected override bool OnDrawingContent(DrawContext? context)
+    {
+        int w = Viewport.Width, h = Viewport.Height;
+        SetAttribute(GetAttributeForRole(VisualRole.Normal));
+        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
+        if (Feeds.Count == 0) return true;
+
+        int cardTop = Math.Max(0, Selected * CardHeight - (h - CardHeight) / 2);
+        for (int i = 0; i < Feeds.Count; i++)
+        {
+            int top = i * CardHeight - cardTop;
+            if (top + CardHeight < 0 || top >= h) continue;
+            var lines = CardLines(Feeds[i]);
+            bool sel = i == Selected;
+            for (int k = 0; k < CardHeight; k++)
+            {
+                int sy = top + k;
+                if (sy < 0 || sy >= h) continue;
+                SetAttribute(sel && k == 0
+                    ? GetAttributeForRole(HasFocus ? VisualRole.Focus : VisualRole.Active)
+                    : GetAttributeForRole(sel ? VisualRole.Active : VisualRole.Normal));
+                string line = (sel && k == 0 ? "▶ " : "  ") + (k < lines.Count ? lines[k] : "");
+                int cols = line.GetColumns();
+                if (cols > w) line = line[..Math.Max(0, w - 1)] + "…";
+                AddStr(0, sy, line);
+            }
+        }
+        return true;
     }
 }
 

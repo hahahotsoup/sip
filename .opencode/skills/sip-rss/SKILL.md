@@ -75,6 +75,8 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --likes [--json]` | 列出所有标记文章 |
 | `sip --today [--json] [--refresh] [--quick N]` | 今日阅读清单（规则式选文，上限=目标 5 篇；含预估时长与理由）。**一天固定一碗**（当日缓存，新文章当天不自动进清单）；`--refresh` 显式重新生成；要当天新内容可直接 `--grep`/`--show`；开启 telemetry 后可跟踪完成进度 |
 | `sip telemetry status/show/enable/disable/clear/export` | 本地阅读遥测（**默认关闭**；仅本地、不上传；可查看/关闭/删除/导出） |
+| `sip --insights [--window N d] [--json]` | 阅读情况报告（**需遥测开启**）：每源卡片展示 打开/读完/完成率/跳过/♥🤖点赞/AI调用次数/健康/观察提示；**AI 不替你决定**，只列事实+规则观察，决定在你（或邀请 Agent 协助） |
+| `sip --insights-interval <7d\|30d\|off>` | 设定报告定时提醒间隔（存 sip_settings.json，默认 off）；到期且遥测开启时 CLI 末尾提醒、TUI 启动自动弹出报告页；TUI 里按 `P` 或命令 `report` 随时打开 |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
@@ -188,6 +190,7 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 - **来源健康**：`-l`/`--feed-info` 可能显示「⚠ 长期未更新」「✗ 失败 N 次」——这是**长期数据**，不代表命令出错；源刚加/刚更新过通常显示正常。
 - **内容质量**：`-l N` 里 `[摘要]`/`[无正文]` 标记、JSON 的 `quality` 字段（`full`/`short`/`empty`）是**长期积累**的结果；`short` 的文章可以建议用户用 `--fulltext` 抓全文。
 - **阅读进度**：`reading_progress.json` 记录滚动位置，重开文章可能提示「按 Space 跳回」——TUI 行为，AI 用 `--show ... --json` 读取不受影响。
+- **阅读报告（`--insights`）**：只有在遥测开启（`sip telemetry enable`）后才可用；报告里的打开/读完/完成率/AI 调用次数来自遥测，♥🤖 点赞来自 signals（无需遥测）。**报告只呈现事实与规则观察，AI/程序不替用户做决定**；用户可据此在报告页按 a/x 归档/删除订阅源，或邀请 Agent 协助讨论。遥测会把 AI 调用（摘要/搜索/嵌入）按文章/源归因，报告可按源统计。报告间隔用 `--insights-interval` 设定，到期自动提醒。
 - **全文/向量缓存**：`fulltext/`、`vecs.json` 会随使用增长，超出阈值自动清理；如需强制清理用 `--purge-fulltext`。
 
 ## 交互说明

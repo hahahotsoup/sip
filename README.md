@@ -42,6 +42,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 | 📖 **辅助阅读** | TUI 文件夹视图、沉浸阅读、全文抓取、Markdown 渲染、今日哈汤 |
 | 🤖 **AI 友好** | 语义搜索（RAG）、LLM 摘要、统一 JSON、结构化退出码 |
 | 🕊️ **隐私** | 本地遥测苏暖泉（Sumenia）默认关闭、仅本地保存、绝不自动上传 |
+| 📈 **阅读情况报告** | `sip --insights` 按源呈现阅读事实（打开/读完/完成率/♥🤖点赞/AI调用次数/健康），**决定在你**；可设定时提醒 |
 
 > 完整功能清单与每项细节，见 [Wiki · 功能](https://sip.hotsouprealm.top/功能/)。
 
@@ -56,6 +57,9 @@ sip -u 1                # 更新 1 号源
 sip --show 12           # 全屏阅读
 sip --search "RAG"      # 语义搜索（先 sip --init 配置 AI）
 sip --today             # 今日哈汤
+sip telemetry enable    # 开启本地遥测（仅本地；开启后才能用 --insights）
+sip --insights          # 阅读情况报告（按源事实，决定在你）
+sip --insights-interval 7d   # 每 7 天提醒一次报告
 ```
 
 完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.hotsouprealm.top/使用说明/命令行.html)。
