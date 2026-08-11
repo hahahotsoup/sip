@@ -142,29 +142,38 @@ sip 内置一个**本地阅读遥测**（事件层），用于未来改进内容
 ---
 
 ## 快速开始
-### ai skill
-代码里的https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss 内含一份skill，直接喂给ai即可
 
-年年说，老有人忘，干脆放文首（无语/(ㄒoㄒ)/~~）
+### 🍵 直接下载（推荐）
 
-### 环境要求
+去 [Releases](https://github.com/hahahotsoup/sipintui/releases) 下载最新版**单文件可执行程序**（无需解压、无需一堆 dll）：
 
-- [.NET 10.0 SDK](https://dotnet.microsoft.com/download)
+| 平台 | 文件 |
+|------|------|
+| Windows x64 | `sip-win-x64.exe` |
+| Linux x64 | `sip-linux-x64` |
+| macOS Intel / Apple Silicon | `sip-osx-x64` / `sip-osx-arm64` |
 
-### 编译运行（单文件）
-
-把源码直接发布成**一个单文件可执行程序**（`sip.exe` / `sip`），带上语言文件就能跑，不需要带一堆 dll：
+下载后直接运行：
 
 ```bash
-git clone https://github.com/hahahotsoup/rssreader-core.git
-cd rssreader-core
+./sip.exe            # Windows：进入 TUI（首次启动自动创建 readwithhotsoup/ 数据目录）
+./sip.exe --help     # 或直接用 CLI
+```
+
+- **单文件 + 自带官方翻译**：语言文件已内嵌进 exe，数据目录缺失时自动恢复，只拷一个 exe 也能跑
+- **框架依赖**：需要目标机预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)（体积小）；想免装运行时用 self-contained 自行发布（见下）
+- **数据目录**：首次运行在 exe 旁自动创建 `readwithhotsoup/`——SQLite 数据库 `rss.db`、AI 配置、语言文件、全文缓存、阅读进度、遥测等**所有数据都在这**，备份/迁移整个文件夹拷走即可
+
+### 从源码构建（可选）
+
+```bash
+git clone https://github.com/hahahotsoup/sipintui.git
+cd sipintui
 dotnet publish -c Release -r win-x64 --self-contained false \
   -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugSymbols=false -o publish/win-x64
 ./publish/win-x64/sip.exe          # 进入 TUI 界面（Windows）
 ./publish/win-x64/sip.exe --help   # 或直接用 CLI
 ```
-
-发布产物只有**一个 `sip.exe`**（单文件可执行程序，框架依赖，目标机需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)，体积很小）。
 
 > **语言文件已内嵌**：`zh-CN.json` / `en-US.json` 等官方翻译会打进 exe 内部——就算你把整个发布目录只拷走一个 exe，首次（或每次数据目录缺失时）启动都会**自动恢复**默认语言，界面仍是中文。发布目录里的外置 `languages/` 文件夹是**给用户定制翻译用的**（改完即生效，内置副本不会覆盖你的修改）。
 
@@ -180,7 +189,9 @@ dotnet publish -c Release -r win-x64 --self-contained false \
 
 > **一次性发布全部平台**：执行 `powershell -ExecutionPolicy Bypass -File publish.ps1`，会为 Windows x64 / Linux x64 / macOS Intel / macOS Apple Silicon 各生成一个单文件可执行程序，输出到 `publish/<平台>/`。
 
-> **数据目录**：无论哪种方式编译，**首次运行**都会在可执行文件旁自动创建 **`readwithhotsoup/`** 文件夹——SQLite 数据库 `rss.db`、AI 配置 `ai_config.json`、语言文件 `languages/`、全文缓存 `fulltext/`、阅读进度 `reading_progress.json` 等**所有数据都放在这里**。备份/迁移时整个文件夹拷走即可。
+### ai skill
+
+代码里的 [https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss](https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss) 内含一份 skill，直接喂给 AI 即可。
 
 ---
 
