@@ -2550,8 +2550,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             var dlg = new Dialog { Title = " " + Lang.T("Sumenia · 苏暖泉") + " ", Width = 78, Height = 16 };
             var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 10, ReadOnly = true, CanFocus = false, WordWrap = true };
             txt.Text = Lang.T("Sumenia（苏暖泉）是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用情况，用于未来改进内容筛选。\n\nSumenia 默认关闭。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你可以随时查看、关闭、删除或导出。");
-            var enable = new Button { Text = Lang.T("开启 Sumenia"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
-            var keep = new Button { Text = Lang.T("保持关闭"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
+            var enable = new Button { Text = Lang.T("与 Sumenia 一起阅读"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
+            var keep = new Button { Text = Lang.T("我暂时不需要"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
             dlg.Add(txt, enable, keep);
             bool enabled = false;
             enable.Accepted += (s, e) => { enabled = true; dlg.RequestStop(); };
