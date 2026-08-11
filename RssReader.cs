@@ -496,6 +496,249 @@ void SaveReadingProgress(Dictionary<long, int> map)
     catch { /* 保存失败不影响使用 */ }
 }
 
+// ══════════ 来源健康状态（sidecar 文件，零改表）══════════
+string FeedHealthPath() => Path.Combine(dataDir, "feed_health.json");
+
+Dictionary<int, (int FailCount, string LastError, string LastOkAt)> LoadFeedHealth()
+{
+    try
+    {
+        var d = JsonSerializer.Deserialize<Dictionary<string, FeedHealthEntry>>(File.ReadAllText(FeedHealthPath()));
+        return d?.ToDictionary(kv => int.Parse(kv.Key), kv => (kv.Value.FailCount, kv.Value.LastError, kv.Value.LastOkAt)) ?? new();
+    }
+    catch { return new(); }
+}
+
+void SaveFeedHealth(Dictionary<int, (int FailCount, string LastError, string LastOkAt)> map)
+{
+    try
+    {
+        File.WriteAllText(FeedHealthPath(), JsonSerializer.Serialize(
+            map.ToDictionary(kv => kv.Key.ToString(), kv => new FeedHealthEntry { FailCount = kv.Value.FailCount, LastError = kv.Value.LastError, LastOkAt = kv.Value.LastOkAt }),
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+void RecordFeedFailure(int feedId, string error)
+{
+    var map = LoadFeedHealth();
+    map.TryGetValue(feedId, out var e);
+    map[feedId] = (e.FailCount + 1, error, e.LastOkAt);
+    SaveFeedHealth(map);
+}
+
+void RecordFeedSuccess(int feedId)
+{
+    var map = LoadFeedHealth();
+    map[feedId] = (0, "", DateTime.Now.ToString("O"));
+    SaveFeedHealth(map);
+}
+
+// 长期未更新判定：距上次拉取超过「计划间隔 × 3」；无计划/手动按 30 天
+bool IsFeedStale(string schedule, DateTime lastChecked, DateTime now)
+{
+    var s = TryParseSchedule(schedule);
+    if (s == null || s.IsManual) return (now - lastChecked).TotalDays > 30;
+    if (s.Interval is TimeSpan iv) return now - lastChecked > iv * 3;
+    if (s.IsDaily) return (now - lastChecked).TotalHours > 72;
+    if (s.IsWeekly) return (now - lastChecked).TotalDays > 21;
+    return (now - lastChecked).TotalDays > 30;
+}
+
+// 来源健康状态：正常 / ⚠ 长期未更新 / ✗ 失败 N 次
+string FeedHealthText(int feedId, string schedule, DateTime? lastChecked, DateTime now)
+{
+    var map = LoadFeedHealth();
+    map.TryGetValue(feedId, out var e);
+    if (e.FailCount > 0) return Lang.T("✗ 失败 {0} 次", e.FailCount);
+    if (lastChecked is DateTime lc && IsFeedStale(schedule, lc, now)) return Lang.T("⚠ 长期未更新");
+    return Lang.T("正常");
+}
+
+// 从 Feeds.RawXml 解析来源类型与作者（Atom author / RSS managingEditor / dc:creator）
+(string Type, string Author) ParseFeedMeta(string rawXml)
+{
+    string type = "RSS", author = "";
+    try
+    {
+        var doc = new System.Xml.XmlDocument();
+        doc.LoadXml(rawXml);
+        var nsm = new System.Xml.XmlNamespaceManager(doc.NameTable);
+        nsm.AddNamespace("atom", "http://www.w3.org/2005/Atom");
+        nsm.AddNamespace("dc", "http://purl.org/dc/elements/1.1/");
+        var root = doc.DocumentElement;
+        if (root != null && root.LocalName == "feed")
+        {
+            type = "Atom";
+            author = root.SelectSingleNode("atom:author/atom:name", nsm)?.InnerText?.Trim() ?? "";
+        }
+        else
+        {
+            author = root?.SelectSingleNode("channel/managingEditor")?.InnerText?.Trim() ?? "";
+            if (string.IsNullOrEmpty(author))
+                author = root?.SelectSingleNode("channel/dc:creator", nsm)?.InnerText?.Trim() ?? "";
+        }
+    }
+    catch { }
+    return (type, author);
+}
+
+// CLI：sip --feed-info <编号> [--json] —— 来源身份与健康状态
+void FeedInfoCli(string[] args, string dbPath)
+{
+    if (args.Length < 1 || !int.TryParse(args[0], out int dn))
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --feed-info <feed-number> [--json]")); return;
+    }
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    int realId = GetRealId(dn, dbPath);
+    if (realId == 0) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number {0} not found", dn), json: json); return; }
+
+    string title = "", link = "", url = "", rawXml = "", schedule = "", lastChecked = "", lastArticle = "";
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Title, Link, FeedUrl, RawXml, Schedule, LastCheckedAt FROM Feeds WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", realId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number {0} not found", dn), json: json); return; }
+        title = r.GetString(0);
+        link = r.IsDBNull(1) ? "" : r.GetString(1);
+        url = r.IsDBNull(2) ? "" : r.GetString(2);
+        rawXml = r.IsDBNull(3) ? "" : r.GetString(3);
+        schedule = r.IsDBNull(4) ? "" : r.GetString(4);
+        lastChecked = r.IsDBNull(5) ? "" : r.GetString(5);
+    }
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT MAX(PublishDate) FROM Items WHERE FeedId = @id AND Status = 'active'";
+        cmd.Parameters.AddWithValue("@id", realId);
+        var o = cmd.ExecuteScalar();
+        lastArticle = o == null || o == DBNull.Value ? "" : o.ToString()!;
+    }
+
+    DateTime? lc = lastChecked.Length > 0 ? TryParseIso(lastChecked) : null;
+    var (type, author) = ParseFeedMeta(rawXml);
+    string status = FeedHealthText(realId, schedule, lc, DateTime.Now);
+    var health = LoadFeedHealth();
+    health.TryGetValue(realId, out var h);
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                id = realId,
+                title,
+                type,
+                author,
+                link,
+                feedUrl = url,
+                schedule,
+                lastChecked = lc,
+                lastArticle,
+                status,
+                failCount = h.FailCount,
+                lastError = h.LastError
+            }
+        });
+        return;
+    }
+
+    Console.WriteLine(Lang.T("来源 [编号 {0}] {1}", dn, CjkSpace(title)));
+    Console.WriteLine("─────────────────────");
+    Console.WriteLine(Lang.T("  名称 name       : {0}", CjkSpace(title)));
+    Console.WriteLine(Lang.T("  类型 type       : {0}", type));
+    if (author.Length > 0) Console.WriteLine(Lang.T("  作者 author     : {0}", CjkSpace(author)));
+    if (link.Length > 0) Console.WriteLine(Lang.T("  官网 site       : {0}", link));
+    Console.WriteLine(Lang.T("  Feed url        : {0}", url));
+    Console.WriteLine(Lang.T("  上次更新 updated : {0}", lc is DateTime d ? d.ToString("yyyy-MM-dd HH:mm") : Lang.T("从未")));
+    if (lastArticle.Length > 0) Console.WriteLine(Lang.T("  最近文章 latest : {0}", lastArticle));
+    Console.WriteLine(Lang.T("  状态 status     : {0}", status));
+}
+
+// ══════════ OPML 导入导出（RSS 标准，零改表）══════════
+string XmlEscape(string s) => s.Replace("&", "&amp;").Replace("\"", "&quot;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+// CLI：sip --export-opml [feeds.opml]
+void ExportOpmlCli(string arg, string dbPath)
+{
+    string file = string.IsNullOrWhiteSpace(arg) ? "feeds.opml" : arg;
+    var feeds = new List<(string Title, string Url)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Title, FeedUrl FROM Feeds ORDER BY Id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            feeds.Add((r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+    }
+
+    var sb = new StringBuilder();
+    sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    sb.AppendLine("<opml version=\"2.0\">");
+    sb.AppendLine("  <head><title>sip feeds</title></head>");
+    sb.AppendLine("  <body>");
+    foreach (var (t, u) in feeds)
+        if (!string.IsNullOrWhiteSpace(u))
+            sb.AppendLine($"    <outline type=\"rss\" text=\"{XmlEscape(t)}\" title=\"{XmlEscape(t)}\" xmlUrl=\"{XmlEscape(u)}\"/>");
+    sb.AppendLine("  </body>");
+    sb.AppendLine("</opml>");
+    File.WriteAllText(file, sb.ToString());
+    Console.WriteLine(Lang.T("Exported {0} feeds to {1}", feeds.Count(f => f.Url.Length > 0), file));
+}
+
+bool FeedUrlExists(string dbPath, string url)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM Feeds WHERE FeedUrl = @u";
+        cmd.Parameters.AddWithValue("@u", url);
+        return Convert.ToInt64(cmd.ExecuteScalar()) > 0;
+    }
+    catch { return false; }
+}
+
+// CLI：sip --import-opml <file.opml>（逐条下载添加，已存在的跳过）
+void ImportOpmlCli(string file, string dbPath)
+{
+    if (!File.Exists(file)) { SetExit(); Console.WriteLine(Lang.T("File not found: {0}", file)); return; }
+    var urls = new List<string>();
+    try
+    {
+        var doc = new System.Xml.XmlDocument();
+        doc.Load(file);
+        var nodes = doc.SelectNodes("//outline[@xmlUrl]");
+        if (nodes != null)
+            foreach (System.Xml.XmlNode n in nodes)
+            {
+                string u = n.Attributes?["xmlUrl"]?.Value ?? "";
+                if (!string.IsNullOrWhiteSpace(u)) urls.Add(u.Trim());
+            }
+    }
+    catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("Parse OPML failed: {0}", ex.Message)); return; }
+
+    if (urls.Count == 0) { Console.WriteLine(Lang.T("No feeds found in the OPML file")); return; }
+    int ok = 0, skip = 0, fail = 0;
+    foreach (var u in urls)
+    {
+        if (FeedUrlExists(dbPath, u)) { skip++; continue; }
+        try { DownloadAndSaveToDb(u, dbPath, interactive: false).Wait(); ok++; }
+        catch { fail++; }
+    }
+    Console.WriteLine(Lang.T("Import done: {0} added, {1} skipped (already exist), {2} failed", ok, skip, fail));
+}
+
 // ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
@@ -529,17 +772,25 @@ async Task RunCli(string[] args, string dbPath)
 
     if (cmd is "-l" or "--list")
     {
-        if (args.Length >= 2)
+        bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+        // 找第一个非 flag 的参数作为编号（-l --json 或 -l 1 --json 都能用）
+        var numArg = args.Skip(1).FirstOrDefault(a => !a.StartsWith("--"));
+        if (numArg != null)
         {
             // -l 后面带编号 → 列出该源的文章
-            if (!int.TryParse(args[1], out int lNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
+            if (!int.TryParse(numArg, out int lNum)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
             int feedRealId = GetRealId(lNum, dbPath);
-            if (feedRealId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
-            ListArticlesFromDb(feedRealId, lNum, dbPath);
+            if (feedRealId == 0)
+            {
+                if (json) ReportError("FEED_NOT_FOUND", Lang.T("Feed number not found"), json: true);
+                else { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); }
+                return;
+            }
+            ListArticlesFromDb(feedRealId, lNum, dbPath, json);
         }
         else
         {
-            ListFeedsFromDb(dbPath);
+            ListFeedsFromDb(dbPath, json);
         }
         return;
     }
@@ -587,12 +838,16 @@ async Task RunCli(string[] args, string dbPath)
         case "--purge-fulltext":
             PurgeFulltextCli(args.Length > 1 ? args[1] : "", dbPath);
             return;
+        case "--export-opml":
+            ExportOpmlCli(args.Length > 1 ? args[1] : "", dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
     bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
                     or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep"
-                    or "--versions" or "--history" or "--fulltext" or "--diff" or "--export";
+                    or "--versions" or "--history" or "--fulltext" or "--diff" or "--export"
+                    or "--feed-info" or "--import-opml";
     if (args.Length < 2)
     {
         if (!needsArg) { SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
@@ -633,7 +888,7 @@ async Task RunCli(string[] args, string dbPath)
             FulltextCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--versions" or "--history":
-            ListVersionsCli(args[1], dbPath);
+            ListVersionsCli(args[1], dbPath, args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase)));
             break;
         case "--diff":
             if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --diff <article-id> [vA vB] [--json]")); return; }
@@ -643,8 +898,16 @@ async Task RunCli(string[] args, string dbPath)
             if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --export <article-id | feed:number | all> [out.md | dir] [--yes]")); return; }
             ExportCli(args.Skip(1).ToArray(), dbPath);
             break;
+        case "--feed-info":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --feed-info <feed-number> [--json]")); return; }
+            FeedInfoCli(args.Skip(1).ToArray(), dbPath);
+            break;
+        case "--import-opml":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --import-opml <file.opml>")); return; }
+            ImportOpmlCli(args[1], dbPath);
+            break;
         case "--summary":
-            SummaryCli(args[1], dbPath).Wait();
+            SummaryCli(args[1], dbPath, args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase))).Wait();
             break;
         default:
             SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd));
@@ -670,10 +933,12 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --export <id | feed:N | all> [out.md|dir]  export article(s) as Markdown (--yes to skip confirm)"));
     Console.WriteLine(Lang.T("  --fulltext <id>  fetch the article's full text to a local cache (--yes skip consent/confirm; --json)"));
     Console.WriteLine(Lang.T("  --purge-fulltext [id]  clear the full-text cache"));
+    Console.WriteLine(Lang.T("  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)"));
+    Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
-    Console.WriteLine(Lang.T("  --sync [--feed N]       update only 'due' feeds (lists last/next times)"));
+    Console.WriteLine(Lang.T("  --sync [--feed N] [--json]  update only 'due' feeds (lists last/next times)"));
     Console.WriteLine(Lang.T("  --update-all            force update all feeds (same as TUI F6)"));
     Console.WriteLine(Lang.T("  --schedule <id> <expr>  set a feed's update schedule, e.g. 30m / 1h / 7d / daily@10:00 / weekly@Mon 08:00 / manual"));
     Console.WriteLine(Lang.T("  -l shows each feed's 'schedule · last · next'"));
@@ -685,7 +950,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --reindex        re-embed after changing the embedding model"));
     Console.WriteLine(Lang.T("  --search <query> [--feed number] [--threshold 0.7] [--json] semantic search (all feeds without --feed)"));
     Console.WriteLine(Lang.T("  --grep <keyword>   full-text search (title/content/summary, no AI needed); outputs id+title+count and ±50-char snippets, bounded (--limit N / --max-snippets N / --json / --full)"));
-    Console.WriteLine(Lang.T("  --summary <id>   summarize one article; use feed:<number> for all articles of a feed"));
+    Console.WriteLine(Lang.T("  --summary <id>   summarize one article; use feed:<number> for all articles of a feed (--json)"));
     Console.WriteLine(Lang.T("  --summary-all    summarize all articles without a summary"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Examples:"));
@@ -820,8 +1085,20 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             CanFocus = false,
             Visible = true
         };
+        // —— 阅读进度记忆（按文章记住滚动位置；文件存储，零改表）——
+        // 变量声明必须在 UpdateStats 之前（局部变量不能前向引用）
+        var progressMap = LoadReadingProgress();
+        long _currentArticleId = 0;
+        int _savedScrollY = -1;   // 打开文章时若检测到历史进度，存这里；-1 = 无
+
         void UpdateStats()
         {
+            // 检测到阅读进度时，状态行优先显示跳转提示（标题栏会截断，这里更显眼）
+            if (_savedScrollY > 0)
+            {
+                statsLabel.Text = Lang.T("▷ 按 Space 跳回上次位置");
+                return;
+            }
             int feeds = 0, articles = 0;
             try
             {
@@ -844,15 +1121,35 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         bool _syncing = false;       // 到期源自动同步进行中（防重入）
         int linkNavIndex = 0;
 
-        // —— 阅读进度记忆（按文章记住滚动位置；文件存储，零改表）——
-        var progressMap = LoadReadingProgress();
-        long _currentArticleId = 0;
-        int _pendingScrollY = -1;   // 等正文布局完成后恢复的滚动位置
+        // —— 阅读进度：保存 / 跳转 / 退出（函数必须在变量声明之后）——
         void SaveCurrentScroll()
         {
             if (_currentArticleId == 0) return;
             try { progressMap[_currentArticleId] = contentView.Viewport.Y; }
             catch { }
+        }
+        // 跳到上次阅读位置（按 Space 触发）：对进度做边界校验，绝不跳到负数或超出正文范围
+        void JumpToSaved()
+        {
+            if (_savedScrollY <= 0) return;
+            try
+            {
+                int maxY = Math.Max(0, contentView.GetContentHeight() - contentView.Viewport.Height);
+                int y = Math.Clamp(_savedScrollY, 0, maxY);
+                contentView.ScrollVertical(y);
+                _savedScrollY = -1;
+                SaveCurrentScroll();
+                UpdateStats();
+                UpdateLinkNavTitle();
+            }
+            catch { _savedScrollY = -1; }
+        }
+        // 退出前保存并落盘（必须在 RequestStop 之前调，否则 Viewport 已归 0）
+        void QuitApp()
+        {
+            SaveCurrentScroll();
+            SaveReadingProgress(progressMap);
+            top.RequestStop();
         }
 
         // 状态栏快捷操作（全键盘，键位对齐外部 CLI）
@@ -869,7 +1166,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             new Shortcut(Key.S, Lang.T("Search"), () => SearchDialog(), Lang.T("Semantic search (same as CLI --search)")),
             new Shortcut(Key.Y, Lang.T("Summary"), () => SummarizeSelected(), Lang.T("Summarize current article (same as CLI --summary)")),
             new Shortcut(Key.G, Lang.T("Overview"), () => ToggleContentMode(), Lang.T("Toggle content/overview")),
-            new Shortcut(Key.Q, Lang.T("Quit"), () => top.RequestStop(), Lang.T("Exit program"))
+                new Shortcut(Key.Q, Lang.T("Quit"), QuitApp, Lang.T("Exit program"))
         });
 
         top.Add(tree, vDivider, contentView, cmdLabel, cmdBar, statsLabel, statusBar);
@@ -929,20 +1226,20 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 string stats = string.Join("，", parts);
                 feeds.Add(new TuiNode { IsFeed = true, FeedId = id, Title = $"{CjkSpace(title)} {stats}" });
             }
-            tree.SetFeeds(feeds);
-            tree.ExpandAll();
+            tree.SetFeeds(feeds);   // 默认折叠；用户展开的源在 SetFeeds 里会保留
             UpdateStats();
         }
 
         void ShowSelectedContent()
         {
-            UpdateStats();
             SaveCurrentScroll();                       // 先记住上一篇的位置
             var n = tree.SelectedObject;
-            if (n == null || n.IsFeed) { contentView.Text = ""; _currentArticleId = 0; return; }
+            if (n == null || n.IsFeed) { contentView.Text = ""; _currentArticleId = 0; _savedScrollY = -1; UpdateStats(); return; }
             contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth(), showFetchHint: true);
             _currentArticleId = n.ItemId;
-            _pendingScrollY = progressMap.TryGetValue(n.ItemId, out int y) ? y : -1;
+            // 检测到历史进度 → 提示（不自动跳，等用户按 Space）；非法值直接忽略
+            _savedScrollY = progressMap.TryGetValue(n.ItemId, out int y) && y > 0 ? y : -1;
+            UpdateStats();                             // 有进度时状态行显示跳转提示
             UpdateLinkNavTitle();
         }
 
@@ -1346,16 +1643,6 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         // 焦点变化时刷新正文标题栏的 ◉ 焦点标记（阅读区聚焦不再整块变色，靠它指示）
         contentView.HasFocusChanged += (s, e) => UpdateLinkNavTitle();
 
-        // 正文内容尺寸就绪后再恢复滚动位置（直接 ScrollVertical 会因内容未布局被夹到 0）
-        contentView.ContentSizeChanged += (s, e) =>
-        {
-            if (_pendingScrollY > 0)
-            {
-                try { contentView.ScrollVertical(_pendingScrollY); } catch { }
-                _pendingScrollY = -1;
-            }
-        };
-
         // 鼠标点击正文中的链接直接打开
         contentView.LinkClicked += (s, e) =>
         {
@@ -1368,10 +1655,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         tree.KeyDown += (s, e) =>
         {
             var n = tree.SelectedObject;
-            if (e.KeyCode == KeyCode.Enter || e.KeyCode == KeyCode.L)
+            if (e.KeyCode == KeyCode.Enter || e.KeyCode == KeyCode.L || e.KeyCode == KeyCode.Space)
             {
                 if (n != null && n.IsFeed) tree.Toggle(n);
-                else contentView.SetFocus();
+                else contentView.SetFocus();   // Space：直接跳到正文页
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.CursorRight)
@@ -1394,7 +1681,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 tree.MovePageUp();
                 e.Handled = true;
             }
-            else if (e.KeyCode == KeyCode.PageDown || e.KeyCode == KeyCode.Space)
+            else if (e.KeyCode == KeyCode.PageDown)
             {
                 tree.MovePageDown();
                 e.Handled = true;
@@ -1443,24 +1730,29 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     break;
                 case KeyCode.CursorUp:
                 case KeyCode.K:
+                    if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }   // 手动滚动 → 撤掉跳转提示
                     if (linkNavMode) { CycleLink(-1); }
-                    else contentView.ScrollVertical(-1);
+                    else { contentView.ScrollVertical(-1); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.CursorDown:
                 case KeyCode.J:
+                    if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
                     if (linkNavMode) { CycleLink(1); }
-                    else contentView.ScrollVertical(1);
+                    else { contentView.ScrollVertical(1); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.PageUp:
                 case KeyCode.B:
+                    if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
                     contentView.ScrollVertical(-6);
+                    SaveCurrentScroll();
                     e.Handled = true;
                     break;
                 case KeyCode.PageDown:
                 case KeyCode.Space:
-                    contentView.ScrollVertical(6);
+                    if (_savedScrollY > 0) { JumpToSaved(); }   // 有历史进度 → Space 跳回
+                    else { contentView.ScrollVertical(6); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.Enter:
@@ -1508,13 +1800,17 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     else if (e.IsCtrl && e.KeyCode == (KeyCode.D | KeyCode.CtrlMask))
                     {
                         // Ctrl+D：半页向下（vim 习惯）
+                        if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
                         contentView.ScrollVertical(3);
+                        SaveCurrentScroll();
                         e.Handled = true;
                     }
                     else if (e.IsCtrl && e.KeyCode == (KeyCode.U | KeyCode.CtrlMask))
                     {
                         // Ctrl+U：半页向上（vim 习惯）
+                        if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
                         contentView.ScrollVertical(-3);
+                        SaveCurrentScroll();
                         e.Handled = true;
                     }
                     else if (e.KeyCode == KeyCode.G && !e.IsCtrl)
@@ -1621,7 +1917,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
             switch (cmd)
             {
                 case "q" or "quit" or "exit":
-                    top.RequestStop();
+                    QuitApp();
                     return;
                 case "h" or "help":
                     ShowHelpDialog();
@@ -1752,7 +2048,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 new Shortcut(Key.S, Lang.T("Search"), () => SearchDialog(), Lang.T("Semantic search (same as CLI --search)")),
                 new Shortcut(Key.Y, Lang.T("Summary"), () => SummarizeSelected(), Lang.T("Summarize current article (same as CLI --summary)")),
                 new Shortcut(Key.G, Lang.T("Overview"), () => ToggleContentMode(), Lang.T("Toggle content/overview")),
-                new Shortcut(Key.Q, Lang.T("Quit"), () => top.RequestStop(), Lang.T("Exit program"))
+            new Shortcut(Key.Q, Lang.T("Quit"), QuitApp, Lang.T("Exit program"))
             });
             top.Remove(statusBar);
             statusBar = sb;
@@ -1977,8 +2273,8 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         }
 
         RebuildTree();
-        tree.ExpandAll();
-        if (preselectItemId != 0) tree.SelectItem(preselectItemId);
+        // 默认折叠；从 --show 按 W 进入时才展开并定位到原文章
+        if (preselectItemId != 0) { tree.ExpandAll(); tree.SelectItem(preselectItemId); }
         tree.SetFocus();
 
         // —— 到期源自动同步 ——
@@ -2035,7 +2331,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         });
 
         Application.Run(top);
-        SaveCurrentScroll();
+        // 退出时 progressMap 已由滚动时/QuitApp 实时更新；这里只落盘，不再重读 Viewport（已归 0）
         SaveReadingProgress(progressMap);
         return 0;
     }
@@ -2194,7 +2490,9 @@ void ShowFeedManager(string dbPath)
                 string last = r.IsDBNull(3) ? "" : r.GetString(3);
                 int active = r.GetInt32(4); int arch = r.GetInt32(5);
                 string s = (string.IsNullOrWhiteSpace(sched) || sched.Equals("manual", StringComparison.OrdinalIgnoreCase)) ? Lang.T("manual") : sched;
-                string line = $"[{id}] {CjkSpace(title)}  · {s} · {Lang.T("last")} {last} · {active}/{arch}";
+                string healthText = FeedHealthText(id, sched, last.Length > 0 ? TryParseIso(last) : null, DateTime.Now);
+                string healthMark = healthText == Lang.T("正常") ? "" : " " + healthText;
+                string line = $"[{id}] {CjkSpace(title)}  · {s} · {Lang.T("last")} {last} · {active}/{arch}{healthMark}";
                 rows.Add((id, line));
             }
         }
@@ -2837,9 +3135,14 @@ async Task UpdateFeed(int displayNum, string dbPath)
 
     if (IsArchived(title)) { SetExit(); Console.WriteLine(Lang.T("{0} is archived and cannot be updated", title)); return; }
 
-    try { await DownloadAndSaveToDb(url, dbPath); Console.WriteLine(Lang.T("Update complete")); }
-    catch (TaskCanceledException) { ReportError("NETWORK_ERROR", Lang.T("Download timed out; check your network or the URL"), Lang.T("Check your network connection or the URL")); }
-    catch (HttpRequestException ex) { ReportError("NETWORK_ERROR", Lang.T("Network request failed, the URL may be dead"), Lang.T("Check the URL or your network connection"), ex.Message); }
+    try
+    {
+        await DownloadAndSaveToDb(url, dbPath);
+        RecordFeedSuccess(realId);
+        Console.WriteLine(Lang.T("Update complete"));
+    }
+    catch (TaskCanceledException) { RecordFeedFailure(realId, "timeout"); ReportError("NETWORK_ERROR", Lang.T("Download timed out; check your network or the URL"), Lang.T("Check your network connection or the URL")); }
+    catch (HttpRequestException ex) { RecordFeedFailure(realId, ex.Message); ReportError("NETWORK_ERROR", Lang.T("Network request failed, the URL may be dead"), Lang.T("Check the URL or your network connection"), ex.Message); }
     catch (SqliteException ex) { SetExit(); Console.WriteLine(Lang.T("Database error: {0}", ex.Message)); }
     catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("Unknown error: {0}", ex.Message)); }
 }
@@ -2910,15 +3213,16 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
     Console.WriteLine(Lang.T("Feed {0} update schedule set: {1}", dn, hint));
 }
 
-// --sync：只更新到期的订阅源（可 --feed N 限定单个源）；输出每个源的 上次/下次
+// --sync：只更新到期的订阅源（可 --feed N 限定单个源）；输出每个源的 上次/下次；--json 结构化
 async Task SyncCli(string[] extra, string dbPath)
 {
+    bool json = extra.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
     int? feedReal = null;
     for (int i = 0; i < extra.Length; i++)
         if (extra[i] == "--feed" && i + 1 < extra.Length && int.TryParse(extra[++i], out int f))
             feedReal = GetRealId(f, dbPath);
 
-    if (feedReal.HasValue && feedReal.Value == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
+    if (feedReal.HasValue && feedReal.Value == 0) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number not found"), json: json); return; }
 
     var now = DateTime.Now;
     var due = feedReal.HasValue
@@ -2940,7 +3244,9 @@ async Task SyncCli(string[] extra, string dbPath)
             DateTime? lc = r.IsDBNull(1) ? null : TryParseIso(r.GetString(1));
             string schedule = r.IsDBNull(2) ? "" : r.GetString(2);
             var next = FeedNextDue(schedule, lc, now);
-            if (next != null)
+            if (json)
+                JsonOut(new { success = true, data = new { feedId = feedReal.Value, title, due = false, nextUpdate = next }});
+            else if (next != null)
                 Console.WriteLine(Lang.T("{0} is not due yet; next update in {1}", title, UntilText(next.Value, now)));
             else
                 Console.WriteLine(Lang.T("{0} has no auto-update schedule (set one with --schedule)", title));
@@ -2950,29 +3256,43 @@ async Task SyncCli(string[] extra, string dbPath)
 
     if (due.Count == 0)
     {
-        Console.WriteLine(Lang.T("No feeds are due"));
+        if (json) JsonOut(new { success = true, data = new { feeds = Array.Empty<object>(), ok = 0, fail = 0 } });
+        else Console.WriteLine(Lang.T("No feeds are due"));
         return;
     }
 
-    Console.WriteLine(Lang.T("{0} feeds are due, syncing...", due.Count));
+    if (!json) Console.WriteLine(Lang.T("{0} feeds are due, syncing...", due.Count));
     int ok = 0, fail = 0;
+    var results = new List<object>();
     foreach (var f in due)
     {
-        Console.WriteLine(Lang.T("  · {0} (last {1})", f.Title,
+        if (!json) Console.WriteLine(Lang.T("  · {0} (last {1})", f.Title,
             f.LastChecked is DateTime lc ? AgoText(lc, now) : Lang.T("never")));
         try
         {
             await DownloadAndSaveToDb(f.Url, dbPath, interactive: false);
+            RecordFeedSuccess(f.Id);
             ok++;
+            if (json) results.Add(new { feedId = f.Id, title = f.Title, ok = true });
         }
         catch (Exception ex)
         {
+            RecordFeedFailure(f.Id, ex.Message);
             fail++;
-            Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
+            if (json) results.Add(new { feedId = f.Id, title = f.Title, ok = false, error = ex.Message });
+            else Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
         }
     }
-    Console.WriteLine(Lang.T("Sync done: {0} ok, {1} failed", ok, fail));
-    if (fail > 0) SetExit();
+    if (json)
+    {
+        JsonOut(new { success = true, data = new { feeds = results, ok, fail } });
+        if (fail > 0) SetExit();
+    }
+    else
+    {
+        Console.WriteLine(Lang.T("Sync done: {0} ok, {1} failed", ok, fail));
+        if (fail > 0) SetExit();
+    }
 }
 
 // --update-all：强制更新所有订阅源（等价 TUI F6）
@@ -2999,10 +3319,12 @@ async Task UpdateAllCli(string dbPath)
         try
         {
             await DownloadAndSaveToDb(f.Url, dbPath, interactive: false);
+            RecordFeedSuccess(f.Id);
             ok++;
         }
         catch (Exception ex)
         {
+            RecordFeedFailure(f.Id, ex.Message);
             fail++;
             Console.WriteLine(Lang.T("    ✗ {0}", ex.Message));
         }
@@ -3115,7 +3437,7 @@ void InitDatabase(string dbPath)
 }
 
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
-void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
+void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath, bool json = false)
 {
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
@@ -3125,22 +3447,16 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     titleCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
     titleCmd.Parameters.AddWithValue("@id", feedRealId);
     string feedTitle = titleCmd.ExecuteScalar()!.ToString()!;
-    Console.WriteLine(Lang.T("── [{0}] {1} article list──", feedDisplayNum, feedTitle));
-    // 编号说明：左边是列表序号（1,2,3...），右边是文章全局真实 ID
-    //（--show / --versions / --summary 等命令用右边的 ID）
-    Console.WriteLine(Lang.T("  [seq/real] left = list sequence, right = global article ID (use the right one with --show/--versions/--summary)"));
 
-    // 用 ROW_NUMBER 给文章编显示号（删后自动继位）；每个 Guid 只列最新一版，
-    // 有历史版本的文章标题右侧加 ✎ 标记（TUI 里按 V 可查看全部版本）
-    // 注意：Guid 为空串时（既无 Id 也无 Link 的文章）不做分组
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        SELECT i.Id, i.Title, i.Status, i.Version,
+        SELECT i.Id, i.Title, i.Version,
                ROW_NUMBER() OVER (ORDER BY i.Id) AS DisplayNum,
                CASE WHEN i.Guid = '' THEN 1
                     ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid) END AS VersionCount,
                CASE WHEN i.Guid = '' THEN 0
-                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid AND g.Status = 'archived') END AS ArchivedCount
+                    ELSE (SELECT COUNT(*) FROM Items g WHERE g.Guid = i.Guid AND g.Status = 'archived') END AS ArchivedCount,
+               i.Content, i.Description
         FROM Items i
         WHERE i.FeedId = @fid
           AND (i.Guid = '' OR i.Version = (SELECT MAX(g.Version) FROM Items g WHERE g.Guid = i.Guid))
@@ -3150,19 +3466,60 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath)
     using var reader = cmd.ExecuteReader();
     if (!reader.HasRows)
     {
-        Console.WriteLine(Lang.T("  This feed has no articles yet"));
+        if (json) JsonOut(new { success = true, data = new { feedId = feedRealId, feedTitle, articles = Array.Empty<object>() } });
+        else Console.WriteLine(Lang.T("  This feed has no articles yet"));
         return;
     }
+
+    var items = new List<(int RealId, int DisplayNum, string Title, bool HasHistory, string Quality)>();
     while (reader.Read())
     {
-        int realId = reader.GetInt32(0);        // 第 1 列真实 Id
-        string title = reader.GetString(1);     // 第 2 列 Title
-        int displayNum = reader.GetInt32(4);    // 第 5 列 DisplayNum（列表序号）
-        int archived = reader.GetInt32(6);      // 第 7 列 ArchivedCount
-
-        string marker = archived > 0 ? " ✎" : "";
-        Console.WriteLine($"  [{displayNum}/{realId}] {CjkSpace(title)}{marker}");
+        int realId = reader.GetInt32(0);
+        string title = reader.GetString(1);
+        int displayNum = reader.GetInt32(3);
+        int archived = reader.GetInt32(5);
+        string content = reader.IsDBNull(6) ? "" : reader.GetString(6);
+        string desc = reader.IsDBNull(7) ? "" : reader.GetString(7);
+        items.Add((realId, displayNum, title, archived > 0, ContentQuality(content, desc)));
     }
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                feedId = feedRealId,
+                feedTitle,
+                articles = items.Select(a => new
+                {
+                    itemId = a.RealId,
+                    displayNum = a.DisplayNum,
+                    title = a.Title,
+                    hasHistory = a.HasHistory,
+                    quality = a.Quality
+                })
+            }
+        });
+        return;
+    }
+
+    Console.WriteLine(Lang.T("── [{0}] {1} article list──", feedDisplayNum, feedTitle));
+    Console.WriteLine(Lang.T("  [seq/real] left = list sequence, right = global article ID (use the right one with --show/--versions/--summary)"));
+    foreach (var a in items)
+    {
+        string marker = (a.HasHistory ? " ✎" : "") + (a.Quality == "short" ? Lang.T(" [摘要]") : a.Quality == "empty" ? Lang.T(" [无正文]") : "");
+        Console.WriteLine($"  [{a.DisplayNum}/{a.RealId}] {CjkSpace(a.Title)}{marker}");
+    }
+}
+
+// 内容质量三级：full（正文完整）/ short（过短，仅摘要）/ empty（无正文）
+string ContentQuality(string content, string desc)
+{
+    string c = string.IsNullOrWhiteSpace(content) ? desc : content;
+    if (string.IsNullOrWhiteSpace(c)) return "empty";
+    return c.Trim().Length < 100 ? "short" : "full";
 }
 
 // 文章是否存在（--show 全屏模式启动前检查，避免进空界面）
@@ -3214,14 +3571,15 @@ void ShowArticleJson(int itemId, string dbPath)
             link,
             published = pub,
             author,
+            quality = ContentQuality(content, desc),
             content = string.IsNullOrWhiteSpace(content) ? desc : content
         }
     });
 }
 
-// 查看文章版本历史 CLI：--versions <文章Id>（同 --show 的全局 Id）
+// 查看文章版本历史 CLI：--versions <文章Id> [--json]
 // 列出同一 Guid 的所有版本；想看某版原文，用 sip --show <该版本的 Id>
-void ListVersionsCli(string arg, string dbPath)
+void ListVersionsCli(string arg, string dbPath, bool json = false)
 {
     if (!int.TryParse(arg, out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
 
@@ -3231,14 +3589,15 @@ void ListVersionsCli(string arg, string dbPath)
     gCmd.CommandText = "SELECT Guid, Title FROM Items WHERE Id = @id";
     gCmd.Parameters.AddWithValue("@id", itemId);
     using var gr = gCmd.ExecuteReader();
-    if (!gr.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId)); return; }
+    if (!gr.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return; }
     string guid = gr.IsDBNull(0) ? "" : gr.GetString(0);
     string title = gr.GetString(1);
     gr.Close();
 
     if (string.IsNullOrEmpty(guid))
     {
-        Console.WriteLine(Lang.T("This article has no version history (no Guid)"));
+        if (json) JsonOut(new { success = true, data = new { itemId, title, versions = Array.Empty<object>() } });
+        else Console.WriteLine(Lang.T("This article has no version history (no Guid)"));
         return;
     }
 
@@ -3252,7 +3611,31 @@ void ListVersionsCli(string arg, string dbPath)
 
     if (list.Count <= 1)
     {
-        Console.WriteLine(Lang.T("This article has only one version, no change history"));
+        if (json) JsonOut(new { success = true, data = new { itemId, title, versions = Array.Empty<object>() } });
+        else Console.WriteLine(Lang.T("This article has only one version, no change history"));
+        return;
+    }
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                title,
+                versions = list.Select(v => new
+                {
+                    id = v.Id,
+                    version = v.Version,
+                    status = v.Status,
+                    archivedAt = v.At,
+                    title = v.T,
+                    current = v.Id == itemId
+                })
+            }
+        });
         return;
     }
 
@@ -3455,48 +3838,79 @@ void ExportArticlesToDir(List<int> itemIds, string dir, string dbPath)
 // ══════════ 列表方法：显示数据库中所有订阅源 ══════════
 // ROW_NUMBER() 保证显示出来永远是 1, 2, 3 连续编号（不管中间有没有删过源）
 // 但操作（更新/时间戳/删除）仍然用真实 Id，因为 Items 表靠它关联
-void ListFeedsFromDb(string dbPath)
+void ListFeedsFromDb(string dbPath, bool json = false)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
-    conn.Open();
-    var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
-        SELECT Id, Title,
-               (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'active')   AS ActiveCount,
-               (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'archived') AS ArchiveCount,
-               (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'deleted')  AS DeleteCount,
-               ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum,
-               LastCheckedAt, Schedule
-        FROM Feeds
-    ";
-    // 八列：[真实Id, 标题, 活跃数, 旧版本数, 已删除数, 显示编号, 上次检查时间, 更新计划]
-
-    using var reader = cmd.ExecuteReader();
-    if (!reader.HasRows)
+    var rows = new List<(int RealId, int DisplayNum, string Title, int Active, int Archived, int Deleted, DateTime? LastChecked, string Schedule)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
     {
-        Console.WriteLine(Lang.T("No feeds in the database yet"));
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT Id, Title,
+                   (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'active')   AS ActiveCount,
+                   (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'archived') AS ArchiveCount,
+                   (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'deleted')  AS DeleteCount,
+                   ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum,
+                   LastCheckedAt, Schedule
+            FROM Feeds";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            rows.Add((reader.GetInt32(0), reader.GetInt32(5), reader.GetString(1),
+                reader.GetInt32(2), reader.GetInt32(3), reader.GetInt32(4),
+                reader.IsDBNull(6) ? null : TryParseIso(reader.GetString(6)),
+                reader.IsDBNull(7) ? "" : reader.GetString(7)));
+    }
+
+    if (rows.Count == 0)
+    {
+        if (json) JsonOut(new { success = true, data = new { feeds = Array.Empty<object>() } });
+        else Console.WriteLine(Lang.T("No feeds in the database yet"));
+        return;
+    }
+
+    if (json)
+    {
+        var health = LoadFeedHealth();
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                feeds = rows.Select(r =>
+                {
+                    health.TryGetValue(r.RealId, out var h);
+                    return new
+                    {
+                        id = r.RealId,
+                        displayNum = r.DisplayNum,
+                        title = r.Title,
+                        active = r.Active,
+                        archived = r.Archived,
+                        deleted = r.Deleted,
+                        schedule = r.Schedule,
+                        lastChecked = r.LastChecked,
+                        health = h.FailCount > 0 ? "failed" : (r.LastChecked is DateTime lc && IsFeedStale(r.Schedule, lc, DateTime.Now) ? "stale" : "ok"),
+                        failCount = h.FailCount
+                    };
+                })
+            }
+        });
         return;
     }
 
     var now = DateTime.Now;
-    while (reader.Read())
+    foreach (var r in rows)
     {
-        int active = reader.GetInt32(2);
-        int archive = reader.GetInt32(3);
-        int deleted = reader.GetInt32(4);
-
-        // 拼出显示文本：只显示非零的状态
         var parts = new List<string>();
-        if (active > 0)  parts.Add(Lang.T("{0} current", active + deleted));
-        if (archive > 0) parts.Add(Lang.T("{0} changed", archive));
-        if (deleted > 0) parts.Add(Lang.T("{0} deleted by author, but archived for you", deleted));
+        if (r.Active > 0) parts.Add(Lang.T("{0} current", r.Active + r.Deleted));
+        if (r.Archived > 0) parts.Add(Lang.T("{0} changed", r.Archived));
+        if (r.Deleted > 0) parts.Add(Lang.T("{0} deleted by author, but archived for you", r.Deleted));
         string stats = string.Join(", ", parts);
-
-        DateTime? lastChecked = reader.IsDBNull(6) ? null : TryParseIso(reader.GetString(6));
-        string schedule = reader.IsDBNull(7) ? "" : reader.GetString(7);
-        string status = FormatFeedStatus(schedule, lastChecked, now);
-
-        Console.WriteLine($"[{reader.GetInt32(5)}] {reader.GetString(1)} {stats}{status}");
+        string status = FormatFeedStatus(r.Schedule, r.LastChecked, now);
+        string healthText = FeedHealthText(r.RealId, r.Schedule, r.LastChecked, now);
+        // 健康标记只显示异常（正常不显示）
+        string marker = healthText == Lang.T("正常") ? "" : "  " + healthText;
+        Console.WriteLine($"[{r.DisplayNum}] {r.Title} {stats}{status}{marker}");
     }
 }
 
@@ -4626,7 +5040,8 @@ void SearchCli(string[] args, string dbPath)
                     link = h.Link,
                     feedId = h.FeedId,
                     feedTitle = h.FeedTitle,
-                    score = Math.Round(h.Score, 4)
+                    score = Math.Round(h.Score, 4),
+                    quality = ContentQuality(h.Content, h.Description)
                 }),
                 total = results.Count
             }
@@ -4713,7 +5128,8 @@ void GrepCli(string[] args, string dbPath)
         items.Add(new GrepSnippetResult
         {
             ItemId = h.ItemId, Title = h.Title, Link = h.Link, FeedTitle = h.FeedTitle,
-            Count = total, Snippets = snippets, TotalSnippets = total
+            Count = total, Snippets = snippets, TotalSnippets = total,
+            Quality = ContentQuality(h.Content, h.Description)
         });
     }
 
@@ -4733,7 +5149,8 @@ void GrepCli(string[] args, string dbPath)
                     totalSnippets = r.TotalSnippets,
                     snippets = r.Snippets,
                     link = r.Link,
-                    feedTitle = r.FeedTitle
+                    feedTitle = r.FeedTitle,
+                    quality = r.Quality
                 }),
                 total = items.Count
             }
@@ -4854,7 +5271,7 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
 
     cmd.Parameters.Clear();
     cmd.CommandText = @"
-        SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Link,
+        SELECT v.ItemId, v.Vector, i.Title, i.Description, i.Content, i.Link,
                f.Title AS FeedTitle, f.Id AS FeedId
         FROM Vectors v
         JOIN Items i ON v.ItemId = i.Id
@@ -4879,9 +5296,10 @@ List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = null, flo
                 ItemId = r.GetInt32(0),
                 Title = r.GetString(2),
                 Description = r.IsDBNull(3) ? "" : r.GetString(3),
-                Link = r.IsDBNull(4) ? "" : r.GetString(4),
-                FeedTitle = r.GetString(5),
-                FeedId = r.GetInt32(6),
+                Content = r.IsDBNull(4) ? "" : r.GetString(4),
+                Link = r.IsDBNull(5) ? "" : r.GetString(5),
+                FeedTitle = r.GetString(6),
+                FeedId = r.GetInt32(7),
                 Score = score
             });
         }
@@ -4910,7 +5328,7 @@ SearchHit? GetSearchHitForItem(string dbPath, int itemId, float score)
         using var conn = new SqliteConnection($"Data Source={dbPath}");
         conn.Open();
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT i.Title, i.Description, i.Link, i.FeedId, f.Title FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id AND i.Status = 'active'";
+        cmd.CommandText = "SELECT i.Title, i.Description, i.Content, i.Link, i.FeedId, f.Title FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id AND i.Status = 'active'";
         cmd.Parameters.AddWithValue("@id", itemId);
         using var r = cmd.ExecuteReader();
         if (!r.Read()) return null;
@@ -4919,9 +5337,10 @@ SearchHit? GetSearchHitForItem(string dbPath, int itemId, float score)
             ItemId = itemId,
             Title = r.GetString(0),
             Description = r.IsDBNull(1) ? "" : r.GetString(1),
-            Link = r.IsDBNull(2) ? "" : r.GetString(2),
-            FeedId = r.GetInt32(3),
-            FeedTitle = r.IsDBNull(4) ? "" : r.GetString(4),
+            Content = r.IsDBNull(2) ? "" : r.GetString(2),
+            Link = r.IsDBNull(3) ? "" : r.GetString(3),
+            FeedId = r.GetInt32(4),
+            FeedTitle = r.IsDBNull(5) ? "" : r.GetString(5),
             Score = score
         };
     }
@@ -5007,7 +5426,7 @@ async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
 }
 
 // 生成单篇文章摘要并保存到 rss.db（与文章同在库中）
-async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
+async Task<(bool Ok, string? Summary)> SummarizeItem(string dbPath, int itemId, bool json = false, bool quiet = false)
 {
     var cfg = LoadConfig(dbPath);
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -5016,7 +5435,7 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
     cmd.CommandText = "SELECT Title, Content, Description, Summary FROM Items WHERE Id = @id AND Status = 'active'";
     cmd.Parameters.AddWithValue("@id", itemId);
     using var r = cmd.ExecuteReader();
-    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return false; }
+    if (!r.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return (false, null); }
     string title = r.GetString(0);
     string content = r.IsDBNull(1) ? "" : r.GetString(1);
     string desc = r.IsDBNull(2) ? "" : r.GetString(2);
@@ -5025,8 +5444,9 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
 
     if (!string.IsNullOrEmpty(existing))
     {
-        Console.WriteLine(Lang.T("Article [{0}] {1} already has a summary, skipped (delete it first to regenerate)", itemId, title));
-        return true;
+        if (!quiet) Console.WriteLine(Lang.T("Article [{0}] {1} already has a summary, skipped (delete it first to regenerate)", itemId, title));
+        if (json) JsonOut(new { success = true, itemId, title, summary = existing, cached = true });
+        return (true, existing);
     }
 
     string text = string.IsNullOrEmpty(content) ? desc : content;
@@ -5045,24 +5465,24 @@ async Task<bool> SummarizeItem(string dbPath, int itemId, bool json = false)
         upd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
         upd.Parameters.AddWithValue("@id", itemId);
         upd.ExecuteNonQuery();
-        Console.WriteLine(Lang.T("Summary generated: [{0}] {1}", itemId, title));
+        if (!quiet) Console.WriteLine(Lang.T("Summary generated: [{0}] {1}", itemId, title));
         if (json) JsonOut(new { success = true, itemId, title, summary = summary.Trim() });
-        return true;
+        return (true, summary.Trim());
     }
     catch (HttpRequestException ex)
     {
         ReportError("NETWORK_ERROR", Lang.T("Network error, cannot reach the LLM service"), Lang.T("Check your network connection"), ex.Message, json);
-        return false;
+        return (false, null);
     }
     catch (AiException ex)
     {
         ReportError(ex.Code, ex.Message, ex.Suggestion, ex.Details, json);
-        return false;
+        return (false, null);
     }
 }
 
-// 单篇/整源摘要 CLI；支持 '12' 和 'feed:3'
-async Task SummaryCli(string arg, string dbPath)
+// 单篇/整源摘要 CLI；支持 '12' 和 'feed:3'；--json 结构化输出（feed: 模式跳过 y/n 确认）
+async Task SummaryCli(string arg, string dbPath, bool json = false)
 {
     EnsureAiPrompted();
 
@@ -5088,23 +5508,39 @@ async Task SummaryCli(string arg, string dbPath)
         while (r.Read()) items.Add((r.GetInt32(0), r.GetString(1)));
         r.Close();
 
-        if (items.Count == 0) { Console.WriteLine(Lang.T("All active articles of feed {0} already have summaries", feedDisplay)); return; }
-        Console.WriteLine(Lang.T("Will summarize {1} articles of feed {0}, confirm? (y/n)", feedDisplay, items.Count));
-        if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
+        if (items.Count == 0)
+        {
+            if (json) JsonOut(new { success = true, data = new { feed = feedDisplay, results = Array.Empty<object>(), ok = 0, fail = 0 } });
+            else Console.WriteLine(Lang.T("All active articles of feed {0} already have summaries", feedDisplay));
+            return;
+        }
+        if (!json)
+        {
+            Console.WriteLine(Lang.T("Will summarize {1} articles of feed {0}, confirm? (y/n)", feedDisplay, items.Count));
+            if (Console.ReadLine()?.ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
+        }
 
         int ok = 0, fail = 0;
+        var results = new List<object>();
         foreach (var it in items)
         {
-            if (await SummarizeItem(dbPath, it.Id, json: false)) ok++; else fail++;
-            Console.WriteLine(Lang.T("  progress: {0}/{1}", ok + fail, items.Count));
+            var (o, s) = await SummarizeItem(dbPath, it.Id, json: false, quiet: json);
+            if (json) results.Add(new { itemId = it.Id, title = it.Title, ok = o, summary = s });
+            if (o) ok++; else fail++;
+            if (!json) Console.WriteLine(Lang.T("  progress: {0}/{1}", ok + fail, items.Count));
         }
-        Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
+        if (json)
+        {
+            JsonOut(new { success = true, data = new { feed = feedDisplay, results, ok, fail } });
+            if (fail > 0) SetExit();
+        }
+        else Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
         return;
     }
 
     // 单篇文章
     if (!int.TryParse(arg, out int sumId)) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --summary <article-number | feed:number>")); return; }
-    await SummarizeItem(dbPath, sumId);
+    await SummarizeItem(dbPath, sumId, json: json, quiet: json);
 }
 
 // 全部摘要
@@ -5127,7 +5563,7 @@ async Task SummaryAllCli(string dbPath)
     int ok = 0, fail = 0;
     foreach (var it in items)
     {
-        if (await SummarizeItem(dbPath, it.Id)) ok++; else fail++;
+        if ((await SummarizeItem(dbPath, it.Id)).Ok) ok++; else fail++;
         Console.WriteLine(Lang.T("  progress: {0}/{1}", ok + fail, items.Count));
     }
     Console.WriteLine(Lang.T("Done: {0} OK, {1} failed", ok, fail));
@@ -5506,7 +5942,9 @@ class SidebarView : View
         _articles.Clear();
         foreach (var f in _roots)
             _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
-        _expanded.Clear();
+        // 保留用户已展开的源（默认折叠）；已被删除的源从展开集合里清掉
+        var valid = new HashSet<int>(_roots.Select(f => f.FeedId));
+        _expanded.RemoveWhere(id => !valid.Contains(id));
         _sel = 0;
         _scrollTop = 0;
         RebuildRows();
@@ -5792,6 +6230,7 @@ class SearchHit
     public int ItemId { get; set; }
     public string Title { get; set; } = "";
     public string Description { get; set; } = "";
+    public string Content { get; set; } = "";
     public string Link { get; set; } = "";
     public string FeedTitle { get; set; } = "";
     public int FeedId { get; set; }
@@ -5800,6 +6239,9 @@ class SearchHit
 
 // 全文搜索结果条目
 class FulltextVecEntry { public int ItemId { get; set; } public int FeedId { get; set; } public int ModelId { get; set; } public float[] Vector { get; set; } = Array.Empty<float>(); }
+
+// 来源健康记录（feed_health.json）
+class FeedHealthEntry { public int FailCount { get; set; } public string LastError { get; set; } = ""; public string LastOkAt { get; set; } = ""; }
 
 // 全文搜索结果条目
 class GrepSnippetResult
@@ -5811,6 +6253,7 @@ class GrepSnippetResult
     public int Count { get; set; }
     public List<string> Snippets { get; set; } = new();
     public int TotalSnippets { get; set; }
+    public string Quality { get; set; } = "";
 }
 
 // 全文搜索结果条目

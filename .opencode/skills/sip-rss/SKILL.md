@@ -63,7 +63,10 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --export <编号 | feed:N | all> [out.md|目录] --yes` | 把文章导出为 Markdown；`--yes` 跳过全部导出的确认 |
 | `sip --fulltext <编号> --yes --json` | 抓取文章**全文**到本地缓存并输出（RSS 摘要过短时用）；`--yes` 跳过同意/确认。⚠️ 全文抓取涉及抓取源站页面，需显式同意；不改数据库、不参与版本比对 |
 | `sip --purge-fulltext [编号]` | 清除全文缓存 |
-| `sip --summary <编号>` | 为文章生成 LLM 摘要 |
+| `sip --feed-info <编号> [--json]` | 来源身份与健康：类型/作者/官网/更新时间/最近文章/状态（正常/⚠ 长期未更新/✗ 失败 N 次） |
+| `sip --export-opml [file]` | 导出全部订阅源为 OPML（默认 feeds.opml） |
+| `sip --import-opml <file>` | 从 OPML 批量导入订阅源（按 FeedUrl 跳过已存在） |
+| `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
 
@@ -168,6 +171,13 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 - **「模型维度变化」**：换了模型，需 `sip --reindex`。
 - **语义搜索结果少**：阈值调低 + 换更多关键词。
 - **`--grep` 永远可用**：全文搜索不需要 AI，是语义搜索出问题时的可靠兜底。
+
+## 数据积累行为（长期使用才会出现，注意别被误导）
+
+- **来源健康**：`-l`/`--feed-info` 可能显示「⚠ 长期未更新」「✗ 失败 N 次」——这是**长期数据**，不代表命令出错；源刚加/刚更新过通常显示正常。
+- **内容质量**：`-l N` 里 `[摘要]`/`[无正文]` 标记、JSON 的 `quality` 字段（`full`/`short`/`empty`）是**长期积累**的结果；`short` 的文章可以建议用户用 `--fulltext` 抓全文。
+- **阅读进度**：`reading_progress.json` 记录滚动位置，重开文章可能提示「按 Space 跳回」——TUI 行为，AI 用 `--show ... --json` 读取不受影响。
+- **全文/向量缓存**：`fulltext/`、`vecs.json` 会随使用增长，超出阈值自动清理；如需强制清理用 `--purge-fulltext`。
 
 ## 交互说明
 
