@@ -1153,7 +1153,7 @@ List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
             SELECT Id, Title, PublishDate, Version, Content, Description, FeedTitle
             FROM (
                 SELECT i.Id, i.Title, i.PublishDate, i.Version, i.Content, i.Description,
-                       f.Title AS FeedTitle,
+                       i.Guid, f.Title AS FeedTitle,
                        ROW_NUMBER() OVER (PARTITION BY i.Guid ORDER BY i.Version DESC) AS rn
                 FROM Items i JOIN Feeds f ON i.FeedId = f.Id
                 WHERE i.Status = 'active' AND i.Guid IS NOT NULL
