@@ -946,6 +946,150 @@ void TelemetryCli(string[] args, string dbPath)
     }
 }
 
+// ══════════ Sip Today v1（规则式每日清单，先引导习惯，不做个性化）══════════
+// 选文规则（可解释、无黑盒）：近 48h 新增 / 近期被作者更新 / 全文质量 / ♥🤖 标记加权。
+// 等 telemetry 积累足够行为数据后，再演进为个性化排序。
+List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
+{
+    var items = new List<TodayItem>();
+    var signals = LoadSignals();
+    var now = DateTime.Now;
+    var freshCutoff = now.AddHours(-48);
+
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.Id, i.Title, i.PublishDate, i.Version, i.Content, i.Description, f.Title
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'active'
+              AND (i.Guid = '' OR i.Version = (SELECT MAX(g.Version) FROM Items g WHERE g.Guid = i.Guid))
+            ORDER BY i.Id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            int itemId = r.GetInt32(0);
+            string title = r.GetString(1);
+            DateTime? pub = r.IsDBNull(2) ? null : TryParseIso(r.GetString(2));
+            int version = r.GetInt32(3);
+            string content = r.IsDBNull(4) ? "" : r.GetString(4);
+            string desc = r.IsDBNull(5) ? "" : r.GetString(5);
+            string source = r.GetString(6);
+
+            int score = 0;
+            var reasons = new List<string>();
+            if (pub is DateTime p && p >= freshCutoff) { score += 3; reasons.Add(Lang.T("新增")); }
+            else if (pub is DateTime p2 && p2 >= now.AddDays(-7)) { score += 1; }
+            else score -= 1;
+            if (version > 1) { score += 2; reasons.Add(Lang.T("有更新")); }
+            string q = ContentQuality(content, desc);
+            if (q == "full") score += 1;
+            else if (q == "empty") score -= 1;
+            if (q == "short") reasons.Add(Lang.T("仅摘要"));
+
+            if (signals.TryGetValue(itemId.ToString(), out var sig))
+            {
+                if (sig.AiLike) { score += 3; reasons.Add(Lang.T("AI 关注")); }
+                if (sig.UserLike) { score += 2; reasons.Add(Lang.T("你收藏过")); }
+            }
+
+            int chars = Math.Max(content.Length, desc.Length);
+            double minutes = Math.Max(0.5, Math.Round(chars / (5.0 * 60.0), 1));   // ≈300 字/分
+            // 没有任何具体理由时给个兜底（近期可读全文）
+            if (reasons.Count == 0) reasons.Add(q == "short" ? Lang.T("仅摘要") : Lang.T("近期"));
+            items.Add(new TodayItem
+            {
+                ItemId = itemId, Title = title, Source = source,
+                Reason = string.Join(" · ", reasons), Minutes = minutes, Score = score
+            });
+        }
+    }
+
+    return items.Where(i => i.Score >= 2)          // 有明确正面信号才进今日
+                .OrderByDescending(i => i.Score)
+                .ThenByDescending(i => i.ItemId)
+                .Take(limit)
+                .ToList();
+}
+
+// 今日阅读进度：目标固定 5 篇（v1；数据积累后做成配置/自适应）；
+// 完成数来自 telemetry 的 article_complete（当天）；遥测关闭时 tracking=false
+(int Done, int Target, bool Tracking) TodayProgress(string dbPath)
+{
+    const int target = 5;
+    if (!TelemetryService.IsEnabled || TelemetryService.Consent != "enabled")
+        return (0, target, false);
+    int done = 0;
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={Path.Combine(dataDir, "telemetry.db")}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT COUNT(*) FROM telemetry_events WHERE type = 'article_complete' AND timestamp LIKE @d";
+        c.Parameters.AddWithValue("@d", DateTime.Now.ToString("yyyy-MM-dd") + "%");
+        done = Convert.ToInt32(c.ExecuteScalar());
+    }
+    catch { }
+    return (done, target, true);
+}
+
+// CLI：sip --today [--json]
+void TodayCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    int quick = 5;
+    for (int i = 0; i < args.Length - 1; i++)
+        if (args[i].Equals("--quick", StringComparison.OrdinalIgnoreCase) && int.TryParse(args[i + 1], out int q))
+            quick = Math.Clamp(q, 1, 5);   // 时间不够就只喝一小口：--quick N
+    var (done, target, tracking) = TodayProgress(dbPath);
+    var list = BuildTodayList(dbPath, quick);   // 清单上限 = 目标，不堆量
+
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                date = DateTime.Now.ToString("yyyy-MM-dd"),
+                target,
+                done,
+                tracking,
+                items = list.Select(i => new
+                {
+                    itemId = i.ItemId,
+                    title = i.Title,
+                    source = i.Source,
+                    reason = i.Reason,
+                    minutes = i.Minutes,
+                    score = i.Score
+                })
+            }
+        });
+        return;
+    }
+
+    Console.WriteLine(Lang.T("今日哈汤 · {0}", DateTime.Now.ToString("yyyy-MM-dd")));
+    Console.WriteLine("─────────────────────");
+    if (list.Count == 0)
+    {
+        Console.WriteLine(Lang.T("（今天还没有值得读的——去添加或更新一些订阅源吧）"));
+    }
+    for (int i = 0; i < list.Count; i++)
+    {
+        var it = list[i];
+        Console.WriteLine($" {i + 1}. {CjkSpace(it.Title)}");
+        Console.WriteLine(Lang.T("    [{0} · ~{1} 分钟 · {2}]", it.Source, it.Minutes, it.Reason));
+    }
+    Console.WriteLine("─────────────────────");
+    double total = list.Sum(i => i.Minutes);
+    if (tracking)
+        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇 · 已完成 {2} 篇{3}", total, target, done, done >= target ? Lang.T(" 🎉 今天结束") : ""));
+    else
+        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（开启 telemetry 可跟踪完成进度）", total, target));
+}
+
 // ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
@@ -1051,6 +1195,9 @@ async Task RunCli(string[] args, string dbPath)
         case "--likes":
             LikesCli(args.Skip(1).ToArray(), dbPath);
             return;
+        case "--today":
+            TodayCli(args.Skip(1).ToArray(), dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
@@ -1153,6 +1300,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)"));
     Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
     Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
+    Console.WriteLine(Lang.T("  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)"));
     Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry (default OFF)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
@@ -2955,6 +3103,53 @@ void TrimFulltextCache(int maxFiles = 200, long maxBytes = 200L * 1024 * 1024)
     catch { /* 清理失败不影响主流程 */ }
 }
 
+// 起始页「今日哈汤」区块：规则清单 + 目标进度（引导习惯，不堆量）
+List<string> TodayStartScreenLines(string dbPath)
+{
+    var lines = new List<string>();
+    try
+    {
+        lines.Add("");
+        lines.Add(Lang.T("──  今日哈汤  ──"));
+
+        // 首次启动（还没有订阅源）：不显示空清单，给引导文案
+        int feedCount = 0;
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT COUNT(*) FROM Feeds";
+            feedCount = Convert.ToInt32(c.ExecuteScalar());
+        }
+        if (feedCount == 0)
+        {
+            lines.Add(Lang.T("  🍵 还没有订阅源——回车先去添加几个，明天起每天给你一小碗"));
+            return lines;
+        }
+
+        var list = BuildTodayList(dbPath, 5);
+        var (done, target, tracking) = TodayProgress(dbPath);
+        if (list.Count == 0)
+            lines.Add(Lang.T("  今天还没有值得读的，回车后去更新订阅源"));
+        for (int i = 0; i < list.Count; i++)
+        {
+            var it = list[i];
+            lines.Add(Lang.T("  {0}. {1}", i + 1, CjkSpace(it.Title)));
+            lines.Add(Lang.T("     [{0} · ~{1} 分钟{2}]", it.Source, it.Minutes, it.Reason.Length > 0 ? " · " + it.Reason : ""));
+        }
+        // 总时长：让时间不够的用户一眼判断「这碗汤要喝多久」
+        double total = list.Sum(i => i.Minutes);
+        if (tracking)
+            lines.Add(done >= target
+                ? Lang.T("  共约 {0} 分钟 · 已完成 🎉 今天结束", total)
+                : Lang.T("  共约 {0} 分钟 · 目标 {1} 篇 · 已完成 {2} 篇", total, target, done));
+        else
+            lines.Add(Lang.T("  共约 {0} 分钟 · 目标 {1} 篇（开启 telemetry 可跟踪进度）", total, target));
+    }
+    catch { /* 起始页不因异常崩溃 */ }
+    return lines;
+}
+
 bool ShowStartScreen(string dbPath)
 {
     var top = new Window
@@ -2978,6 +3173,7 @@ bool ShowStartScreen(string dbPath)
         ""
     };
     lines.AddRange(DashboardStats(dbPath));
+    lines.AddRange(TodayStartScreenLines(dbPath));   // 「今日 Sip」：引导每日少量阅读
     lines.Add("");
     lines.Add(Lang.T("  Enter 进入  ·  Q 退出  "));
 
@@ -6631,6 +6827,17 @@ class SignalEntry
     public bool AiLike { get; set; }
     public string AiReason { get; set; } = "";
     public string UpdatedAt { get; set; } = "";
+}
+
+// Sip Today 条目
+class TodayItem
+{
+    public int ItemId { get; set; }
+    public string Title { get; set; } = "";
+    public string Source { get; set; } = "";
+    public string Reason { get; set; } = "";   // 为什么出现在今日（新增/更新/AI关注/你收藏过…）
+    public double Minutes { get; set; }        // 预估阅读时长
+    public int Score { get; set; }
 }
 
 // ══════════ Telemetry 服务（本地事实层）══════════

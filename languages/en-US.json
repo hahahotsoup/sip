@@ -442,4 +442,6 @@
   "Usage: sip telemetry status | show [--limit N] | enable | disable | clear | export [file]": "用法: sip telemetry status | show [--limit N] | enable | disable | clear | export [文件]",
   "  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks": "  --like <编号> [--ai [理由]]  标记文章（♥ 用户 / 🤖 AI）；--likes 查看标记",
   "  telemetry status|show|enable|disable|clear|export  local reading telemetry (default OFF)": "  telemetry status|show|enable|disable|clear|export  本地阅读遥测（默认关闭）"
+,
+  "  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)": "  --today [--json]  今日阅读清单（规则式选文，引导每日少量阅读）"
 }
