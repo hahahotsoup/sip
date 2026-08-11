@@ -4228,8 +4228,9 @@ void CheckMainDbIntegrity(string dbPath)
         }
         catch (Exception ex)
         {
+            // 文件被其他进程占用（并发启动）：不是真损坏现场，本次跳过自愈，下次启动再试
             try { File.Delete(dbPath); } catch { }
-            Console.Error.WriteLine("rss.db 完整性检查失败，现场保留失败（文件可能被占用）：" + ex.Message);
+            Console.Error.WriteLine("rss.db 完整性检查异常（文件可能被占用，本次跳过自愈）：" + ex.Message);
             return;
         }
         Console.Error.WriteLine("rss.db 完整性检查失败，已保留现场并重建：" + corrupt);
@@ -4237,18 +4238,26 @@ void CheckMainDbIntegrity(string dbPath)
     catch { /* 完整性检查失败不阻断启动 */ }
 }
 
-// 打开主库执行 quick_check；返回是否完好。连接在本方法内用完即关，避免文件句柄占用
+// 打开主库执行 quick_check；返回是否完好。连接在本方法内用完即关，避免文件句柄占用。
+// 带 busy_timeout；busy/locked 与瞬时非 ok 结果重试，连续多次失败才算损坏（与 telemetry 同策略）
 bool QuickCheckOk(string dbPath)
 {
-    try
+    for (int attempt = 0; attempt < 3; attempt++)
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
-        conn.Open();
-        var c = conn.CreateCommand();
-        c.CommandText = "PRAGMA quick_check";
-        return c.ExecuteScalar()?.ToString() == "ok";
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "PRAGMA busy_timeout = 2000;";
+            c.ExecuteNonQuery();
+            c.CommandText = "PRAGMA quick_check";
+            if (c.ExecuteScalar()?.ToString() == "ok") return true;
+        }
+        catch (SqliteException ex) when (TelemetryService.IsBusyCode(ex.SqliteErrorCode)) { /* 锁冲突：重试 */ }
+        catch { return false; }   // 真损坏/打开失败
     }
-    catch { return false; }   // 打开/查询失败（如 "file is not a database"）也视为损坏
+    return false;
 }
 
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
@@ -7254,34 +7263,59 @@ static class TelemetryService
         catch { }
     }
 
-    // 完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃、绝不动 rss.db
+    // 完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃、绝不动 rss.db。
+    // 并发启动/写入时 quick_check 可能读到瞬时中间状态（误报损坏）：
+    //   · busy/locked 类错误与瞬时非 ok 结果 → 重试，不算损坏
+    //   · 连续重试仍失败 → 改名失败（文件被其他进程占用）时静默跳过，下次启动再试；不吓人、不动数据
     static void CheckIntegrity()
     {
         try
         {
             if (!File.Exists(DbPath)) { CreateSchema(); WriteCheckpoint("created"); return; }
             bool ok = IsSqliteFile(DbPath);
+            if (ok) ok = TryQuickCheckOk();
             if (ok)
             {
-                try
-                {
-                    using var conn = new SqliteConnection($"Data Source={DbPath}");
-                    conn.Open();
-                    var c = conn.CreateCommand();
-                    c.CommandText = "PRAGMA quick_check";
-                    ok = c.ExecuteScalar()?.ToString() == "ok";
-                }
-                catch { ok = false; }   // 打开/查询失败（如 "file is not a database"）也视为损坏
+                CreateSchema();   // 幂等：确保表结构与 WAL 模式（旧库首次启动即完成 WAL 迁移）
+                WriteCheckpoint("ok");
+                return;
             }
-            if (ok) { WriteCheckpoint("ok"); return; }
             string corrupt = DbPath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            try { File.Move(DbPath, corrupt); } catch { try { File.Delete(DbPath); } catch { } }
-            CreateSchema();
-            WriteCheckpoint("recreated");
-            Console.Error.WriteLine("telemetry.db 完整性检查失败，已保留现场并重建：" + corrupt);
+            try
+            {
+                File.Move(DbPath, corrupt);
+                CreateSchema();
+                WriteCheckpoint("recreated");
+                Console.Error.WriteLine("telemetry.db 完整性检查失败，已保留现场并重建：" + corrupt);
+            }
+            catch { /* 文件仍被占用（并发写入）：本次跳过，下次启动再试 */ }
         }
         catch { /* 完整性检查失败不阻断启动 */ }
     }
+
+    // quick_check：带 busy_timeout；busy/locked 或瞬时非 ok 结果重试，连续多次失败才算损坏
+    static bool TryQuickCheckOk()
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={DbPath}");
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = "PRAGMA busy_timeout = 2000;";
+                c.ExecuteNonQuery();
+                c.CommandText = "PRAGMA quick_check";
+                if (c.ExecuteScalar()?.ToString() == "ok") return true;
+            }
+            catch (SqliteException ex) when (IsBusyCode(ex.SqliteErrorCode)) { /* 锁冲突：重试 */ }
+            catch { return false; }   // 真损坏/打开失败
+        }
+        return false;
+    }
+
+    // SQLITE_BUSY / SQLITE_LOCKED 系列错误码（含共享缓存/恢复/快照/超时变体）
+    internal static bool IsBusyCode(int rc) => rc is 5 or 6 or 261 or 262 or 283 or 284;
 
     // 校验 SQLite 文件头魔数（"SQLite format 3\0"）
     internal static bool IsSqliteFile(string path)
@@ -7300,6 +7334,9 @@ static class TelemetryService
         using var conn = new SqliteConnection($"Data Source={DbPath}");
         conn.Open();
         var c = conn.CreateCommand();
+        // WAL：并发启动/写入时读者永远看到一致快照，从根上避免瞬时损坏误报
+        c.CommandText = "PRAGMA journal_mode = WAL;";
+        c.ExecuteNonQuery();
         c.CommandText = @"
             CREATE TABLE IF NOT EXISTS telemetry_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
