@@ -1,4 +1,4 @@
-# 🍲 sip
+﻿# 🍲 sip
 
 > **简体中文** | [**English**](./README.en.md)
 
@@ -10,7 +10,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 
 它不是算法推荐阅读器，也不是让你"刷更多"的资讯流，而是一个**本地优先的透明信息过滤器和阅读辅助器**——你指定信源，sip 守护并辅助筛选信源，同时提升阅读体验。你和你的 AI 代理从一份干净、可追溯的数据中获取答案。
 
-📖 **完整文档见 [sip Wiki](https://sip.wenshenghe2009.workers.dev/)** —— 安装、CLI/TUI、AI 命令、隐私等全部细节都在这里。
+📖 **完整文档见 [sip Wiki](https://sip.hotsouprealm.top/)** —— 安装、CLI/TUI、AI 命令、隐私等全部细节都在这里。
 
 同时厚脸皮一下：[https://blog.hotsouprealm.top/atom.xml](https://blog.hotsouprealm.top/atom.xml)
 关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾
@@ -30,7 +30,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 - **框架依赖**：需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)
 - **数据目录**：`readwithhotsoup/`（SQLite + 文件缓存，全本地，拷走即迁移）
 
-从源码构建、`publish.ps1` 全平台打包等方法，见 [Wiki · 快速开始](https://sip.wenshenghe2009.workers.dev/指南/快速开始.html)。
+从源码构建、`publish.ps1` 全平台打包等方法，见 [Wiki · 快速开始](https://sip.hotsouprealm.top/指南/快速开始.html)。
 
 ---
 
@@ -43,7 +43,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 | 🤖 **AI 友好** | 语义搜索（RAG）、LLM 摘要、统一 JSON、结构化退出码 |
 | 🕊️ **隐私** | 本地遥测苏暖泉（Sumenia）默认关闭、仅本地保存、绝不自动上传 |
 
-> 完整功能清单与每项细节，见 [Wiki · 功能](https://sip.wenshenghe2009.workers.dev/功能/)。
+> 完整功能清单与每项细节，见 [Wiki · 功能](https://sip.hotsouprealm.top/功能/)。
 
 ---
 
@@ -58,7 +58,7 @@ sip --search "RAG"      # 语义搜索（先 sip --init 配置 AI）
 sip --today             # 今日哈汤
 ```
 
-完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.wenshenghe2009.workers.dev/使用说明/命令行.html)。
+完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.hotsouprealm.top/使用说明/命令行.html)。
 
 ---
 
@@ -72,7 +72,7 @@ sip --today             # 今日哈汤
 2. **`sip-rss` skill**（`.opencode/skills/sip-rss/SKILL.md` 或 `sip-skill.zip`）
 3. **系统提示词**（见 Wiki，让 Agent 只用 `sip --search/--grep/--show/--summary` 检索）
 
-> Telegram、Discord 由 OpenClaw 原生支持；QQ、微信需第三方桥接（OneBot/go-cqhttp、Wechaty 等）。完整步骤、提示词与示例见 [Wiki · Bot 接入](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html)。
+> Telegram、Discord 由 OpenClaw 原生支持；QQ、微信需第三方桥接（OneBot/go-cqhttp、Wechaty 等）。完整步骤、提示词与示例见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用说明/Bot接入.html)。
 
 ---
 
@@ -143,7 +143,7 @@ sip --grep "量子纠缠"     # SQL LIKE 精确匹配标题/正文/摘要
 @bot 帮我查一下"LLM Agent"相关文章
 ```
 
-Agent 自动调 `sip --today` / `sip --search`，只从你信任的源回答。见 [Wiki · Bot 接入](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html)。
+Agent 自动调 `sip --today` / `sip --search`，只从你信任的源回答。见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用说明/Bot接入.html)。
 
 ---
 

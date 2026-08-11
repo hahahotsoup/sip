@@ -1,4 +1,4 @@
-# 🍲 sip
+﻿# 🍲 sip
 
 > **English** | [**简体中文**](./README.md)
 
@@ -10,7 +10,7 @@ sip is a wall against information noise: letting you and the AI you care about s
 
 It is not an algorithm-driven reader, nor a feed to make you "scroll more," but a **local-first, transparent information filter and reading assistant** — you choose your sources, sip guards and helps curate them while improving the reading experience. You and your AI agents get answers from a clean, traceable dataset.
 
-📖 **Full documentation lives in the [sip Wiki](https://sip.wenshenghe2009.workers.dev/)** — install, CLI/TUI, AI commands, privacy, and all other details are there.
+📖 **Full documentation lives in the [sip Wiki](https://sip.hotsouprealm.top/)** — install, CLI/TUI, AI commands, privacy, and all other details are there.
 
 Also, shameless plug: [https://blog.hotsouprealm.top/atom.xml](https://blog.hotsouprealm.top/atom.xml)
 Follow the hot soup teahouse, follow the hot soup teahouse, thank you 🐾
@@ -30,7 +30,7 @@ Download the **single-file executable** from [Releases](https://github.com/hahah
 - **Framework dependency**: requires [.NET 10 runtime](https://dotnet.microsoft.com/download)
 - **Data directory**: `readwithhotsoup/` (SQLite + file cache, fully local, copy to migrate)
 
-Building from source, `publish.ps1` cross-platform packaging, and more: see [Wiki · Getting started](https://sip.wenshenghe2009.workers.dev/指南/快速开始.html).
+Building from source, `publish.ps1` cross-platform packaging, and more: see [Wiki · Getting started](https://sip.hotsouprealm.top/指南/快速开始.html).
 
 ---
 
@@ -43,7 +43,7 @@ Building from source, `publish.ps1` cross-platform packaging, and more: see [Wik
 | 🤖 **AI friendly** | Semantic search (RAG), LLM summaries, unified JSON, structured exit codes |
 | 🕊️ **Privacy** | Local telemetry Sumenia off by default, stored locally only, never auto-uploaded |
 
-> Full feature list and every detail: [Wiki · Features](https://sip.wenshenghe2009.workers.dev/功能/).
+> Full feature list and every detail: [Wiki · Features](https://sip.hotsouprealm.top/功能/).
 
 ---
 
@@ -58,7 +58,7 @@ sip --search "RAG"      # semantic search (run sip --init to configure AI first)
 sip --today             # today's hot soup
 ```
 
-Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage](https://sip.wenshenghe2009.workers.dev/使用说明/命令行.html).
+Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage](https://sip.hotsouprealm.top/使用说明/命令行.html).
 
 ---
 
@@ -72,7 +72,7 @@ Feed the agent three things:
 2. **The `sip-rss` skill** (`.opencode/skills/sip-rss/SKILL.md` or `sip-skill.zip`)
 3. **A system prompt** (see Wiki, making the agent retrieve only via `sip --search/--grep/--show/--summary`)
 
-> Telegram and Discord are natively supported by OpenClaw; QQ and WeChat need third-party bridges (OneBot/go-cqhttp, Wechaty, etc.). Full steps, prompt, and examples: [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/en/usage/bot-integration.html).
+> Telegram and Discord are natively supported by OpenClaw; QQ and WeChat need third-party bridges (OneBot/go-cqhttp, Wechaty, etc.). Full steps, prompt, and examples: [Wiki · Bot Integration](https://sip.hotsouprealm.top/en/usage/bot-integration.html).
 
 ---
 
@@ -143,7 +143,7 @@ After wiring up OpenClaw / Cherry Studio, mention it in a group:
 @bot Find me articles about "LLM Agent"
 ```
 
-The agent automatically runs `sip --today` / `sip --search`, answering only from sources you trust. See [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/en/usage/bot-integration.html).
+The agent automatically runs `sip --today` / `sip --search`, answering only from sources you trust. See [Wiki · Bot Integration](https://sip.hotsouprealm.top/en/usage/bot-integration.html).
 
 ---
 
