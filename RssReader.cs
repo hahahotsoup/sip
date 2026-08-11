@@ -1000,12 +1000,12 @@ void TelemetryCli(string[] args, string dbPath)
         case "status":
         {
             var (count, first, last) = TelemetryService.Stats();
-            Console.WriteLine(Lang.T("Telemetry: {0}", TelemetryService.Consent == "enabled" ? Lang.T("开启") : TelemetryService.Consent == "disabled" ? Lang.T("关闭(用户拒绝)") : Lang.T("关闭(未选择)")));
+            Console.WriteLine(Lang.T("Sumenia（苏暖泉）: {0}", TelemetryService.Consent == "enabled" ? Lang.T("开启") : TelemetryService.Consent == "disabled" ? Lang.T("关闭(用户拒绝)") : Lang.T("关闭(未选择)")));
             Console.WriteLine(Lang.T("  事件数 events   : {0}", count));
             Console.WriteLine(Lang.T("  首次记录 first   : {0}", first ?? Lang.T("—")));
             Console.WriteLine(Lang.T("  最后记录 last    : {0}", last ?? Lang.T("—")));
             if (TelemetryService.Consent == "unset")
-                Console.WriteLine(Lang.T("  提示：默认关闭；如需开启运行 sip telemetry enable"));
+                Console.WriteLine(Lang.T("  提示：Sumenia 默认关闭；如需开启运行 sip telemetry enable"));
             return;
         }
         case "show":
@@ -1021,20 +1021,20 @@ void TelemetryCli(string[] args, string dbPath)
                 if (e.Surface != null) extra += " surface=" + e.Surface;
                 Console.WriteLine($"{ts} {e.Type}{extra}" + (string.IsNullOrEmpty(e.DataJson) ? "" : $"  {e.DataJson}"));
             }
-            if (events.Count == 0) Console.WriteLine(Lang.T("(no telemetry events)"));
+            if (events.Count == 0) Console.WriteLine(Lang.T("(Sumenia 暂无事件记录)"));
             return;
         }
         case "enable":
             TelemetryService.SetConsent("enabled");
-            Console.WriteLine(Lang.T("Telemetry enabled（仅本地记录，不会上传）"));
+            Console.WriteLine(Lang.T("Sumenia（苏暖泉）已开启（仅本地记录，不会上传）"));
             return;
         case "disable":
             TelemetryService.SetConsent("disabled");
-            Console.WriteLine(Lang.T("Telemetry disabled（历史数据保留，不再记录新事件）"));
+            Console.WriteLine(Lang.T("Sumenia（苏暖泉）已关闭（历史数据保留，不再记录新事件）"));
             return;
         case "clear":
             TelemetryService.Clear();
-            Console.WriteLine(Lang.T("Telemetry events cleared（保留你的开关选择）"));
+            Console.WriteLine(Lang.T("Sumenia 事件已清空（保留你的开关选择）"));
             return;
         case "export":
         {
@@ -1286,7 +1286,7 @@ void TodayCli(string[] args, string dbPath)
     if (tracking)
         Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇 · 已完成 {2} 篇{3}", total, target, done, done >= target ? Lang.T(" 🎉 今天结束") : ""));
     else
-        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（开启 telemetry 可跟踪完成进度）", total, target));
+        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（开启 Sumenia 可跟踪完成进度）", total, target));
     if (!refresh)
         Console.WriteLine(Lang.T("（今日哈汤已生成于 {0} · --refresh 可重新来一碗 · 新文章随时可从侧栏/--search/--grep 看）", generatedAt));
 }
@@ -1502,7 +1502,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
     Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
     Console.WriteLine(Lang.T("  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)"));
-    Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry (default OFF)"));
+    Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -2547,11 +2547,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         void EnsureTelemetryConsentTui()
         {
             if (TelemetryService.Consent != "unset") return;
-            var dlg = new Dialog { Title = " " + Lang.T("Reading Telemetry") + " ", Width = 78, Height = 16 };
+            var dlg = new Dialog { Title = " " + Lang.T("Sumenia · 苏暖泉") + " ", Width = 78, Height = 16 };
             var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 10, ReadOnly = true, CanFocus = false, WordWrap = true };
-            txt.Text = Lang.T("Sip 可以记录你的阅读行为（哪些文章被打开/读完/跳过、AI 调用情况），用于未来改进内容筛选。\n\nTelemetry 默认关闭。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你可以随时查看、关闭、删除或导出。") + "\n\n" +
-                Lang.T("[ 开启 Telemetry ]   [ 保持关闭 ]");
-            var enable = new Button { Text = Lang.T("开启 Telemetry"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
+            txt.Text = Lang.T("Sumenia（苏暖泉）是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用情况，用于未来改进内容筛选。\n\nSumenia 默认关闭。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你可以随时查看、关闭、删除或导出。");
+            var enable = new Button { Text = Lang.T("开启 Sumenia"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
             var keep = new Button { Text = Lang.T("保持关闭"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
             dlg.Add(txt, enable, keep);
             bool enabled = false;
@@ -3351,7 +3350,7 @@ List<string> TodayStartScreenLines(string dbPath)
                 ? Lang.T("  共约 {0} 分钟 · 已完成 🎉 今天结束", total)
                 : Lang.T("  共约 {0} 分钟 · 目标 {1} 篇 · 已完成 {2} 篇", total, target, done));
         else
-            lines.Add(Lang.T("  共约 {0} 分钟 · 目标 {1} 篇（开启 telemetry 可跟踪进度）", total, target));
+            lines.Add(Lang.T("  共约 {0} 分钟 · 目标 {1} 篇（开启 Sumenia 可跟踪进度）", total, target));
     }
     catch { /* 起始页不因异常崩溃 */ }
     return lines;
