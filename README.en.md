@@ -62,6 +62,91 @@ Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage]
 
 ---
 
+## Connect QQ / WeChat / Discord / Telegram bots
+
+Use a local agent (**OpenClaw** or **Cherry Studio**) to attach sip to messaging channels — mention it in a group, and it uses sip's search/summary abilities to answer only from sources you trust.
+
+Feed the agent three things:
+
+1. **Standalone `sip.exe`** (single-file from [Releases](https://github.com/hahahotsoup/sipintui/releases))
+2. **The `sip-rss` skill** (`.opencode/skills/sip-rss/SKILL.md` or `sip-skill.zip`)
+3. **A system prompt** (see Wiki, making the agent retrieve only via `sip --search/--grep/--show/--summary`)
+
+> Telegram and Discord are natively supported by OpenClaw; QQ and WeChat need third-party bridges (OneBot/go-cqhttp, Wechaty, etc.). Full steps, prompt, and examples: [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html).
+
+---
+
+## Concrete scenarios
+
+### 🛡️ Scenario 1: A "guardrail" for your AI
+
+Tired of your AI citing Sohu or Baijiahao? Make it search only your subscribed sources:
+
+```bash
+sip --search "LLM Agent survey" --json   # semantic search, returns trusted hits
+sip --search "RAG" --feed 1 --json        # limit to a single source
+```
+
+The AI only sees content from your sources — no more junk citations.
+
+### 🔍 Scenario 2: Verify an article that was "edited"
+
+Did the author quietly change their stance? See exactly how:
+
+```bash
+sip --versions 12        # list all historical versions of article 12
+sip --diff 12 v1 v3      # diff the bodies of v1 vs v3
+```
+
+### 📰 Scenario 3: Read something worth reading every day
+
+Don't want to hunt in a haystack? Let sip pick 5 articles first:
+
+```bash
+sip --today              # rule-based picks: new in 48h/edited/full-text/♥🤖 weighted
+sip --today --json       # structured output for scripts or AI
+```
+
+### 👵 Scenario 4: Set up "safe reading" sources for your parents
+
+After whitelisting (CCTV news, your local weather bureau, medical accounts you trust), all they need:
+
+```bash
+./sip.exe                # open and read; only see the sources you curated
+```
+
+Junk sources are filtered out — no need to judge true vs. false themselves.
+
+### 📖 Scenario 5: Read long articles slowly
+
+RSS summary too short? Fetch the full text:
+
+```bash
+sip --fulltext 12        # fetch the original of article 12 to local cache
+sip --show 12            # full-screen reading
+```
+
+### 🔎 Scenario 6: Find an article you read long ago
+
+Can't recall the title, only a keyword? Full-text search without AI:
+
+```bash
+sip --grep "quantum entanglement"   # exact SQL LIKE match on title/body/summary
+```
+
+### 🤖 Scenario 7: Ask a bot in your group
+
+After wiring up OpenClaw / Cherry Studio, mention it in a group:
+
+```
+@bot Which updates are worth reading from the last two days?
+@bot Find me articles about "LLM Agent"
+```
+
+The agent automatically runs `sip --today` / `sip --search`, answering only from sources you trust. See [Wiki · Bot Integration](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html).
+
+---
+
 ## Why sip?
 
 Today's information environment has three harsh truths:

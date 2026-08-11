@@ -62,6 +62,91 @@ sip --today             # 今日哈汤
 
 ---
 
+## 接入 QQ / 微信 / Discord / Telegram 机器人
+
+用本地 Agent（**OpenClaw** 或 **Cherry Studio**）把 sip 挂到消息渠道，你在群里 @ 它，它用 sip 的检索/摘要能力，只从你信任的源回答。
+
+把三样东西喂给 Agent 即可：
+
+1. **独立 `sip.exe`**（[Releases](https://github.com/hahahotsoup/sipintui/releases) 下载单文件）
+2. **`sip-rss` skill**（`.opencode/skills/sip-rss/SKILL.md` 或 `sip-skill.zip`）
+3. **系统提示词**（见 Wiki，让 Agent 只用 `sip --search/--grep/--show/--summary` 检索）
+
+> Telegram、Discord 由 OpenClaw 原生支持；QQ、微信需第三方桥接（OneBot/go-cqhttp、Wechaty 等）。完整步骤、提示词与示例见 [Wiki · Bot 接入](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html)。
+
+---
+
+## 具体场景
+
+### 🛡️ 场景一：给 AI 装「护栏」，查资料只信白名单
+
+AI 写东西时总引用搜狐、百家号？让它只查你订阅的源：
+
+```bash
+sip --search "LLM Agent 综述" --json     # 语义检索，返回可信命中
+sip --search "RAG" --feed 1 --json        # 限定单一订阅源
+```
+
+AI 只会拿到你订阅源里的内容，从此告别垃圾引用。
+
+### 🔍 场景二：验证一篇「被改过」的文章
+
+作者偷偷改观点？看它怎么变的：
+
+```bash
+sip --versions 12        # 看 12 号文章的全部历史版本
+sip --diff 12 v1 v3      # 对比 v1 与 v3 的正文差异
+```
+
+### 📰 场景三：每天读点值得读的（今日哈汤）
+
+不想大海捞针，让 sip 先选 5 篇：
+
+```bash
+sip --today              # 规则式选文：近48h新增/被改过/全文质量/♥🤖 加权
+sip --today --json       # 结构化输出给脚本或 AI
+```
+
+### 👵 场景四：给父母配置好「看得安心」的源
+
+配好白名单（央视新闻、本地气象局、你信任的医学号）后，他们只需：
+
+```bash
+./sip.exe                # 打开即用，只见你筛过的源
+```
+
+垃圾源已被挡在外面，不用自己分辨真假。
+
+### 📖 场景五：慢读长文
+
+RSS 摘要太短，抓全文慢慢读：
+
+```bash
+sip --fulltext 12        # 抓取 12 号文章原文到本地缓存
+sip --show 12            # 全屏阅读
+```
+
+### 🔎 场景六：找回很久以前看过的一篇
+
+记不得标题，只记得关键词？不依赖 AI 的全文搜索：
+
+```bash
+sip --grep "量子纠缠"     # SQL LIKE 精确匹配标题/正文/摘要
+```
+
+### 🤖 场景七：让 bot 在群里帮你查
+
+接 OpenClaw / Cherry Studio 后，群里 @ 它：
+
+```
+@bot 最近两天有什么值得读的更新？
+@bot 帮我查一下"LLM Agent"相关文章
+```
+
+Agent 自动调 `sip --today` / `sip --search`，只从你信任的源回答。见 [Wiki · Bot 接入](https://sip.wenshenghe2009.workers.dev/使用说明/Bot接入.html)。
+
+---
+
 ## 为什么有 sip？
 
 现在的信息环境有三个残酷事实：
