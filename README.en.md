@@ -78,7 +78,7 @@ Feed the agent three things:
 
 ## Concrete scenarios
 
-### 🛡️ Scenario 1: A "guardrail" for your AI
+### Scenario 1: A "guardrail" for your AI
 
 Tired of your AI citing Sohu or Baijiahao? Make it search only your subscribed sources:
 
@@ -89,7 +89,7 @@ sip --search "RAG" --feed 1 --json        # limit to a single source
 
 The AI only sees content from your sources — no more junk citations.
 
-### 🔍 Scenario 2: Verify an article that was "edited"
+### Scenario 2: Verify an article that was "edited"
 
 Did the author quietly change their stance? See exactly how:
 
@@ -98,7 +98,7 @@ sip --versions 12        # list all historical versions of article 12
 sip --diff 12 v1 v3      # diff the bodies of v1 vs v3
 ```
 
-### 📰 Scenario 3: Read something worth reading every day
+### Scenario 3: Read something worth reading every day
 
 Don't want to hunt in a haystack? Let sip pick 5 articles first:
 
@@ -107,7 +107,7 @@ sip --today              # rule-based picks: new in 48h/edited/full-text/♥🤖
 sip --today --json       # structured output for scripts or AI
 ```
 
-### 👵 Scenario 4: Set up "safe reading" sources for your parents
+### Scenario 4: Set up "safe reading" sources for your parents
 
 After whitelisting (CCTV news, your local weather bureau, medical accounts you trust), all they need:
 
@@ -117,7 +117,7 @@ After whitelisting (CCTV news, your local weather bureau, medical accounts you t
 
 Junk sources are filtered out — no need to judge true vs. false themselves.
 
-### 📖 Scenario 5: Read long articles slowly
+### Scenario 5: Read long articles slowly
 
 RSS summary too short? Fetch the full text:
 
@@ -126,7 +126,7 @@ sip --fulltext 12        # fetch the original of article 12 to local cache
 sip --show 12            # full-screen reading
 ```
 
-### 🔎 Scenario 6: Find an article you read long ago
+### Scenario 6: Find an article you read long ago
 
 Can't recall the title, only a keyword? Full-text search without AI:
 
@@ -134,7 +134,7 @@ Can't recall the title, only a keyword? Full-text search without AI:
 sip --grep "quantum entanglement"   # exact SQL LIKE match on title/body/summary
 ```
 
-### 🤖 Scenario 7: Ask a bot in your group
+### Scenario 7: Ask a bot in your group
 
 After wiring up OpenClaw / Cherry Studio, mention it in a group:
 
