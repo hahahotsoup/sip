@@ -64,17 +64,21 @@ for (int gi = 0; gi < args.Length - 1; gi++)
     }
 }
 Lang.Init(dataDir, langCode);
+TelemetryService.Init(dataDir);   // 遥测：默认关闭，仅本地，独立 telemetry.db
 
 // ══════════ CLI 模式 ══════════
 if (args.Length > 0)
 {
     await RunCli(args, dbPath);
     RemindDueFeeds(args, dbPath);
+    TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
     return AiState.ExitCode;
 }
 
 // ══════════ TUI 模式（无参数时进入）══════════
-return await RunTui(dbPath);
+var tuiExit = await RunTui(dbPath);
+TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
+return tuiExit;
 
 // ═══════════════════════════════════════════════════════════
 // 以下是所有方法，按调用顺序排列
@@ -738,6 +742,210 @@ void ImportOpmlCli(string file, string dbPath)
     Console.WriteLine(Lang.T("Import done: {0} added, {1} skipped (already exist), {2} failed", ok, skip, fail));
 }
 
+// ══════════ 文章标记信号（article_signals.json，零改表）══════════
+// 与 telemetry 分离：signals = 结论/标记层，telemetry 只记 article_like 事实
+string SignalsPath() => Path.Combine(dataDir, "article_signals.json");
+
+Dictionary<string, SignalEntry> LoadSignals()
+{
+    try
+    {
+        var d = JsonSerializer.Deserialize<Dictionary<string, SignalEntry>>(File.ReadAllText(SignalsPath()));
+        return d ?? new Dictionary<string, SignalEntry>();
+    }
+    catch { return new Dictionary<string, SignalEntry>(); }
+}
+
+void SaveSignals(Dictionary<string, SignalEntry> map)
+{
+    try
+    {
+        File.WriteAllText(SignalsPath(), JsonSerializer.Serialize(map,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+SignalEntry? GetSignal(int itemId)
+{
+    var map = LoadSignals();
+    return map.TryGetValue(itemId.ToString(), out var e) ? e : null;
+}
+
+// 切换用户/AI 点赞（再执行 = 取消）；返回切换后是否已标记
+bool ToggleSignal(int itemId, bool ai, string? reason, string dbPath)
+{
+    var map = LoadSignals();
+    var key = itemId.ToString();
+    map.TryGetValue(key, out var e);
+    e ??= new SignalEntry();
+    bool liked;
+    if (ai)
+    {
+        e.AiLike = !e.AiLike;
+        if (e.AiLike) e.AiReason = string.IsNullOrWhiteSpace(reason) ? "" : reason;
+        liked = e.AiLike;
+    }
+    else
+    {
+        e.UserLike = !e.UserLike;
+        liked = e.UserLike;
+    }
+    e.UpdatedAt = DateTime.Now.ToString("O");
+    if (!e.UserLike && !e.AiLike) map.Remove(key); else map[key] = e;
+    SaveSignals(map);
+    TelemetryService.Record("article_like", articleId: itemId, data: new { actor = ai ? "ai" : "user", liked });
+    return liked;
+}
+
+// CLI：sip --like <id> [--ai [reason]]（切换）
+void LikeCli(string[] args, string dbPath)
+{
+    if (args.Length < 1 || !int.TryParse(args[0], out int itemId))
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --like <article-id> [--ai [reason]]")); return;
+    }
+    if (!ArticleExists(itemId, dbPath)) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId)); return; }
+    bool ai = args.Any(a => a.Equals("--ai", StringComparison.OrdinalIgnoreCase));
+    string? reason = null;
+    int idx = Array.FindIndex(args, a => a.Equals("--ai", StringComparison.OrdinalIgnoreCase));
+    if (idx >= 0 && idx + 1 < args.Length && !args[idx + 1].StartsWith("--"))
+        reason = string.Join(" ", args.Skip(idx + 1));
+    bool liked = ToggleSignal(itemId, ai, reason, dbPath);
+    Console.WriteLine(ai
+        ? (liked ? Lang.T("AI 标记了文章 {0}（用户可能喜欢）", itemId) : Lang.T("已取消 AI 标记 {0}", itemId))
+        : (liked ? Lang.T("已收藏文章 {0} ♥", itemId) : Lang.T("已取消收藏 {0}", itemId)));
+}
+
+// CLI：sip --likes [--json] —— 列出所有标记文章
+void LikesCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var map = LoadSignals();
+    var ids = map.Keys.Where(k => int.TryParse(k, out _)).Select(int.Parse).ToList();
+    if (ids.Count == 0)
+    {
+        if (json) JsonOut(new { success = true, data = new { signals = Array.Empty<object>() } });
+        else Console.WriteLine(Lang.T("No liked articles yet"));
+        return;
+    }
+    // 查标题
+    var titles = new Dictionary<int, string>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, Title FROM Items WHERE Id IN (" + string.Join(",", ids) + ")";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) titles[r.GetInt32(0)] = r.GetString(1);
+    }
+    if (json)
+    {
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                signals = ids.OrderBy(id => id).Select(id =>
+                {
+                    map.TryGetValue(id.ToString(), out var e);
+                    return new
+                    {
+                        itemId = id,
+                        title = titles.TryGetValue(id, out var t) ? t : "",
+                        userLike = e?.UserLike ?? false,
+                        aiLike = e?.AiLike ?? false,
+                        aiReason = e?.AiReason ?? "",
+                        updatedAt = e?.UpdatedAt ?? ""
+                    };
+                })
+            }
+        });
+        return;
+    }
+    foreach (var id in ids.OrderBy(id => id))
+    {
+        map.TryGetValue(id.ToString(), out var e);
+        string marks = (e?.UserLike == true ? "♥" : "") + (e?.AiLike == true ? "🤖" : "");
+        Console.WriteLine($"[{id}] {marks} {(titles.TryGetValue(id, out var t) ? t : "")}" + (string.IsNullOrEmpty(e?.AiReason) ? "" : $"  ({e.AiReason})"));
+    }
+}
+
+// CLI：sip telemetry status|show|enable|disable|clear|export
+void TelemetryCli(string[] args, string dbPath)
+{
+    string sub = args.Length > 0 ? args[0].ToLowerInvariant() : "";
+    switch (sub)
+    {
+        case "status":
+        {
+            var (count, first, last) = TelemetryService.Stats();
+            Console.WriteLine(Lang.T("Telemetry: {0}", TelemetryService.Consent == "enabled" ? Lang.T("开启") : TelemetryService.Consent == "disabled" ? Lang.T("关闭(用户拒绝)") : Lang.T("关闭(未选择)")));
+            Console.WriteLine(Lang.T("  事件数 events   : {0}", count));
+            Console.WriteLine(Lang.T("  首次记录 first   : {0}", first ?? Lang.T("—")));
+            Console.WriteLine(Lang.T("  最后记录 last    : {0}", last ?? Lang.T("—")));
+            if (TelemetryService.Consent == "unset")
+                Console.WriteLine(Lang.T("  提示：默认关闭；如需开启运行 sip telemetry enable"));
+            return;
+        }
+        case "show":
+        {
+            int limit = 20;
+            for (int i = 1; i < args.Length - 1; i++)
+                if (args[i] == "--limit" && int.TryParse(args[i + 1], out int n)) limit = Math.Clamp(n, 1, 1000);
+            var events = TelemetryService.AllEvents(limit);
+            foreach (var e in events)
+            {
+                string ts = e.Timestamp.Length >= 19 ? e.Timestamp[..19].Replace("T", " ") : e.Timestamp;
+                string extra = e.ArticleId.HasValue ? " article=" + e.ArticleId : "";
+                if (e.Surface != null) extra += " surface=" + e.Surface;
+                Console.WriteLine($"{ts} {e.Type}{extra}" + (string.IsNullOrEmpty(e.DataJson) ? "" : $"  {e.DataJson}"));
+            }
+            if (events.Count == 0) Console.WriteLine(Lang.T("(no telemetry events)"));
+            return;
+        }
+        case "enable":
+            TelemetryService.SetConsent("enabled");
+            Console.WriteLine(Lang.T("Telemetry enabled（仅本地记录，不会上传）"));
+            return;
+        case "disable":
+            TelemetryService.SetConsent("disabled");
+            Console.WriteLine(Lang.T("Telemetry disabled（历史数据保留，不再记录新事件）"));
+            return;
+        case "clear":
+            TelemetryService.Clear();
+            Console.WriteLine(Lang.T("Telemetry events cleared（保留你的开关选择）"));
+            return;
+        case "export":
+        {
+            string file = args.Length > 1 && !args[1].StartsWith("--") ? args[1] : "telemetry.json";
+            var events = TelemetryService.AllEvents();
+            var arr = events.Select(e => new
+            {
+                id = e.Id,
+                timestamp = e.Timestamp,
+                sessionId = e.SessionId,
+                type = e.Type,
+                articleId = e.ArticleId,
+                sourceId = e.SourceId,
+                versionId = e.VersionId,
+                surface = e.Surface,
+                position = e.Position,
+                data = string.IsNullOrEmpty(e.DataJson) ? null : System.Text.Json.Nodes.JsonNode.Parse(e.DataJson)
+            });
+            File.WriteAllText(file, JsonSerializer.Serialize(new { exportedAt = DateTime.Now.ToString("O"), events = arr },
+                new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+            Console.WriteLine(Lang.T("Exported {0} events to {1}", events.Count, file));
+            Console.WriteLine(Lang.T("这些数据仅由你决定是否分享给开发者，sip 不会自动上传"));
+            return;
+        }
+        default:
+            SetExit();
+            Console.WriteLine(Lang.T("Usage: sip telemetry status | show [--limit N] | enable | disable | clear | export [file]"));
+            return;
+    }
+}
+
 // ══════════ CLI 参数处理 ══════════
 async Task RunCli(string[] args, string dbPath)
 {
@@ -840,13 +1048,16 @@ async Task RunCli(string[] args, string dbPath)
         case "--export-opml":
             ExportOpmlCli(args.Length > 1 ? args[1] : "", dbPath);
             return;
+        case "--likes":
+            LikesCli(args.Skip(1).ToArray(), dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
     bool needsArg = cmd is "-u" or "--update" or "-d" or "--download" or "-a" or "--archive"
                     or "-una" or "--unarchive" or "-r" or "--remove" or "--search" or "--summary" or "--grep"
                     or "--versions" or "--history" or "--fulltext" or "--diff" or "--export"
-                    or "--feed-info" or "--import-opml";
+                    or "--feed-info" or "--import-opml" or "--like" or "telemetry";
     if (args.Length < 2)
     {
         if (!needsArg) { SetExit(); Console.WriteLine(Lang.T("Unknown command: {0}", cmd)); PrintHelp(); return; }
@@ -905,6 +1116,13 @@ async Task RunCli(string[] args, string dbPath)
             if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --import-opml <file.opml>")); return; }
             ImportOpmlCli(args[1], dbPath);
             break;
+        case "--like":
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --like <article-id> [--ai [reason]]")); return; }
+            LikeCli(args.Skip(1).ToArray(), dbPath);
+            break;
+        case "telemetry":
+            TelemetryCli(args.Skip(1).ToArray(), dbPath);
+            break;
         case "--summary":
             SummaryCli(args[1], dbPath, args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase))).Wait();
             break;
@@ -934,6 +1152,8 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --purge-fulltext [id]  clear the full-text cache"));
     Console.WriteLine(Lang.T("  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)"));
     Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
+    Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
+    Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry (default OFF)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -982,6 +1202,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
     {
         // 开始界面：回车进入 / Q 退出
         if (showStartScreen && !ShowStartScreen(dbPath)) return 0;
+        EnsureTelemetryConsentTui();   // 首次询问遥测（默认保持关闭）
 
         // —— 左侧：订阅源 + 文章 侧栏（文章标题自动换行显示）——
         // 侧栏为自绘 View：来源可展开/折叠，标题过长时自动换行（CJK 宽度感知）
@@ -1090,6 +1311,83 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         long _currentArticleId = 0;
         int _savedScrollY = -1;   // 打开文章时若检测到历史进度，存这里；-1 = 无
 
+        // —— Telemetry 阅读状态（仅内存，会话内）——
+        double _maxProgress = 0;      // 当前文章最大进度 0-1
+        DateTime _lastActivity = default;
+        double _activeSeconds = 0;    // 当前文章活跃阅读秒数（空档不计）
+        int _estimatedSeconds = 0;    // 预估阅读时长 ERT
+        int _lastMilestone = 0;       // 已上报里程碑 0/25/50/75/100
+        // 活动事件时累计活跃时间：空档超过 ERT×25%（10~120s）不计入
+        void TelemetryActivityTick()
+        {
+            if (_currentArticleId == 0) return;
+            var now = DateTime.Now;
+            if (_lastActivity == default) { _lastActivity = now; return; }
+            double gap = (now - _lastActivity).TotalSeconds;
+            double idleThreshold = Math.Clamp(_estimatedSeconds * 0.25, 10, 120);
+            if (gap <= idleThreshold) _activeSeconds += gap;
+            _lastActivity = now;
+        }
+        // 打开文章：记录 open + 按内容长度算 ERT + 初始化计时
+        void TelemetryOpenArticle(long itemId, int feedId)
+        {
+            TelemetryService.Record("article_open", articleId: (int)itemId, sourceId: feedId);
+            int chars = 0;
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={dbPath}");
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = "SELECT LENGTH(COALESCE(Content,'')), LENGTH(COALESCE(Description,'')) FROM Items WHERE Id = @id";
+                c.Parameters.AddWithValue("@id", itemId);
+                using var r = c.ExecuteReader();
+                if (r.Read()) chars = Math.Max(r.GetInt32(0), r.GetInt32(1));
+            }
+            catch { }
+            _estimatedSeconds = Math.Max(10, chars / 5);
+            _lastActivity = DateTime.Now;
+            _activeSeconds = 0;
+            _maxProgress = 0;
+            _lastMilestone = 0;
+        }
+        // 进度更新：里程碑 25/50/75/100 + 滚到底 = complete（带 active/estimated/time_ratio）
+        void TelemetryProgressTick(double ratio)
+        {
+            if (ratio > _maxProgress) _maxProgress = ratio;
+            if (_maxProgress <= 0) return;
+            if (ratio >= 1.0 && _lastMilestone < 100)
+            {
+                _lastMilestone = 100;
+                TelemetryService.Record("article_complete", articleId: (int)_currentArticleId,
+                    data: new { active_seconds = Math.Round(_activeSeconds, 1), estimated_seconds = _estimatedSeconds,
+                               time_ratio = Math.Round(_estimatedSeconds > 0 ? _activeSeconds / _estimatedSeconds : 0, 3),
+                               max_progress = Math.Round(_maxProgress, 3) });
+                return;
+            }
+            int ms = (int)(Math.Min(ratio, 0.999) * 100 / 25) * 25;
+            if (ms > _lastMilestone)
+            {
+                _lastMilestone = ms;
+                TelemetryService.Record("article_progress", articleId: (int)_currentArticleId,
+                    data: new { progress = ms / 100.0, max_progress = Math.Round(_maxProgress, 3) });
+            }
+        }
+        // 离开当前文章：progress < 10% 记 skip（主动离开才触发）；否则补记最终进度
+        void TelemetryCloseArticle()
+        {
+            if (_currentArticleId == 0) return;
+            if (_maxProgress < 0.10)
+            {
+                TelemetryService.Record("article_skip", articleId: (int)_currentArticleId,
+                    data: new { progress = Math.Round(_maxProgress, 3) });
+            }
+            else if (_maxProgress > 0 && _lastMilestone < 100)
+            {
+                TelemetryService.Record("article_progress", articleId: (int)_currentArticleId,
+                    data: new { progress = Math.Round(_maxProgress, 3), max_progress = Math.Round(_maxProgress, 3) });
+            }
+        }
+
         void UpdateStats()
         {
             // 检测到阅读进度时，状态行优先显示跳转提示（标题栏会截断，这里更显眼）
@@ -1124,7 +1422,13 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         void SaveCurrentScroll()
         {
             if (_currentArticleId == 0) return;
-            try { progressMap[_currentArticleId] = contentView.Viewport.Y; }
+            try { progressMap[_currentArticleId] = contentView.Viewport.Y; } catch { }
+            // 遥测进度：按滚动位置算 ratio，驱动里程碑/complete
+            try
+            {
+                int h = contentView.GetContentHeight();
+                if (h > 0) TelemetryProgressTick(Math.Clamp(contentView.Viewport.Y / (double)h, 0, 1.0));
+            }
             catch { }
         }
         // 跳到上次阅读位置（按 Space 触发）：对进度做边界校验，绝不跳到负数或超出正文范围
@@ -1147,6 +1451,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         void QuitApp()
         {
             SaveCurrentScroll();
+            TelemetryCloseArticle();   // 主动退出，低进度记 skip
             SaveReadingProgress(progressMap);
             top.RequestStop();
         }
@@ -1233,9 +1538,23 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         {
             SaveCurrentScroll();                       // 先记住上一篇的位置
             var n = tree.SelectedObject;
-            if (n == null || n.IsFeed) { contentView.Text = ""; _currentArticleId = 0; _savedScrollY = -1; UpdateStats(); return; }
-            contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth(), showFetchHint: true);
-            _currentArticleId = n.ItemId;
+            if (n == null || n.IsFeed)
+            {
+                TelemetryCloseArticle();               // 从文章切到源/空 → 主动离开
+                contentView.Text = ""; _currentArticleId = 0; _savedScrollY = -1; UpdateStats();
+                return;
+            }
+            if (n.ItemId != _currentArticleId)
+            {
+                TelemetryCloseArticle();               // 主动切换 → 低进度记 skip
+                contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth(), showFetchHint: true);
+                _currentArticleId = n.ItemId;
+                TelemetryOpenArticle(n.ItemId, n.FeedId);   // article_open + 计时初始化
+            }
+            else
+            {
+                contentView.Text = BuildArticleMarkdown(n.ItemId, contentMode, dbPath, contentView.GetContentWidth(), showFetchHint: true);
+            }
             // 检测到历史进度 → 提示（不自动跳，等用户按 Space）；非法值直接忽略
             _savedScrollY = progressMap.TryGetValue(n.ItemId, out int y) && y > 0 ? y : -1;
             UpdateStats();                             // 有进度时状态行显示跳转提示
@@ -1731,19 +2050,20 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case KeyCode.K:
                     if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }   // 手动滚动 → 撤掉跳转提示
                     if (linkNavMode) { CycleLink(-1); }
-                    else { contentView.ScrollVertical(-1); SaveCurrentScroll(); }
+                    else { TelemetryActivityTick(); contentView.ScrollVertical(-1); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.CursorDown:
                 case KeyCode.J:
                     if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
                     if (linkNavMode) { CycleLink(1); }
-                    else { contentView.ScrollVertical(1); SaveCurrentScroll(); }
+                    else { TelemetryActivityTick(); contentView.ScrollVertical(1); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.PageUp:
                 case KeyCode.B:
                     if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
+                    TelemetryActivityTick();
                     contentView.ScrollVertical(-6);
                     SaveCurrentScroll();
                     e.Handled = true;
@@ -1751,7 +2071,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case KeyCode.PageDown:
                 case KeyCode.Space:
                     if (_savedScrollY > 0) { JumpToSaved(); }   // 有历史进度 → Space 跳回
-                    else { contentView.ScrollVertical(6); SaveCurrentScroll(); }
+                    else { TelemetryActivityTick(); contentView.ScrollVertical(6); SaveCurrentScroll(); }
                     e.Handled = true;
                     break;
                 case KeyCode.Enter:
@@ -1800,6 +2120,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     {
                         // Ctrl+D：半页向下（vim 习惯）
                         if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
+                        TelemetryActivityTick();
                         contentView.ScrollVertical(3);
                         SaveCurrentScroll();
                         e.Handled = true;
@@ -1808,6 +2129,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     {
                         // Ctrl+U：半页向上（vim 习惯）
                         if (_savedScrollY > 0) { _savedScrollY = -1; UpdateStats(); }
+                        TelemetryActivityTick();
                         contentView.ScrollVertical(-3);
                         SaveCurrentScroll();
                         e.Handled = true;
@@ -1865,6 +2187,25 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 e.Handled = true;
             }
         };
+
+        // Telemetry 同意对话框（TUI，仅 unset 时询问一次；默认保持关闭）
+        void EnsureTelemetryConsentTui()
+        {
+            if (TelemetryService.Consent != "unset") return;
+            var dlg = new Dialog { Title = " " + Lang.T("Reading Telemetry") + " ", Width = 78, Height = 16 };
+            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 10, ReadOnly = true, CanFocus = false, WordWrap = true };
+            txt.Text = Lang.T("Sip 可以记录你的阅读行为（哪些文章被打开/读完/跳过、AI 调用情况），用于未来改进内容筛选。\n\nTelemetry 默认关闭。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你可以随时查看、关闭、删除或导出。") + "\n\n" +
+                Lang.T("[ 开启 Telemetry ]   [ 保持关闭 ]");
+            var enable = new Button { Text = Lang.T("开启 Telemetry"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
+            var keep = new Button { Text = Lang.T("保持关闭"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
+            dlg.Add(txt, enable, keep);
+            bool enabled = false;
+            enable.Accepted += (s, e) => { enabled = true; dlg.RequestStop(); };
+            keep.Accepted += (s, e) => dlg.RequestStop();
+            enable.Initialized += (s, e) => keep.SetFocus();   // 默认焦点在「保持关闭」
+            Application.Run(dlg);
+            TelemetryService.SetConsent(enabled ? "enabled" : "disabled");
+        }
 
         // 全文抓取同意对话框（TUI）：要求输入指定短语，同意后写标记文件
         bool FulltextConsentDialog()
@@ -2829,7 +3170,9 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
         int versionCount = r.GetInt32(5);
         int archivedCount = r.GetInt32(6);
         bool hasHistory = archivedCount > 0;
-        string display = CjkSpace(title) + (hasHistory ? " ✎" : "");
+        var sig = GetSignal((int)id);
+        string marks = (sig?.UserLike == true ? "♥" : "") + (sig?.AiLike == true ? "🤖" : "");
+        string display = CjkSpace(title) + (marks.Length > 0 ? " " + marks : "") + (hasHistory ? " ✎" : "");
         nodes.Add(new TuiNode
         {
             IsFeed = false,
@@ -3491,13 +3834,19 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath, bool 
             {
                 feedId = feedRealId,
                 feedTitle,
-                articles = items.Select(a => new
+                articles = items.Select(a =>
                 {
-                    itemId = a.RealId,
-                    displayNum = a.DisplayNum,
-                    title = a.Title,
-                    hasHistory = a.HasHistory,
-                    quality = a.Quality
+                    var sig = GetSignal(a.RealId);
+                    return new
+                    {
+                        itemId = a.RealId,
+                        displayNum = a.DisplayNum,
+                        title = a.Title,
+                        hasHistory = a.HasHistory,
+                        quality = a.Quality,
+                        liked = sig?.UserLike ?? false,
+                        aiLiked = sig?.AiLike ?? false
+                    };
                 })
             }
         });
@@ -3508,7 +3857,9 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath, bool 
     Console.WriteLine(Lang.T("  [seq/real] left = list sequence, right = global article ID (use the right one with --show/--versions/--summary)"));
     foreach (var a in items)
     {
-        string marker = (a.HasHistory ? " ✎" : "") + (a.Quality == "short" ? Lang.T(" [摘要]") : a.Quality == "empty" ? Lang.T(" [无正文]") : "");
+        var sig = GetSignal(a.RealId);
+        string marks = (sig?.UserLike == true ? "♥" : "") + (sig?.AiLike == true ? "🤖" : "");
+        string marker = (marks.Length > 0 ? " " + marks : "") + (a.HasHistory ? " ✎" : "") + (a.Quality == "short" ? Lang.T(" [摘要]") : a.Quality == "empty" ? Lang.T(" [无正文]") : "");
         Console.WriteLine($"  [{a.DisplayNum}/{a.RealId}] {CjkSpace(a.Title)}{marker}");
     }
 }
@@ -3559,6 +3910,7 @@ void ShowArticleJson(int itemId, string dbPath)
     string author = r.IsDBNull(5) ? "" : r.GetString(5);
     string feed = r.IsDBNull(6) ? "" : r.GetString(6);
 
+    var sig = GetSignal(itemId);
     JsonOut(new
     {
         success = true,
@@ -3571,6 +3923,8 @@ void ShowArticleJson(int itemId, string dbPath)
             published = pub,
             author,
             quality = ContentQuality(content, desc),
+            liked = sig?.UserLike ?? false,
+            aiLiked = sig?.AiLike ?? false,
             content = string.IsNullOrWhiteSpace(content) ? desc : content
         }
     });
@@ -4725,28 +5079,39 @@ void ReportError(string code, string message, string? suggestion = null, string?
 // 兼容服务均可；API Key 可选（本地 Ollama 不需要，填了才带 Bearer 头）
 async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg)
 {
-    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-    string? key = CredGet("embedding_api_key");
-    if (!string.IsNullOrEmpty(key))
-        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
-
-    var body = new { model = cfg.Embedding.Model, input = text };
-    var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
-        new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
-    if (!resp.IsSuccessStatusCode)
-        throw new AiException("MODEL_UNAVAILABLE", Lang.T("Embedding request failed (HTTP {0})", (int)resp.StatusCode),
-            Lang.T("Verify the endpoint/port/model name; with Ollama run ollama list / ollama pull first"), await resp.Content.ReadAsStringAsync());
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    bool ok = false;
     try
     {
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
-        return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        string? key = CredGet("embedding_api_key");
+        if (!string.IsNullOrEmpty(key))
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+
+        var body = new { model = cfg.Embedding.Model, input = text };
+        var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings",
+            new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+        if (!resp.IsSuccessStatusCode)
+            throw new AiException("MODEL_UNAVAILABLE", Lang.T("Embedding request failed (HTTP {0})", (int)resp.StatusCode),
+                Lang.T("Verify the endpoint/port/model name; with Ollama run ollama list / ollama pull first"), await resp.Content.ReadAsStringAsync());
+        try
+        {
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
+            ok = true;
+            return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
+        }
+        catch (JsonException)
+        {
+            // 返回的不是 JSON（比如端点缺少 /v1 返回的 HTML），给出友好提示而非崩溃
+            throw new AiException("INVALID_RESPONSE", Lang.T("Embedding service did not return JSON"),
+                Lang.T("Check whether the endpoint is missing /v1 (correct form http://host:port/v1)"));
+        }
     }
-    catch (JsonException)
+    finally
     {
-        // 返回的不是 JSON（比如端点缺少 /v1 返回的 HTML），给出友好提示而非崩溃
-        throw new AiException("INVALID_RESPONSE", Lang.T("Embedding service did not return JSON"),
-            Lang.T("Check whether the endpoint is missing /v1 (correct form http://host:port/v1)"));
+        // 遥测：记录 ai_call（不记 prompt/响应内容）
+        TelemetryService.RecordAiCall("embedding", cfg.Embedding.Provider, cfg.Embedding.Model, ok, sw.ElapsedMilliseconds);
     }
 }
 
@@ -5031,16 +5396,22 @@ void SearchCli(string[] args, string dbPath)
                 query,
                 threshold,
                 feedId = feedReal,
-                results = results.Select(h => new
+                results = results.Select(h =>
                 {
-                    itemId = h.ItemId,
-                    title = h.Title,
-                    description = h.Description,
-                    link = h.Link,
-                    feedId = h.FeedId,
-                    feedTitle = h.FeedTitle,
-                    score = Math.Round(h.Score, 4),
-                    quality = ContentQuality(h.Content, h.Description)
+                    var sig = GetSignal(h.ItemId);
+                    return new
+                    {
+                        itemId = h.ItemId,
+                        title = h.Title,
+                        description = h.Description,
+                        link = h.Link,
+                        feedId = h.FeedId,
+                        feedTitle = h.FeedTitle,
+                        score = Math.Round(h.Score, 4),
+                        quality = ContentQuality(h.Content, h.Description),
+                        liked = sig?.UserLike ?? false,
+                        aiLiked = sig?.AiLike ?? false
+                    };
                 }),
                 total = results.Count
             }
@@ -5396,31 +5767,42 @@ void DeleteArticleByGuid(string guid, string dbPath)
 // ══════════ LLM 摘要服务（OpenAI 兼容，端点可自定义）═══════════
 async Task<string?> CallLlmAsync(string prompt, AiConfig cfg)
 {
-    string? key = CredGet("llm_api_key");
-
-    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
-    if (!string.IsNullOrEmpty(key))
-        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
-    var body = new
-    {
-        model = cfg.Llm.Model,
-        messages = new[] { new { role = "user", content = prompt } },
-        temperature = 0.3
-    };
-    var resp = await client.PostAsync($"{cfg.Llm.ApiEndpoint}/chat/completions",
-        new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
-    if (!resp.IsSuccessStatusCode)
-        throw new AiException("API_KEY_INVALID", Lang.T("LLM request failed (HTTP {0})", (int)resp.StatusCode),
-            Lang.T("Check the API key / model name / endpoint config"), await resp.Content.ReadAsStringAsync());
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    bool ok = false;
     try
     {
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        string? key = CredGet("llm_api_key");
+
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+        if (!string.IsNullOrEmpty(key))
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+        var body = new
+        {
+            model = cfg.Llm.Model,
+            messages = new[] { new { role = "user", content = prompt } },
+            temperature = 0.3
+        };
+        var resp = await client.PostAsync($"{cfg.Llm.ApiEndpoint}/chat/completions",
+            new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json"));
+        if (!resp.IsSuccessStatusCode)
+            throw new AiException("API_KEY_INVALID", Lang.T("LLM request failed (HTTP {0})", (int)resp.StatusCode),
+                Lang.T("Check the API key / model name / endpoint config"), await resp.Content.ReadAsStringAsync());
+        try
+        {
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            ok = true;
+            return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        }
+        catch (JsonException)
+        {
+            throw new AiException("INVALID_JSON", Lang.T("LLM service did not return JSON"),
+                Lang.T("Check whether the endpoint is missing /v1 (e.g. https://api.deepseek.com/v1)"));
+        }
     }
-    catch (JsonException)
+    finally
     {
-        throw new AiException("INVALID_JSON", Lang.T("LLM service did not return JSON"),
-            Lang.T("Check whether the endpoint is missing /v1 (e.g. https://api.deepseek.com/v1)"));
+        // 遥测：记录 ai_call（不记 prompt/响应内容）
+        TelemetryService.RecordAiCall("llm", cfg.Llm.Provider, cfg.Llm.Model, ok, sw.ElapsedMilliseconds);
     }
 }
 
@@ -6241,6 +6623,334 @@ class FulltextVecEntry { public int ItemId { get; set; } public int FeedId { get
 
 // 来源健康记录（feed_health.json）
 class FeedHealthEntry { public int FailCount { get; set; } public string LastError { get; set; } = ""; public string LastOkAt { get; set; } = ""; }
+
+// 文章标记信号（article_signals.json）
+class SignalEntry
+{
+    public bool UserLike { get; set; }
+    public bool AiLike { get; set; }
+    public string AiReason { get; set; } = "";
+    public string UpdatedAt { get; set; } = "";
+}
+
+// ══════════ Telemetry 服务（本地事实层）══════════
+// 硬约束：默认关闭 / 首次征得同意 / 仅本地 / 绝不自动上传 / 可查看-关闭-删除-导出 /
+//         记录事实不造画像 / 遥测损坏绝不影响 rss.db 与阅读（独立库 + 完整性检查 + 降级）
+// 性能：事件白名单 + 内存缓冲批量写（50 条或 5 秒）+ 容量上限（10 万条留 8 万）
+class TelemetryEvent
+{
+    public long Id { get; set; }
+    public string Timestamp { get; set; } = "";
+    public string SessionId { get; set; } = "";
+    public string Type { get; set; } = "";
+    public int? ArticleId { get; set; }
+    public int? SourceId { get; set; }
+    public int? VersionId { get; set; }
+    public string? Surface { get; set; }
+    public int? Position { get; set; }
+    public string DataJson { get; set; } = "";
+}
+
+static class TelemetryService
+{
+    static string _dir = "";
+    static string DbPath => Path.Combine(_dir, "telemetry.db");
+    static string ConsentPath => Path.Combine(_dir, "telemetry_consent.json");
+    static string CheckpointPath => Path.Combine(_dir, "telemetry_checkpoint.json");
+
+    static string _consent = "unset";      // unset / enabled / disabled
+    static bool _failed = false;           // 会话内连续写失败 → 降级停用
+    static int _consecFails = 0;
+    static string _sessionId = "";
+    static readonly object _lock = new();
+    static readonly List<TelemetryEvent> _buffer = new();
+    static System.Threading.Timer? _flushTimer;
+
+    public static bool IsEnabled => _consent == "enabled" && !_failed;
+    public static string Consent => _consent;
+
+    public static void Init(string dataDir)
+    {
+        _dir = dataDir;
+        try { Directory.CreateDirectory(_dir); } catch { }
+        LoadConsent();
+        CheckIntegrity();
+        _sessionId = Guid.NewGuid().ToString("N");
+        try { _flushTimer = new System.Threading.Timer(_ => Flush(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5)); } catch { }
+    }
+
+    public static void Shutdown()
+    {
+        try { _flushTimer?.Dispose(); } catch { }
+        Flush();
+        WriteCheckpoint("ok");
+    }
+
+    static void LoadConsent()
+    {
+        try
+        {
+            if (File.Exists(ConsentPath))
+            {
+                var d = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(ConsentPath));
+                if (d != null && d.TryGetValue("state", out var s) && (s == "enabled" || s == "disabled"))
+                    _consent = s;
+            }
+        }
+        catch { _consent = "unset"; }
+    }
+
+    public static void SetConsent(string state)
+    {
+        _consent = state == "enabled" ? "enabled" : "disabled";
+        try
+        {
+            File.WriteAllText(ConsentPath, JsonSerializer.Serialize(new
+            {
+                state = _consent,
+                updatedAt = DateTime.Now.ToString("O")
+            }, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+        }
+        catch { }
+    }
+
+    // 完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃、绝不动 rss.db
+    static void CheckIntegrity()
+    {
+        try
+        {
+            if (!File.Exists(DbPath)) { CreateSchema(); WriteCheckpoint("created"); return; }
+            bool ok = IsSqliteFile(DbPath);
+            if (ok)
+            {
+                try
+                {
+                    using var conn = new SqliteConnection($"Data Source={DbPath}");
+                    conn.Open();
+                    var c = conn.CreateCommand();
+                    c.CommandText = "PRAGMA quick_check";
+                    ok = c.ExecuteScalar()?.ToString() == "ok";
+                }
+                catch { ok = false; }   // 打开/查询失败（如 "file is not a database"）也视为损坏
+            }
+            if (ok) { WriteCheckpoint("ok"); return; }
+            string corrupt = DbPath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            try { File.Move(DbPath, corrupt); } catch { try { File.Delete(DbPath); } catch { } }
+            CreateSchema();
+            WriteCheckpoint("recreated");
+            Console.Error.WriteLine("telemetry.db 完整性检查失败，已保留现场并重建：" + corrupt);
+        }
+        catch { /* 完整性检查失败不阻断启动 */ }
+    }
+
+    // 校验 SQLite 文件头魔数（"SQLite format 3\0"）
+    static bool IsSqliteFile(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+            Span<byte> head = stackalloc byte[16];
+            return fs.Read(head) >= 16 && head.SequenceEqual("SQLite format 3\0"u8);
+        }
+        catch { return false; }
+    }
+
+    static void CreateSchema()
+    {
+        using var conn = new SqliteConnection($"Data Source={DbPath}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            CREATE TABLE IF NOT EXISTS telemetry_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                article_id INTEGER,
+                source_id INTEGER,
+                version_id INTEGER,
+                surface TEXT,
+                position INTEGER,
+                data_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_telemetry_type ON telemetry_events(type);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry_events(timestamp);
+        ";
+        c.ExecuteNonQuery();
+    }
+
+    static void WriteCheckpoint(string status)
+    {
+        try
+        {
+            long size = File.Exists(DbPath) ? new FileInfo(DbPath).Length : 0;
+            File.WriteAllText(CheckpointPath, JsonSerializer.Serialize(new
+            {
+                status,
+                dbFile = "telemetry.db",
+                size,
+                lastOkAt = DateTime.Now.ToString("O")
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch { }
+    }
+
+    // 事件入队（内存缓冲；只接受低频事件，滚动/按键不在此列）
+    public static void Record(string type, int? articleId = null, int? sourceId = null, int? versionId = null,
+                              string? surface = null, int? position = null, object? data = null)
+    {
+        if (!IsEnabled) return;
+        lock (_lock)
+        {
+            if (_buffer.Count >= 500) _buffer.Clear();   // 极端积压兜底，防止内存膨胀
+            _buffer.Add(new TelemetryEvent
+            {
+                Timestamp = DateTime.Now.ToString("O"),
+                SessionId = _sessionId,
+                Type = type,
+                ArticleId = articleId,
+                SourceId = sourceId,
+                VersionId = versionId,
+                Surface = surface,
+                Position = position,
+                DataJson = data == null ? "" : JsonSerializer.Serialize(data)
+            });
+        }
+        if (_buffer.Count >= 50) Flush();
+    }
+
+    public static void RecordAiCall(string operation, string provider, string model, bool success, long durationMs)
+        => Record("ai_call", data: new { operation, provider, model, success, durationMs });
+
+    // 批量落库（best-effort；连续失败 → 本会话降级停用）
+    static void Flush()
+    {
+        if (!IsEnabled) return;
+        List<TelemetryEvent> batch;
+        lock (_lock)
+        {
+            if (_buffer.Count == 0) return;
+            batch = _buffer.ToList();
+            _buffer.Clear();
+        }
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            using var tx = conn.BeginTransaction();
+            var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = @"INSERT INTO telemetry_events
+                (timestamp, session_id, type, article_id, source_id, version_id, surface, position, data_json)
+                VALUES (@ts, @sid, @type, @aid, @fsid, @vid, @sf, @pos, @dj)";
+            cmd.Parameters.Add("@ts", SqliteType.Text);
+            cmd.Parameters.Add("@sid", SqliteType.Text);
+            cmd.Parameters.Add("@type", SqliteType.Text);
+            cmd.Parameters.Add("@aid", SqliteType.Integer);
+            cmd.Parameters.Add("@fsid", SqliteType.Integer);
+            cmd.Parameters.Add("@vid", SqliteType.Integer);
+            cmd.Parameters.Add("@sf", SqliteType.Text);
+            cmd.Parameters.Add("@pos", SqliteType.Integer);
+            cmd.Parameters.Add("@dj", SqliteType.Text);
+            foreach (var e in batch)
+            {
+                cmd.Parameters["@ts"].Value = e.Timestamp;
+                cmd.Parameters["@sid"].Value = e.SessionId;
+                cmd.Parameters["@type"].Value = e.Type;
+                cmd.Parameters["@aid"].Value = (object?)e.ArticleId ?? DBNull.Value;
+                cmd.Parameters["@fsid"].Value = (object?)e.SourceId ?? DBNull.Value;
+                cmd.Parameters["@vid"].Value = (object?)e.VersionId ?? DBNull.Value;
+                cmd.Parameters["@sf"].Value = (object?)e.Surface ?? DBNull.Value;
+                cmd.Parameters["@pos"].Value = (object?)e.Position ?? DBNull.Value;
+                cmd.Parameters["@dj"].Value = e.DataJson;
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+            _consecFails = 0;
+            CapIfNeeded(conn);
+        }
+        catch
+        {
+            _consecFails++;
+            if (_consecFails >= 3) _failed = true;   // 连续 3 次失败 → 本会话停用，阅读不受影响
+        }
+    }
+
+    // 容量上限：超过 10 万条 → 只保留最新 8 万
+    static void CapIfNeeded(SqliteConnection conn)
+    {
+        try
+        {
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT COUNT(*) FROM telemetry_events";
+            long n = (long)c.ExecuteScalar()!;
+            if (n > 100_000)
+            {
+                c.CommandText = "DELETE FROM telemetry_events WHERE id < (SELECT id FROM telemetry_events ORDER BY id DESC LIMIT 1 OFFSET 80000)";
+                c.ExecuteNonQuery();
+            }
+        }
+        catch { }
+    }
+
+    public static (long Count, string? First, string? Last) Stats()
+    {
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM telemetry_events";
+            using var r = c.ExecuteReader();
+            if (r.Read()) return (r.GetInt64(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2));
+        }
+        catch { }
+        return (0, null, null);
+    }
+
+    public static void Clear()
+    {
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "DELETE FROM telemetry_events";
+            c.ExecuteNonQuery();
+        }
+        catch { }
+    }
+
+    public static List<TelemetryEvent> AllEvents(int limit = 100000)
+    {
+        var list = new List<TelemetryEvent>();
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={DbPath}");
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT id, timestamp, session_id, type, article_id, source_id, version_id, surface, position, data_json FROM telemetry_events ORDER BY id DESC LIMIT @n";
+            c.Parameters.AddWithValue("@n", limit);
+            using var r = c.ExecuteReader();
+            while (r.Read())
+                list.Add(new TelemetryEvent
+                {
+                    Id = r.GetInt64(0),
+                    Timestamp = r.GetString(1),
+                    SessionId = r.GetString(2),
+                    Type = r.GetString(3),
+                    ArticleId = r.IsDBNull(4) ? null : r.GetInt32(4),
+                    SourceId = r.IsDBNull(5) ? null : r.GetInt32(5),
+                    VersionId = r.IsDBNull(6) ? null : r.GetInt32(6),
+                    Surface = r.IsDBNull(7) ? null : r.GetString(7),
+                    Position = r.IsDBNull(8) ? null : r.GetInt32(8),
+                    DataJson = r.IsDBNull(9) ? "" : r.GetString(9)
+                });
+        }
+        catch { }
+        return list;
+    }
+}
 
 // 全文搜索结果条目
 class GrepSnippetResult

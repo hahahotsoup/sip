@@ -114,6 +114,32 @@ sip 会告诉你：
 
 ---
 
+## Telemetry 与隐私
+
+sip 内置一个**本地阅读遥测**（事件层），用于未来改进内容筛选与推荐。它的边界是硬性的：
+
+| 原则 | 说明 |
+|------|------|
+| **默认关闭** | `unset`（未选择）= 不记录；首次启动 TUI 会询问一次，默认「保持关闭」 |
+| **仅本地保存** | 数据存 `readwithhotsoup/telemetry.db`（独立库，与 `rss.db` 完全隔离） |
+| **绝不自动上传** | 没有任何上传逻辑；只有你主动 `telemetry export` 后才可能分享 |
+| **可查看** | `sip telemetry show` 能看到原始事件（时间/类型/文章/数据） |
+| **可关闭** | `sip telemetry disable`（停止记录，保留历史） |
+| **可删除** | `sip telemetry clear`（清空事件，不影响你的开关选择与其它数据） |
+| **可导出** | `sip telemetry export [file]` 生成 JSON，由你自行决定是否交给开发者 |
+| **记录事实，不造画像** | 只记「哪篇文章被打开/读完/跳过、AI 调用情况」等事实，不做用户偏好推断 |
+
+**记录什么**（低频事件，滚动/按键永不记录）：
+- `article_open` / `article_progress`（25/50/75/100% 里程碑）/ `article_complete` / `article_skip`（主动离开且进度 <10%）
+- `ai_call`（operation/provider/model/success/耗时；**不记 prompt/响应/全文/tokens**）
+- `article_like`（`--like` 标记，区分 `actor: user` / `actor: ai`）
+
+**安全设计**：telemetry.db 启动时做完整性检查，损坏则改名保留现场（`.corrupt-时间戳`）并自动重建，**绝不影响 rss.db 与阅读**；事件经内存缓冲批量写入（50 条或 5 秒），连续写失败自动降级停用。**非交互/agent 场景（非 TTY、`--ignoresafeannouncement`）一律不询问、保持关闭。**
+
+**文章标记**（`article_signals.json`，与遥测分离）：`sip --like <id>` 用户点赞（♥），`sip --like <id> --ai [理由]` AI 判断（🤖），`sip --likes` 查看；侧栏/`-l N`/JSON 输出均可见。
+
+---
+
 ## 快速开始
 ### ai skill
 代码里的https://github.com/hahahotsoup/sipintui/tree/main/.opencode/skills/sip-rss 内含一份skill，直接喂给ai即可

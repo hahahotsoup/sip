@@ -435,4 +435,9 @@
   "Import done: {0} added, {1} skipped (already exist), {2} failed": "导入完成：新增 {0}，跳过 {1}（已存在），失败 {2}",
   "  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)": "  --feed-info <编号>  来源身份与健康（类型/作者/官网/更新时间/状态；--json）",
   "  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds": "  --export-opml [文件]  导出订阅源为 OPML；--import-opml <文件> 导入订阅源"
+,
+  "Usage: sip --like <article-id> [--ai [reason]]": "用法: sip --like <文章编号> [--ai [理由]]",
+  "Usage: sip telemetry status | show [--limit N] | enable | disable | clear | export [file]": "用法: sip telemetry status | show [--limit N] | enable | disable | clear | export [文件]",
+  "  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks": "  --like <编号> [--ai [理由]]  标记文章（♥ 用户 / 🤖 AI）；--likes 查看标记",
+  "  telemetry status|show|enable|disable|clear|export  local reading telemetry (default OFF)": "  telemetry status|show|enable|disable|clear|export  本地阅读遥测（默认关闭）"
 }

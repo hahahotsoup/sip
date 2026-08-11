@@ -71,6 +71,9 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --feed-info <编号> [--json]` | 来源身份与健康：类型/作者/官网/更新时间/最近文章/状态（正常/⚠ 长期未更新/✗ 失败 N 次） |
 | `sip --export-opml [file]` | 导出全部订阅源为 OPML（默认 feeds.opml） |
 | `sip --import-opml <file>` | 从 OPML 批量导入订阅源（按 FeedUrl 跳过已存在） |
+| `sip --like <编号> [--ai [理由]]` | 标记文章：默认用户点赞（♥），`--ai` 表示 AI 判断用户会喜欢（🤖）；再执行 = 取消 |
+| `sip --likes [--json]` | 列出所有标记文章 |
+| `sip telemetry status/show/enable/disable/clear/export` | 本地阅读遥测（**默认关闭**；仅本地、不上传；可查看/关闭/删除/导出） |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
@@ -190,3 +193,4 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 
 - TUI 里按 `M`（或命令行 `manage`）是**订阅源管理页**（给人用的，AI 不需要）。
 - TUI 命令行 `fetch` = 抓当前文章全文；**首次使用全文抓取需要用户输入同意短语**（一次性，交互式）。AI 一律用 `sip --fulltext <id> --yes` 跳过同意与二次确认——**不要代用户在 TUI 里操作同意流程**，需要抓全文时告诉用户或直接跑 CLI 带 `--yes`。
+- **Telemetry 默认关闭**：AI/非交互场景不会询问、保持关闭，无需处理；即使用户开启了遥测，也只在本地记录（`telemetry.db`），不会自动上传。
