@@ -73,7 +73,7 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --import-opml <file>` | 从 OPML 批量导入订阅源（按 FeedUrl 跳过已存在） |
 | `sip --like <编号> [--ai [理由]]` | 标记文章：默认用户点赞（♥），`--ai` 表示 AI 判断用户会喜欢（🤖）；再执行 = 取消 |
 | `sip --likes [--json]` | 列出所有标记文章 |
-| `sip --today [--json]` | 今日阅读清单（规则式选文，上限=目标 5 篇；含预估时长与理由；开启 telemetry 后可跟踪完成进度） |
+| `sip --today [--json] [--refresh] [--quick N]` | 今日阅读清单（规则式选文，上限=目标 5 篇；含预估时长与理由）。**一天固定一碗**（当日缓存，新文章当天不自动进清单）；`--refresh` 显式重新生成；要当天新内容可直接 `--grep`/`--show`；开启 telemetry 后可跟踪完成进度 |
 | `sip telemetry status/show/enable/disable/clear/export` | 本地阅读遥测（**默认关闭**；仅本地、不上传；可查看/关闭/删除/导出） |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |

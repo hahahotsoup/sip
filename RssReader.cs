@@ -949,6 +949,75 @@ void TelemetryCli(string[] args, string dbPath)
 // ══════════ Sip Today v1（规则式每日清单，先引导习惯，不做个性化）══════════
 // 选文规则（可解释、无黑盒）：近 48h 新增 / 近期被作者更新 / 全文质量 / ♥🤖 标记加权。
 // 等 telemetry 积累足够行为数据后，再演进为个性化排序。
+//
+// 「一天一碗」：当日清单缓存到 sip_today_cache.json，一天只生成一次（仪式感、防反复刷）；
+// --refresh 可显式重新生成（新订阅/新标记当天可见）；进度(done/target)保持实时不进缓存。
+string TodayCachePath() => Path.Combine(dataDir, "sip_today_cache.json");
+
+// 返回(缓存日期, 生成时间, 条目)；缓存缺失/损坏返回空
+(string Date, string GeneratedAt, List<TodayItem> Items) LoadTodayCache()
+{
+    try
+    {
+        if (!File.Exists(TodayCachePath())) return ("", "", new List<TodayItem>());
+        var doc = JsonDocument.Parse(File.ReadAllText(TodayCachePath()));
+        var root = doc.RootElement;
+        string date = root.TryGetProperty("date", out var d) ? d.GetString() ?? "" : "";
+        string genAt = root.TryGetProperty("generatedAt", out var g) ? g.GetString() ?? "" : "";
+        var items = new List<TodayItem>();
+        if (root.TryGetProperty("items", out var arr))
+            foreach (var it in arr.EnumerateArray())
+            {
+                items.Add(new TodayItem
+                {
+                    ItemId = it.TryGetProperty("itemId", out var ii) ? ii.GetInt32() : 0,
+                    Title = it.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
+                    Source = it.TryGetProperty("source", out var s) ? s.GetString() ?? "" : "",
+                    Reason = it.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "",
+                    Minutes = it.TryGetProperty("minutes", out var m) ? m.GetDouble() : 0,
+                    Score = it.TryGetProperty("score", out var sc) ? sc.GetInt32() : 0
+                });
+            }
+        return (date, genAt, items);
+    }
+    catch { return ("", "", new List<TodayItem>()); }   // 缓存损坏 → 当无缓存
+}
+
+void SaveTodayCache(string date, List<TodayItem> items)
+{
+    try
+    {
+        File.WriteAllText(TodayCachePath(), JsonSerializer.Serialize(new
+        {
+            date,
+            generatedAt = DateTime.Now.ToString("O"),
+            items = items.Select(i => new
+            {
+                itemId = i.ItemId, title = i.Title, source = i.Source,
+                reason = i.Reason, minutes = i.Minutes, score = i.Score
+            })
+        }, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+// 今日清单：refresh=false 时当天固定（读缓存）；跨天/无缓存/损坏/refresh=true 时重算并落盘
+List<TodayItem> GetTodayList(string dbPath, int limit, bool refresh, out string generatedAt)
+{
+    string today = DateTime.Now.ToString("yyyy-MM-dd");
+    var (cacheDate, cacheAt, cacheItems) = LoadTodayCache();
+    if (!refresh && cacheDate == today && cacheItems.Count > 0)
+    {
+        // 缓存里的生成时间是 ISO，格式化到 HH:mm 便于展示
+        generatedAt = TryParseIso(cacheAt) is DateTime g ? g.ToString("HH:mm") : cacheAt;
+        return cacheItems.Take(limit).ToList();
+    }
+    var items = BuildTodayList(dbPath, limit);
+    SaveTodayCache(today, items);
+    generatedAt = DateTime.Now.ToString("HH:mm");
+    return items;
+}
+
 List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
 {
     var items = new List<TodayItem>();
@@ -1034,16 +1103,17 @@ List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
     return (done, target, true);
 }
 
-// CLI：sip --today [--json]
+// CLI：sip --today [--json] [--refresh] [--quick N]
 void TodayCli(string[] args, string dbPath)
 {
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    bool refresh = args.Any(a => a.Equals("--refresh", StringComparison.OrdinalIgnoreCase));
     int quick = 5;
     for (int i = 0; i < args.Length - 1; i++)
         if (args[i].Equals("--quick", StringComparison.OrdinalIgnoreCase) && int.TryParse(args[i + 1], out int q))
             quick = Math.Clamp(q, 1, 5);   // 时间不够就只喝一小口：--quick N
     var (done, target, tracking) = TodayProgress(dbPath);
-    var list = BuildTodayList(dbPath, quick);   // 清单上限 = 目标，不堆量
+    var list = GetTodayList(dbPath, quick, refresh, out string generatedAt);   // 一天一碗；--refresh 重生成
 
     if (json)
     {
@@ -1053,6 +1123,8 @@ void TodayCli(string[] args, string dbPath)
             data = new
             {
                 date = DateTime.Now.ToString("yyyy-MM-dd"),
+                generatedAt,
+                refreshed = refresh,
                 target,
                 done,
                 tracking,
@@ -1071,6 +1143,8 @@ void TodayCli(string[] args, string dbPath)
     }
 
     Console.WriteLine(Lang.T("今日哈汤 · {0}", DateTime.Now.ToString("yyyy-MM-dd")));
+    if (refresh)
+        Console.WriteLine(Lang.T("（已重新生成今日哈汤）"));
     Console.WriteLine("─────────────────────");
     if (list.Count == 0)
     {
@@ -1088,6 +1162,8 @@ void TodayCli(string[] args, string dbPath)
         Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇 · 已完成 {2} 篇{3}", total, target, done, done >= target ? Lang.T(" 🎉 今天结束") : ""));
     else
         Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（开启 telemetry 可跟踪完成进度）", total, target));
+    if (!refresh)
+        Console.WriteLine(Lang.T("（今日哈汤已生成于 {0} · --refresh 可重新来一碗 · 新文章随时可从侧栏/--search/--grep 看）", generatedAt));
 }
 
 // ══════════ CLI 参数处理 ══════════
@@ -3127,7 +3203,7 @@ List<string> TodayStartScreenLines(string dbPath)
             return lines;
         }
 
-        var list = BuildTodayList(dbPath, 5);
+        var list = GetTodayList(dbPath, 5, refresh: false, out _);   // 一天一碗,当天固定
         var (done, target, tracking) = TodayProgress(dbPath);
         if (list.Count == 0)
             lines.Add(Lang.T("  今天还没有值得读的，回车后去更新订阅源"));
