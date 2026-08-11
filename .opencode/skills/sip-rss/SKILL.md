@@ -16,7 +16,7 @@ sip --config                                   # ① 检查 AI 是否已配置�
 sip --search "test" --ignoresafeannouncement   # ② 试探搜索：报「尚无向量索引 / run --index」→ 需先 --index
 ```
 
-- **未配置 AI**（`--config` 无有效配置）：先跑 `sip --init`（交互式向导，会提示用户录入 API Key；若用户不在场，**告诉用户需要先手动执行 `sip --init` 或配置 ai_config.json**，不要假装已配置）
+- **未配置 AI**（`--config` 无有效配置）：先跑 `sip --init`（交互式向导，会提示用户录入 API Key；若用户不在场，**告诉用户需要先手动执行 `sip --init` 或配置 ai_config.json**，不要假装已配置。stdin 被重定向时 `--init` 不崩溃，输入会回显）
 - **「尚无向量索引」/ 搜索为空但该有内容**：先跑 `sip --index`（交互式选择源，或先 `sip -l` 看有哪些源）
 - **换了 Embedding 模型报「模型维度变化」**：跑 `sip --reindex`
 - **`--grep` 不依赖 AI**，永远可用；AI 未配置时用它做全文检索是可靠的兜底
@@ -62,11 +62,11 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --reindex` | 更换 Embedding 模型后重新向量化 |
 | `sip --search <查询> [--feed 编号] [--threshold 0.7] [--json]` | 语义搜索（Embedding） |
 | `sip --grep <关键词> [--limit N] [--max-snippets N] [--json] [--full]` | 全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）；默认输出「编号+标题+出现次数+±50 字符片段」，有上限不刷屏；`--json` 结构化、`--full` 输出整篇摘要 |
-| `sip --show <编号> --json` | 原文 JSON 直出：标题/来源/链接/时间/作者 + 原始正文（未渲染）打到标准输出（**AI 读全文用这个**）。⚠️ 裸 `sip --show <编号>` 是全屏阅读界面（给人读的，会占用终端），**AI 一律加 `--json`** |
+| `sip --show <编号> --json` | 原文 JSON 直出：标题/来源/链接/时间/作者 + 原始正文（未渲染）打到标准输出（**AI 读全文用这个**）；已抓取全文时额外带 `fulltext` 字段（读全文优先用该字段，比 DB 里的 RSS 摘要完整）。⚠️ 裸 `sip --show <编号>` 是全屏阅读界面（给人读的，会占用终端），**AI 一律加 `--json`** |
 | `sip --versions <编号>` | 列出文章的全部历史版本（含状态与时间）；用 `--show <版本编号> --json` 查看某版原文 |
 | `sip --diff <编号> [vA vB] [--json]` | 对比同一文章两个版本的正文（默认最近两版）；`--json` 给结构化 diff（`{from,to,changes:[{type,before,after}]}`） |
 | `sip --export <编号 | feed:N | all> [out.md|目录] --yes` | 把文章导出为 Markdown；`--yes` 跳过全部导出的确认 |
-| `sip --fulltext <编号> --yes --json` | 抓取文章**全文**到本地缓存并输出（RSS 摘要过短时用）；`--yes` 跳过同意/确认。⚠️ 全文抓取涉及抓取源站页面，需显式同意；不改数据库、不参与版本比对 |
+| `sip --fulltext <编号> --yes --json` | 抓取文章**全文**到本地缓存并输出（RSS 摘要过短时用）；`--yes` 跳过同意/确认。⚠️ 全文抓取涉及抓取源站页面，需显式同意；不改数据库、不参与版本比对。⚠️ **安全边界**：只抓 http/https；回环/链路本地/私网段默认拒绝（SSRF 防护），确需内网源时让用户在 `ai_config.json` 设 `"allowPrivateNet": true` |
 | `sip --purge-fulltext [编号]` | 清除全文缓存 |
 | `sip --feed-info <编号> [--json]` | 来源身份与健康：类型/作者/官网/更新时间/最近文章/状态（正常/⚠ 长期未更新/✗ 失败 N 次） |
 | `sip --export-opml [file]` | 导出全部订阅源为 OPML（默认 feeds.opml） |
@@ -146,6 +146,7 @@ sip --search "关键词A" --threshold 0.5 --ignoresafeannouncement
 | 结果很多但都不相关 | 阈值过低 → 升到 0.75~0.8 |
 | 本地 bge-m3 模型 | 相似度常落在 0.5~0.6，建议 0.5 |
 | 云端模型（text-embedding-3 等） | 0.7 附近合理 |
+| 命中来自抓取全文（`--fulltext` 过的文章） | 全文向量命中分普遍比标题向量**低 0.1~0.2**，搜「正文独有概念」偏少属正常，可降阈值重试 |
 
 #### 合并结果
 
@@ -160,7 +161,7 @@ sip --show 42 --json --ignoresafeannouncement        # 读 42 号文章全文（
 sip --show 42 --json --lang en-US --ignoresafeannouncement
 ```
 
-- `--show <编号> --json` 输出的是**未渲染的原始正文**（`content` 字段是 HTML 原文），可直接给 AI 读
+- `--show <编号> --json` 输出的是**未渲染的原始正文**（`content` 字段是 HTML 原文）；若该文抓取过全文，还会带 `fulltext` 字段（纯文本正文，优先用它回答，比 RSS 摘要完整），可直接给 AI 读
 - ⚠️ **裸 `sip --show <编号>`（不带 `--json`）会进入全屏阅读界面**，占用终端等待按键——AI 场景一律带 `--json`，不要裸跑
 - 优先用 `--show ... --json` 拿到的正文来回答用户，而不是只依赖 `--grep`/`--search` 的摘要片段
 

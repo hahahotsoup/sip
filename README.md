@@ -337,16 +337,16 @@ sip --summary-all                   # 为所有未生成摘要的文章生成摘
 
 | 命令 | 说明 |
 |------|------|
-| `--init` | 交互式首次配置：选择 Embedding 提供方、LLM 提供方，并录入 API Key |
+| `--init` | 交互式首次配置：选择 Embedding 提供方、LLM 提供方，并录入 API Key（stdin 被重定向时自动降级为普通输入，不崩溃） |
 | `--config` | 打印当前 AI 配置（不含密钥）及配置文件路径 |
 | `--index` | 为选中订阅源的文章批量生成 Embedding 向量 |
 | `--reindex` | 更换 Embedding 模型（维度变化）后，清除旧向量并全量重建 |
-| `--search <查询>` | 语义搜索；可选 `--feed 编号`、`--threshold 0.7`、`--json`。⚠️ 性能提示：跨全源搜索是向量全量扫描，优先用 `--grep`（SQL LIKE 精确匹配）；需要语义扩展时用 `--feed 编号` 限定单源，或调 `--threshold` 减少候选 |
+| `--search <查询>` | 语义搜索；可选 `--feed 编号`、`--threshold 0.7`、`--json`。⚠️ 性能提示：跨全源搜索是向量全量扫描，优先用 `--grep`（SQL LIKE 精确匹配）；需要语义扩展时用 `--feed 编号` 限定单源，或调 `--threshold` 减少候选。⚠️ 全文向量命中分通常比标题向量低 0.1~0.2，搜「正文独有概念」时结果偏少可适当降阈值 |
 | `--grep <关键词>` | 全文搜索（SQL LIKE，不依赖 AI）；默认输出「编号+标题+出现次数+±50 字符片段」，有上限（`--limit N` / `--max-snippets N` / `--json` / `--full`） |
 | `--summary <编号>` | 为单篇文章调用 LLM 生成摘要（`--json` 结构化）；`feed:<编号>` 为该源全部文章逐个生成 |
 | `--summary-all` | 为所有 `Summary` 为空的文章生成摘要 |
 
-**API Key** 存操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），不写入任何文件；非敏感配置存 `readwithhotsoup/ai_config.json`。
+**API Key** 存操作系统原生凭据库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），不写入任何文件；非敏感配置存 `readwithhotsoup/ai_config.json`（键名大小写不敏感，端点缺 `http(s)://` 协议头时自动补全；`"allowPrivateNet": true` 可放行内网全文抓取）。
 
 #### 错误码说明
 
@@ -383,9 +383,11 @@ sip --fulltext <编号> --json     # 结构化输出 {itemId, cached, content}
 sip --purge-fulltext [编号]      # 清缓存（不传编号 = 全清）
 ```
 
-- 全文存 `readwithhotsoup/fulltext/<itemId>.md`（文件缓存，**不改数据库**）；该源已索引时，全文向量存 `vecs.json` 并并入语义搜索
+- 全文存 `readwithhotsoup/fulltext/<itemId>.md`（文件缓存，**不改数据库**）；该源已索引时，全文向量存 `vecs.json` 并并入语义搜索；`--index`/`--reindex` 会自动给已有全文缓存的文章回补全文向量（先抓全文后索引也不再漏）
 - **Content 永远是主内容**，全文只做补充；显示时原文在上、全文在下，中间分界
 - 抓取不产生新版本、不参与 diff/更新
+- **抓取安全边界（SSRF 防护）**：只允许 http/https 链接；回环（127.0.0.1/::1）与链路本地/云元数据地址（169.254.0.0/16）一律拒绝；私网段（10/8、172.16/12、192.168/16、100.64/10）默认拒绝——确需抓取内网源时，在 `ai_config.json` 设 `"allowPrivateNet": true` 放行
+- `sip --show <编号> --json` 在已有全文缓存时输出 `fulltext` 字段（AI/脚本读全文无需先跑 `--fulltext` 再单独读文件）
 
 ---
 
@@ -458,6 +460,12 @@ sip --purge-fulltext [编号]      # 清缓存（不传编号 = 全清）
 | AI 摘要/向量缓存 | 摘要缓存复用不重复调用；模型不可用→恢复后 sidecar 合并搜索仍正确 |
 | OPML 往返 | 导出 → 导入 → 再导出，源不重复（幂等） |
 | 全文抓取同意 | consent 一次性生效；`--yes` / 交互路径长期一致 |
+
+---
+
+## 📋 欢迎阅读测试报告
+
+[sip 全面测试报告（2026-08-11）](sip-测试报告-2026-08-11.md) —— 51 项功能测试 + 30+ 项边界/异常注入 + 安全渗透 + 数据量压测 + 并发测试，报告中的 11 项缺陷（`-l` 列表 O(n²)、SSRF、终端注入、主库损坏容错等）已在 **v1.1** 全部修复并逐项复测。
 
 ---
 
