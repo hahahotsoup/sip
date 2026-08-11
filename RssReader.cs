@@ -206,12 +206,11 @@ void CollectLangLeaves(System.Text.Json.Nodes.JsonObject obj, List<KeyValuePair<
 }
 
 // CLI 命令结束后提示「有到期的订阅源」（不自动更新，只提醒用户手动 sip --sync）
-// 纯读库判断，零网络、不阻塞、不改变退出码；脚本/AI 可用 --ignoresafeannouncement 关掉
+// 纯读库判断，零网络、不阻塞、不改变退出码；--json 模式自动抑制（避免污染结构化输出）
 void RemindDueFeeds(string[] args, string dbPath)
 {
     try
     {
-        if (AiState.IgnoreAnnouncement) return;                       // 脚本/Agent 要纯净输出
         if (args.Contains("--json", StringComparer.OrdinalIgnoreCase)) return;  // 不能污染 | jq 的 JSON
         string cmd = args[0].ToLowerInvariant();
         if (cmd is "-h" or "--help") return;                          // 帮助页不带噪声

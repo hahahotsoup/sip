@@ -39,16 +39,21 @@ dotnet bin/Release/net10.0/sip.dll <命令> [参数]
 sip --search "关键词" --json --ignoresafeannouncement
 ```
 
+> 注意：`--ignoresafeannouncement` 只屏蔽安全横幅，**不屏蔽到期提醒**。非 `--json` 输出末尾可能出现「N 个订阅源已到期，运行 sip --sync 可更新」——这是有用信息，可据此建议用户执行 `--sync`；`--json` 模式会自动抑制该提醒（避免污染结构化输出）。
+
 **编码**：sip 一律输出 **UTF-8**。若调用环境的终端是 GBK/其他代码页（Windows cmd/PowerShell 默认 GBK），把输出按 UTF-8 解码即可，或在 PowerShell 里先执行 `[Console]::OutputEncoding = [Text.Encoding]::UTF8`；不要用 GBK 解码，否则中文乱码。
 
 ## 命令速查
 
 | 命令 | 说明 |
 |------|------|
-| `sip -l` | 列出所有订阅源（编号、标题、文章统计） |
-| `sip -l <编号>` | 列出某源的文章 |
+| `sip -l` | 列出所有订阅源（编号、标题、文章统计、健康标记）；`--json` 结构化输出 |
+| `sip -l <编号>` | 列出某源的文章（`--json` 结构化）。编号格式 `[列表序号/真实ID]`，`--show/--versions/--summary` 等命令用**右边**的真实 ID；行尾可能有 `[摘要]`/`[无正文]` 质量标记 |
 | `sip -d <url>` | 下载/添加新 RSS 源（URL 可省略协议前缀） |
 | `sip -u <编号>` | 更新某源 |
+| `sip --sync [--feed N] [--json]` | 只更新「到期」的订阅源（可选 `--feed 编号` 限定单个；`--json` 结构化） |
+| `sip --update-all` | 强制更新所有订阅源 |
+| `sip --schedule <编号> <表达式>` | 设置某源更新计划：`30m` / `1h` / `7d` / `daily@10:00` / `weekly@Mon 08:00` / `manual`（手动） |
 | `sip -a <编号>` | 归档（加时间戳） |
 | `sip -una <编号>` | 去归档 |
 | `sip -r <编号>` | 删除源及其全部文章与向量（加 `--yes` 跳过确认，供脚本/AI 非交互删除） |
