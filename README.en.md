@@ -163,6 +163,32 @@ May we meet again, none the worse for wear 🍲
 
 ---
 
+## Roadmap: from "information warehouse" toward "information ingestion management"
+
+sip's core principle is **facts first** — it only does deterministic rules and local storage of facts; anything that needs judgment, explanation, or dialogue is left to the user and agents. The following plan follows this principle, preferring to go **slow rather than dress up judgment as fact**.
+
+### Shipped: Reading Insights
+
+- `sip --insights` shows **reading facts** per feed (opened / completed / completion rate / ♥🤖 likes / AI-call counts / subscribed & backlog) with **explainable reasons** (e.g. "opened 0 articles in 30 days", "finish rate 3%") — **the decision is yours**.
+- Telemetry now attributes AI calls (summary / search / embedding) to **article and feed**, so the report can be aggregated per feed.
+- Entry: CLI `--insights` / TUI report page (`P` key / `report` command); optional scheduled reminders via `--insights-interval`.
+
+### Planned (evolving in this direction)
+
+1. **Separate terminology from facts** — the report distinguishes "status" (technical failure only: fetch failed / long-untouched) from "activity" (behavior about *you*); **low reading ≠ low value**; remove any phrasing that dresses up behavior as a value judgment.
+2. **No black-box scoring** — never emit opaque numbers like `source_score = 0.72`; any "suggestion" must carry an **explainable reason chain** (metric + value + human-readable text), leaving judgment to the user.
+3. **Source Policy closed loop** — evolve from "user finds a low-value source → handles it manually" to "Insights → suggestion → **user confirms** → source rule → information-flow adjustment":
+
+   ```
+   read → analyze → adjust input → better information flow
+   ```
+
+   Rules (archive / lower frequency / tag / unsubscribe candidate) are **always user-confirmed**; `createdBy` is always `user`, never auto-written by AI.
+
+> These steps aim to turn sip from an "information warehouse" into an "information ingestion management system" — Insights is only the start; connecting Source Policy with personalized filtering makes the complete loop.
+
+---
+
 ## License
 
 Licensed under the GNU General Public License v3.0 (GPL-3.0)
