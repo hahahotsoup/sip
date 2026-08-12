@@ -1109,16 +1109,20 @@ void TelemetryCli(string[] args, string dbPath)
 // --refresh 可显式重新生成（新订阅/新标记当天可见）；进度(done/target)保持实时不进缓存。
 string TodayCachePath() => Path.Combine(dataDir, "sip_today_cache.json");
 
-// 返回(缓存日期, 生成时间, 条目)；缓存缺失/损坏返回空
-(string Date, string GeneratedAt, List<TodayItem> Items) LoadTodayCache()
+// 返回(缓存日期, 生成时间, 条目, 批次, 已读 itemId)；缓存缺失/损坏返回空
+(string Date, string GeneratedAt, List<TodayItem> Items, int Batch, List<int> Read) LoadTodayCache()
 {
     try
     {
-        if (!File.Exists(TodayCachePath())) return ("", "", new List<TodayItem>());
+        if (!File.Exists(TodayCachePath())) return ("", "", new List<TodayItem>(), 0, new List<int>());
         var doc = JsonDocument.Parse(File.ReadAllText(TodayCachePath()));
         var root = doc.RootElement;
         string date = root.TryGetProperty("date", out var d) ? d.GetString() ?? "" : "";
         string genAt = root.TryGetProperty("generatedAt", out var g) ? g.GetString() ?? "" : "";
+        int batch = root.TryGetProperty("batch", out var b) && b.TryGetInt32(out var bi) ? bi : 0;
+        var read = new List<int>();
+        if (root.TryGetProperty("read", out var ra) && ra.ValueKind == JsonValueKind.Array)
+            foreach (var x in ra.EnumerateArray()) if (x.TryGetInt32(out var xi)) read.Add(xi);
         var items = new List<TodayItem>();
         if (root.TryGetProperty("items", out var arr))
             foreach (var it in arr.EnumerateArray())
@@ -1133,12 +1137,12 @@ string TodayCachePath() => Path.Combine(dataDir, "sip_today_cache.json");
                     Score = it.TryGetProperty("score", out var sc) ? sc.GetInt32() : 0
                 });
             }
-        return (date, genAt, items);
+        return (date, genAt, items, batch, read);
     }
-    catch { return ("", "", new List<TodayItem>()); }   // 缓存损坏 → 当无缓存
+    catch { return ("", "", new List<TodayItem>(), 0, new List<int>()); }   // 缓存损坏 → 当无缓存
 }
 
-void SaveTodayCache(string date, List<TodayItem> items)
+void SaveTodayCache(string date, List<TodayItem> items, int batch, List<int> read)
 {
     try
     {
@@ -1146,6 +1150,8 @@ void SaveTodayCache(string date, List<TodayItem> items)
         {
             date,
             generatedAt = DateTime.Now.ToString("O"),
+            batch,
+            read,
             items = items.Select(i => new
             {
                 itemId = i.ItemId, title = i.Title, source = i.Source,
@@ -1160,7 +1166,7 @@ void SaveTodayCache(string date, List<TodayItem> items)
 List<TodayItem> GetTodayList(string dbPath, int limit, bool refresh, out string generatedAt)
 {
     string today = DateTime.Now.ToString("yyyy-MM-dd");
-    var (cacheDate, cacheAt, cacheItems) = LoadTodayCache();
+    var (cacheDate, cacheAt, cacheItems, cacheBatch, cacheRead) = LoadTodayCache();
     if (!refresh && cacheDate == today && cacheItems.Count > 0)
     {
         // 缓存里的生成时间是 ISO，格式化到 HH:mm 便于展示
@@ -1168,7 +1174,10 @@ List<TodayItem> GetTodayList(string dbPath, int limit, bool refresh, out string 
         return cacheItems.Take(limit).ToList();
     }
     var items = BuildTodayList(dbPath, limit);
-    SaveTodayCache(today, items);
+    // 同一天重算 → 批次 +1（新一天从第 1 批开始）；已读沿用当天
+    int batch = (cacheDate == today ? cacheBatch : 0) + 1;
+    var read = cacheDate == today ? cacheRead : new List<int>();
+    SaveTodayCache(today, items, batch, read);
     generatedAt = DateTime.Now.ToString("HH:mm");
     return items;
 }
@@ -1392,8 +1401,8 @@ TodayDigest BuildTodayDigest(string dbPath, int windowHours)
         d.Modified.Add(ov);
     }
 
-    // ④ 可能同文（跨源重复）——窗口与 digest 一致
-    d.Dedups = FindNearDuplicates(dbPath, windowHours);
+    // ④ 可能同文（重复簇）——窗口与 digest 一致
+    d.Dedups = FindDuplicateClusters(dbPath, windowHours);
     return d;
 }
 
@@ -1439,11 +1448,11 @@ void PrintTodayDigest(TodayDigest d)
     if (d.Dedups.Count > 0)
     {
         Console.WriteLine();
-        Console.WriteLine(Lang.T("⚠ 可能同文（跨源重复）"));
-        foreach (var c in d.Dedups)
+        Console.WriteLine(Lang.T("⚠ 可能同文（重复簇）· 显示前 {0} 组", Math.Min(10, d.Dedups.Count)));
+        foreach (var c in d.Dedups.Take(10))
         {
-            Console.WriteLine($"├ [{c.ItemIdA}] {StripControlChars(c.TitleA)} ({c.SourceA})  ≈  [{c.ItemIdB}] {StripControlChars(c.TitleB)} ({c.SourceB})");
-            Console.WriteLine($"│   重合度 {c.Overlap}% · {c.DiffCmd} · 隐藏: sip --dedup hide {c.ItemIdB} {c.ItemIdA}");
+            Console.WriteLine($"簇 {c.Size} 篇 · 重合度 ≥ {c.MinOverlap}% · 代表 [{c.RepresentativeId}] {StripControlChars(c.Title)} ({c.Source})");
+            Console.WriteLine($"│   隐藏其余: sip --dedup hide-cluster {c.RepresentativeId}");
         }
     }
 }
@@ -1523,22 +1532,37 @@ List<DedupCandidate> FindNearDuplicates(string dbPath, int windowHours)
                 r.IsDBNull(4) ? "" : r.GetString(4), r.IsDBNull(5) ? "" : r.GetString(5)));
     }
 
-    // 预计算段落，避免重复切分
+    // 预计算段落 + 段落倒排索引（para -> 文章下标），只比较共享段落的候选，避免无关文章 O(n²)
     var paras = arts.Select(a => (a, NormalizeParagraphs(a.Body))).ToList();
+    var paraIndex = new Dictionary<string, List<int>>();
+    for (int k = 0; k < paras.Count; k++)
+        foreach (var p in paras[k].Item2)
+        {
+            if (!paraIndex.TryGetValue(p, out var lst)) { lst = new List<int>(); paraIndex[p] = lst; }
+            lst.Add(k);
+        }
 
     var seen = new HashSet<(int, int)>();
-    for (int i = 0; i < paras.Count; i++)
+    const int MaxCandidates = 2000;   // 限制候选量，避免真重复大簇时输出爆炸淹没调用方
+    for (int i = 0; i < paras.Count && res.Count < MaxCandidates; i++)
     {
-        for (int j = i + 1; j < paras.Count; j++)
+        var (a, pa) = paras[i];
+        if (pa.Count == 0) continue;
+        // 与该篇共享至少一个段落的其他文章（跨源、去重）
+        var candidates = new HashSet<int>();
+        foreach (var p in pa)
+            if (paraIndex.TryGetValue(p, out var lst))
+                foreach (var k in lst)
+                    if (k != i && arts[k].FeedId != a.FeedId)
+                        candidates.Add(k);
+        foreach (var j in candidates)
         {
-            var (a, pa) = paras[i];
-            var (b, pb) = paras[j];
-            if (a.FeedId == b.FeedId) continue;           // 只跨源
-            if (seen.Contains((a.Id, b.Id))) continue;
-            seen.Add((a.Id, b.Id));
-            double ov = ParagraphOverlap(pa, pb);
+            if (seen.Contains((a.Id, paras[j].a.Id))) continue;
+            seen.Add((a.Id, paras[j].a.Id));
+            double ov = ParagraphOverlap(pa, paras[j].Item2);
             if (ov >= thr)
             {
+                var b = paras[j].a;
                 res.Add(new DedupCandidate
                 {
                     ItemIdA = a.Id, TitleA = a.Title, SourceA = a.Feed,
@@ -1552,25 +1576,125 @@ List<DedupCandidate> FindNearDuplicates(string dbPath, int windowHours)
     return res;
 }
 
-// 隐藏某篇（Status='dedup'）+ 记规则；返回是否成功
-bool HideAsDedup(string dbPath, int hiddenId, int canonicalId)
+// 跨源重复簇：用并查集把互相重复的文章聚成簇（解决 pair 输出爆炸/截断）。
+// 输出量 = 簇数量（几行），不截断、不淹没调用方。
+List<DedupCluster> FindDuplicateClusters(string dbPath, int windowHours)
+{
+    var res = new List<DedupCluster>();
+    var settings = LoadSettings();
+    double thr = settings.DedupThreshold;
+    string cutoff = DateTime.Now.AddHours(-windowHours).ToString("O");
+
+    var arts = new List<(int Id, int FeedId, string Title, string Feed, string Body)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT i.Id, i.FeedId, i.Title, f.Title, COALESCE(NULLIF(i.Content,''), i.Description,'')
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'active' AND i.PublishDate >= @cut";
+        c.Parameters.AddWithValue("@cut", cutoff);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            arts.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2), r.GetString(3), r.IsDBNull(4) ? "" : r.GetString(4)));
+    }
+    int n = arts.Count;
+    var paras = arts.Select(a => NormalizeParagraphs(a.Body)).ToList();
+    var paraIndex = new Dictionary<string, List<int>>();
+    for (int k = 0; k < n; k++)
+        foreach (var p in paras[k])
+        {
+            if (!paraIndex.TryGetValue(p, out var lst)) { lst = new List<int>(); paraIndex[p] = lst; }
+            lst.Add(k);
+        }
+
+    // 并查集
+    int[] parent = Enumerable.Range(0, n).ToArray();
+    int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+    void Union(int a, int b) { int ra = Find(a), rb = Find(b); if (ra != rb) parent[ra] = rb; }
+
+    var seen = new HashSet<(int, int)>();
+    var minOv = new Dictionary<(int, int), double>();
+    for (int i = 0; i < n; i++)
+    {
+        if (paras[i].Count == 0) continue;
+        var candidates = new HashSet<int>();
+        foreach (var p in paras[i])
+            if (paraIndex.TryGetValue(p, out var lst))
+                foreach (var k in lst)
+                    if (k != i && arts[k].FeedId != arts[i].FeedId)
+                        candidates.Add(k);
+        foreach (var j in candidates)
+        {
+            var key = (arts[i].Id, arts[j].Id);
+            if (!seen.Add(key)) continue;
+            double ov = ParagraphOverlap(paras[i], paras[j]);
+            if (ov >= thr)
+            {
+                Union(i, j);
+                minOv[key] = ov;
+            }
+        }
+    }
+
+    // 按根分组
+    var groups = new Dictionary<int, List<int>>();
+    for (int k = 0; k < n; k++) { int r = Find(k); if (!groups.TryGetValue(r, out var l)) { l = new List<int>(); groups[r] = l; } l.Add(k); }
+    foreach (var g in groups.Values.Where(x => x.Count >= 2))
+    {
+        var members = g.OrderBy(x => arts[x].Id).ToList();
+        var rep = members[0];
+        double min = 1.0;
+        for (int a = 0; a < members.Count; a++)
+            for (int b = a + 1; b < members.Count; b++)
+            {
+                var key = (arts[members[a]].Id, arts[members[b]].Id);
+                if (minOv.TryGetValue(key, out var o)) min = Math.Min(min, o);
+                else if (minOv.TryGetValue((key.Item2, key.Item1), out var o2)) min = Math.Min(min, o2);
+            }
+        res.Add(new DedupCluster
+        {
+            RepresentativeId = arts[rep].Id,
+            Title = arts[rep].Title,
+            Source = arts[rep].Feed,
+            Members = members.Select(x => arts[x].Id).ToList(),
+            MinOverlap = Math.Round(min * 100, 0)
+        });
+    }
+    return res;
+}
+
+// 隐藏某篇（Status='dedup'）+ 记规则；返回 null=成功，否则错误消息
+string? HideAsDedup(string dbPath, int hiddenId, int canonicalId)
 {
     try
     {
-        (int feed, string url) Get(int id)
+        if (hiddenId == canonicalId) return Lang.T("不能隐藏自己（保留与隐藏需为两篇不同文章）");
+        if (!ArticleExists(hiddenId, dbPath)) return Lang.T("要隐藏的文章不存在");
+        if (!ArticleExists(canonicalId, dbPath)) return Lang.T("保留的文章不存在");
+        (string Status, int Feed, string Url) Get(int id)
         {
             using var c = new SqliteConnection($"Data Source={dbPath}");
             c.Open();
             var cmd = c.CreateCommand();
-            cmd.CommandText = "SELECT FeedId, Link FROM Items WHERE Id = @id";
+            cmd.CommandText = "SELECT Status, FeedId, Link FROM Items WHERE Id = @id";
             cmd.Parameters.AddWithValue("@id", id);
             using var r = cmd.ExecuteReader();
-            if (!r.Read()) return (0, "");
-            return (r.GetInt32(0), r.IsDBNull(1) ? "" : r.GetString(1));
+            if (!r.Read()) return ("", 0, "");
+            return (r.IsDBNull(0) ? "" : r.GetString(0), r.GetInt32(1), r.IsDBNull(2) ? "" : r.GetString(2));
         }
-        var (hf, hu) = Get(hiddenId);
-        var (cf, cu) = Get(canonicalId);
-        if (hf == 0 || string.IsNullOrEmpty(hu)) return false;
+        var h = Get(hiddenId);
+        var c = Get(canonicalId);
+        if (h.Status == "dedup") return Lang.T("这篇已经是隐藏状态，无需重复隐藏");
+        if (c.Status == "dedup") return Lang.T("保留的那篇已被隐藏，不能作为保留对象");
+        if (h.Feed == 0 || string.IsNullOrEmpty(h.Url)) return Lang.T("无法定位要隐藏的文章");
+
+        // 校验两篇是否真相似（dedup 语义：隐藏只针对重复内容）
+        double ov = ParagraphOverlap(NormalizeParagraphs(ArticleBodyById(hiddenId, dbPath)),
+                                     NormalizeParagraphs(ArticleBodyById(canonicalId, dbPath)));
+        if (ov < LoadSettings().DedupThreshold)
+            return Lang.T("两篇正文不相似（段落重合度仅 {0:P0}），可能不是重复，不予隐藏", ov);
 
         using (var conn = new SqliteConnection($"Data Source={dbPath}"))
         {
@@ -1581,17 +1705,17 @@ bool HideAsDedup(string dbPath, int hiddenId, int canonicalId)
             cmd.ExecuteNonQuery();
         }
         var map = LoadDedup();
-        map[$"{hf}:{hu}"] = new DedupRule
+        map[$"{h.Feed}:{h.Url}"] = new DedupRule
         {
-            HiddenFeedId = hf, HiddenUrl = hu,
-            CanonicalFeedId = cf, CanonicalUrl = cu,
+            HiddenFeedId = h.Feed, HiddenUrl = h.Url,
+            CanonicalFeedId = c.Feed, CanonicalUrl = c.Url,
             At = DateTime.Now.ToString("O")
         };
         SaveDedup(map);
-        TelemetryService.Record("dedup", sourceId: hf, data: new { action = "hide", hiddenId, canonicalId });
-        return true;
+        TelemetryService.Record("dedup", sourceId: h.Feed, data: new { action = "hide", hiddenId, canonicalId });
+        return null;
     }
-    catch { return false; }
+    catch (Exception ex) { return Lang.T("隐藏失败：{0}", ex.Message); }
 }
 
 // 撤销某条规则 + 恢复被隐藏的文章为 active
@@ -1653,11 +1777,11 @@ List<(int Id, string Title, string Source, string Key)> ListHiddenDedup(string d
 // TUI：查看/撤销已隐藏（dedup'd）的文章（manage 界面按 i 进入）
 void ShowHiddenDedupDialog(string dbPath)
 {
-    var top = new Dialog { Title = " " + Lang.T("已隐藏的文章") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var top = new Window { Title = " " + Lang.T("已隐藏的文章") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
     var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
     var hint = new Label
     {
-        Text = Lang.T("  j/k 移动 · r/Enter 撤销忽略 · Esc 返回  "),
+        Text = Lang.T("  j/k 移动 · r/Enter 撤销忽略 · x 删除 · Esc 返回  "),
         X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1
     };
     top.Add(list, hint);
@@ -1686,6 +1810,23 @@ void ShowHiddenDedupDialog(string dbPath)
                 }
                 e.Handled = true;
             }
+            else if (e.KeyCode == KeyCode.X)
+            {
+                int id = list.SelectedId;
+                if (id != 0)
+                {
+                    var hidden = ListHiddenDedup(dbPath);
+                    var hit = hidden.FirstOrDefault(x => x.Id == id);
+                    if (MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("永久删除这篇被隐藏的文章（不可恢复）？"), Lang.T("OK"), Lang.T("Cancel")) == 0)
+                    {
+                        if (hit.Key.Length > 0) UndoDedup(dbPath, hit.Key);   // 先移除规则
+                        string guid = ArticleGuidById(id, dbPath);
+                        if (guid.Length > 0) DeleteArticleByGuid(guid, dbPath);   // 再硬删
+                        Rebuild();
+                    }
+                }
+                e.Handled = true;
+            }
         };
         Application.Run(top);
     }
@@ -1697,6 +1838,21 @@ void ShowHiddenDedupDialog(string dbPath)
 #pragma warning restore CS0618
 
 // CLI：sip --dedup scan | hide <hiddenId> <canonicalId> | list | undo <key> [--json]
+// 某文章 Guid（供删除定位）
+string ArticleGuidById(int id, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Guid FROM Items WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", id);
+        return c.ExecuteScalar()?.ToString() ?? "";
+    }
+    catch { return ""; }
+}
+
 #pragma warning disable CS0618
 // TUI：在对话框里显示多行文本（用于 diff/feed-info/likes 等控制台输出命令）
 void ShowTextDialog(string title, string text)
@@ -1724,6 +1880,150 @@ void RunCliCommandInTui(Action run)
 }
 #pragma warning restore CS0618
 
+// 文章正文（去 HTML）
+string ArticleBodyById(int id, string dbPath)
+{
+    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    var c = conn.CreateCommand();
+    c.CommandText = "SELECT COALESCE(NULLIF(Content,''), Description,'') FROM Items WHERE Id = @id";
+    c.Parameters.AddWithValue("@id", id);
+    var o = c.ExecuteScalar();
+    return StripHtml(o?.ToString() ?? "");
+}
+
+string ArticleTitleById(int id, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Title FROM Items WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", id);
+        return c.ExecuteScalar()?.ToString() ?? "";
+    }
+    catch { return ""; }
+}
+
+// 列宽感知的字符宽度（东亚全角=2，其余=1）
+int CharWidth(char c)
+{
+    return (c >= 0x1100 && (c <= 0x115F || c == 0x2329 || c == 0x232A
+        || (c >= 0x2E80 && c <= 0xA4CF && c != 0x303F)
+        || (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF)
+        || (c >= 0xFE10 && c <= 0xFE19) || (c >= 0xFE30 && c <= 0xFE6F)
+        || (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6))) ? 2 : 1;
+}
+
+// 按可见列宽截断（CJK 感知）
+string TruncateCols(string s, int maxCols)
+{
+    if (maxCols <= 0 || string.IsNullOrEmpty(s)) return "";
+    int used = 0; var sb = new StringBuilder();
+    foreach (var ch in s)
+    {
+        int w = CharWidth(ch);
+        if (used + w > maxCols) break;
+        sb.Append(ch); used += w;
+    }
+    return sb.ToString();
+}
+
+// 补齐到指定列宽
+string PadCols(string s, int width)
+{
+    int c = s.GetColumns();
+    return c >= width ? s : s + new string(' ', width - c);
+}
+
+// GitHub 式左右分栏 diff：左边旧版、右边新版，改动行用 - / + 标出，逐行对齐
+string SideBySideDiff(string a, string b, int width)
+{
+    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(a, b);
+    var rows = new List<(string L, string R, bool Chg)>();
+    var ls = diff.Lines;
+    for (int i = 0; i < ls.Count; i++)
+    {
+        var l = ls[i];
+        if (l.Type == ChangeType.Unchanged) { rows.Add((l.Text, l.Text, false)); }
+        else if (l.Type == ChangeType.Deleted)
+        {
+            if (i + 1 < ls.Count && ls[i + 1].Type == ChangeType.Inserted) { rows.Add((l.Text, ls[i + 1].Text, true)); i++; }
+            else rows.Add((l.Text, "", true));
+        }
+        else if (l.Type == ChangeType.Inserted) { rows.Add(("", l.Text, true)); }
+        else rows.Add((l.Text, l.Text, false));
+    }
+    if (rows.Count == 0) return Lang.T("(两篇正文相同)");
+
+    int half = Math.Max(10, (width - 3) / 2);
+    var sb = new StringBuilder();
+    sb.AppendLine(PadCols(Lang.T("旧版本"), half - 1) + "│" + PadCols(Lang.T("新版本"), half - 1));
+    foreach (var r in rows)
+    {
+        string L = (r.Chg ? "- " : "  ") + TruncateCols(r.L, half - 2);
+        string R = (r.Chg ? "+ " : "  ") + TruncateCols(r.R, half - 2);
+        sb.AppendLine(PadCols(L, half) + "│" + R);
+    }
+    return sb.ToString();
+}
+
+#pragma warning disable CS0618
+// 单个候选对：看 diff → 选择隐藏哪篇
+void ShowDedupPairDialog(int idA, int idB, string dbPath)
+{
+    string ta = ArticleTitleById(idA, dbPath);
+    string tb = ArticleTitleById(idB, dbPath);
+    var dlg = new Window { Title = " 可能同文：选择保留 ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var head = new Label { Text = $"  [{idA}] {CjkSpace(ta)}   vs   [{idB}] {CjkSpace(tb)}", X = 0, Y = 0, Width = Dim.Fill(), Height = 1 };
+    // diff 仅供查看，不抢焦点（避免方向键去滚正文而非切换按钮）
+    var tv = new TextView { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Fill(6), ReadOnly = true, WordWrap = false, CanFocus = false };
+    string bodyA = ArticleBodyById(idA, dbPath);
+    string bodyB = ArticleBodyById(idB, dbPath);
+    var hideB = new Button { Text = Lang.T("隐藏 B · 保留 A"), X = 0, Y = Pos.Bottom(tv) + 1 };
+    var hideA = new Button { Text = Lang.T("隐藏 A · 保留 B"), X = Pos.Right(hideB) + 1, Y = Pos.Bottom(tv) + 1 };
+    var giveup = new Button { Text = Lang.T("放弃"), X = Pos.Right(hideA) + 1, Y = Pos.Bottom(tv) + 1 };
+    var hint = new Label { Text = Lang.T("  ←/→ 选按钮 · Enter 执行 · 放弃=暂不决定（保留两篇） · Esc 返回  "), X = 0, Y = Pos.Bottom(hideB) + 1, Width = Dim.Fill(), Height = 1 };
+    dlg.Add(head, tv, hideB, hideA, giveup, hint);
+    hideB.Accepted += (s, e) => { string? err = HideAsDedup(dbPath, idB, idA); if (err != null) MessageBox.Query(Application.Instance, Lang.T("Notice"), err, Lang.T("OK")); dlg.RequestStop(); };
+    hideA.Accepted += (s, e) => { string? err = HideAsDedup(dbPath, idA, idB); if (err != null) MessageBox.Query(Application.Instance, Lang.T("Notice"), err, Lang.T("OK")); dlg.RequestStop(); };
+    giveup.Accepted += (s, e) => dlg.RequestStop();
+    dlg.Initialized += (s, e) => { giveup.SetFocus(); tv.Text = SideBySideDiff(bodyA, bodyB, Math.Max(20, tv.Viewport.Width)); };
+    dlg.KeyDown += (s, e) => { if (e.KeyCode == KeyCode.Esc) { dlg.RequestStop(); e.Handled = true; } };
+    Application.Run(dlg);
+}
+
+// 跨源去重候选列表（TUI）：Enter 查看 diff 并选择保留/隐藏
+void ShowDedupCandidatesDialog(string dbPath)
+{
+    var top = new Window { Title = " 跨源重复（可能同文） ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
+    var hint = new Label { Text = Lang.T("  j/k 移动 · Enter 查看diff并选择 · Esc 返回  "), X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1 };
+    top.Add(list, hint);
+
+    void Rebuild()
+    {
+        var cands = FindNearDuplicates(dbPath, 48);
+        list.SetRows(cands.Select(c => (c.ItemIdA,
+            $"重合{c.Overlap}%  [{c.ItemIdA}]{CjkSpace(c.TitleA)}({c.SourceA})  ≈  [{c.ItemIdB}]{CjkSpace(c.TitleB)}({c.SourceB})")).ToList());
+    }
+    Rebuild();
+    top.Initialized += (s, e) => list.SetFocus();
+    top.KeyDown += (s, e) =>
+    {
+        if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+        else if (e.KeyCode == KeyCode.Enter)
+        {
+            var cand = FindNearDuplicates(dbPath, 48).FirstOrDefault(c => c.ItemIdA == list.SelectedId);
+            if (cand != null && cand.ItemIdA != 0) { ShowDedupPairDialog(cand.ItemIdA, cand.ItemIdB, dbPath); Rebuild(); }
+            e.Handled = true;
+        }
+    };
+    Application.Run(top);
+}
+#pragma warning restore CS0618
+
 void DedupCli(string[] args, string dbPath)
 {
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
@@ -1734,30 +2034,54 @@ void DedupCli(string[] args, string dbPath)
     {
         case "scan":
         {
-            var cands = FindNearDuplicates(dbPath, 48);
+            var clusters = FindDuplicateClusters(dbPath, 48);
             if (json)
             {
                 JsonOut(new
                 {
                     success = true,
-                    data = new { candidates = cands.Select(c => new
+                    data = new { clusters = clusters.Select(c => new
                     {
-                        itemA = c.ItemIdA, titleA = c.TitleA, sourceA = c.SourceA,
-                        itemB = c.ItemIdB, titleB = c.TitleB, sourceB = c.SourceB,
-                        overlap = c.Overlap, diff = c.DiffCmd
+                        size = c.Size,
+                        representativeId = c.RepresentativeId,
+                        title = c.Title,
+                        source = c.Source,
+                        minOverlap = c.MinOverlap,
+                        members = c.Members
                     }) }
                 });
                 return;
             }
-            if (cands.Count == 0) { Console.WriteLine(Lang.T("未发现跨源重复")); return; }
-            Console.WriteLine(Lang.T("发现 {0} 组可能同文（段落重合度 ≥ {1:P0}）：", cands.Count, LoadSettings().DedupThreshold));
-            foreach (var c in cands)
+            if (clusters.Count == 0) { Console.WriteLine(Lang.T("未发现跨源重复")); return; }
+            Console.WriteLine(Lang.T("发现 {0} 组重复簇（段落重合度 ≥ {1:P0}）：", clusters.Count, LoadSettings().DedupThreshold));
+            foreach (var c in clusters)
             {
-                Console.WriteLine($"[{c.ItemIdA}] {StripControlChars(c.TitleA)}  ({c.SourceA})");
-                Console.WriteLine($"[{c.ItemIdB}] {StripControlChars(c.TitleB)}  ({c.SourceB})");
-                Console.WriteLine($"   重合度 {c.Overlap}% · {c.DiffCmd}");
-                Console.WriteLine(Lang.T("   隐藏一篇：sip --dedup hide {0} {1}（保留 {2} 隐藏 {3}）", c.ItemIdA, c.ItemIdB, c.ItemIdA, c.ItemIdB));
+                string others = c.Members.Count > 1 ? string.Join(", ", c.Members.Skip(1).Take(20)) + (c.Members.Count > 21 ? " …" : "") : "";
+                Console.WriteLine($"簇 {c.Size} 篇 · 重合度 ≥ {c.MinOverlap}% · 代表 [{c.RepresentativeId}] {StripControlChars(c.Title)} ({c.Source})");
+                if (others.Length > 0) Console.WriteLine($"     成员：{others}");
+                Console.WriteLine(Lang.T("     保留代表隐藏其余：sip --dedup hide-cluster {0}", c.RepresentativeId));
             }
+            return;
+        }
+        case "hide-cluster":
+        {
+            if (pos.Length < 2 || !int.TryParse(pos[1], out int repId))
+            {
+                SetExit(); Console.WriteLine(Lang.T("用法: sip --dedup hide-cluster <代表Id>（隐藏该簇其余成员）")); return;
+            }
+            var clusters = FindDuplicateClusters(dbPath, 48);
+            var cl = clusters.FirstOrDefault(x => x.RepresentativeId == repId || x.Members.Contains(repId));
+            if (cl == null || cl.Size < 2) { SetExit(); Console.WriteLine(Lang.T("未找到该簇")); return; }
+            int rep = cl.Members.Contains(repId) ? repId : cl.RepresentativeId;
+            int ok = 0; var fails = new List<string>();
+            foreach (var m in cl.Members)
+                if (m != rep)
+                {
+                    string? err = HideAsDedup(dbPath, m, rep);
+                    if (err == null) ok++; else fails.Add(err);
+                }
+            if (json) JsonOut(new { success = true, data = new { representative = rep, hidden = ok, fails } });
+            else Console.WriteLine(Lang.T("已隐藏 {0} 篇（保留 {1}），失败 {2}", ok, rep, fails.Count));
             return;
         }
         case "hide":
@@ -1766,9 +2090,12 @@ void DedupCli(string[] args, string dbPath)
             {
                 SetExit(); Console.WriteLine(Lang.T("用法: sip --dedup hide <hiddenId> <canonicalId>")); return;
             }
-            bool ok = HideAsDedup(dbPath, hid, cid);
-            if (json) JsonOut(new { success = ok, data = new { hiddenId = hid, canonicalId = cid, ok } });
-            else Console.WriteLine(ok ? Lang.T("已隐藏 {0}（保留 {1}）", hid, cid) : Lang.T("隐藏失败"));
+            string? err = HideAsDedup(dbPath, hid, cid);
+            bool ok = err == null;
+            if (json) JsonOut(ok
+                ? new { success = true, data = new { hiddenId = hid, canonicalId = cid, ok = true } }
+                : new { success = false, error = new { code = "DEDUP_INVALID", message = err } });
+            else Console.WriteLine(ok ? Lang.T("已隐藏 {0}（保留 {1}）", hid, cid) : err);
             if (!ok) SetExit();
             return;
         }
@@ -1805,36 +2132,14 @@ void DedupCli(string[] args, string dbPath)
     }
 }
 
-// 导入时检查跨源去重规则：命中 (feedId,url) → 阻止导入。
-// 若被忽略那篇的内容已与 canonical 分歧（重合度<阈值）→ 规则自动失效并放行（作者更新被忽略那篇）。
+// 导入时检查跨源去重规则：命中 (feedId,url) → 无条件阻止导入（防卷土重来）。
+// 不比对内容、不改写 dedup.json（避免内容为空/瞬时读取失败导致误清空或放行）。
 bool DedupImportBlocked(SqliteConnection conn, long feedId, FeedItem item)
 {
     try
     {
         var map = LoadDedup();
-        string key = $"{feedId}:{item.Link}";
-        if (!map.TryGetValue(key, out var rule)) return false;
-
-        // 取 canonical 当前内容
-        string canon = "";
-        var q = conn.CreateCommand();
-        q.CommandText = "SELECT COALESCE(NULLIF(Content,''), Description,'') FROM Items WHERE FeedId = @f AND Link = @u AND Status = 'active' LIMIT 1";
-        q.Parameters.AddWithValue("@f", rule.CanonicalFeedId);
-        q.Parameters.AddWithValue("@u", rule.CanonicalUrl);
-        var o = q.ExecuteScalar();
-        if (o != null) canon = o.ToString() ?? "";
-        if (string.IsNullOrEmpty(canon))
-        {
-            // canonical 已不存在 → 规则失效
-            map.Remove(key); SaveDedup(map);
-            return false;
-        }
-
-        double ov = ParagraphOverlap(NormalizeParagraphs(item.Content ?? ""), NormalizeParagraphs(canon));
-        if (ov >= LoadSettings().DedupThreshold) return true;   // 仍重复 → 跳过
-
-        map.Remove(key); SaveDedup(map);                         // 已分歧 → 放行
-        return false;
+        return map.ContainsKey($"{feedId}:{item.Link}");
     }
     catch { return false; }
 }
@@ -1918,6 +2223,10 @@ void PolicyCli(string[] args, string dbPath)
             {
                 case "lower_frequency":
                     if (string.IsNullOrWhiteSpace(rest)) { SetExit(); Console.WriteLine(Lang.T("用法: --policy set <id> lower_frequency <30m|1h|7d|daily@08:00|...>")); return; }
+                    if (TryParseSchedule(rest) == null)   // 非法计划：不写 policy
+                    {
+                        SetExit(); Console.WriteLine(Lang.T("无效的计划表达式：{0}", rest)); return;
+                    }
                     SetFeedSchedule(GetDisplayNum(feedId, dbPath).ToString(), rest, dbPath);
                     rule.Schedule = rest.Trim().ToLowerInvariant();
                     break;
@@ -2059,6 +2368,117 @@ void OnboardingCli(string[] args, string dbPath)
     SetExit(); Console.WriteLine(Lang.T("未找到分类 {0}（可用: {1}）", sub, string.Join(", ", templates.Keys)));
 }
 
+#pragma warning disable CS0618
+// 删除线渲染（源被删时标题加删除线）
+string StrikeText(string s) { var sb = new StringBuilder(); foreach (var c in s) { sb.Append(c); sb.Append('\u0336'); } return sb.ToString(); }
+
+// 今日哈汤阅读界面（主 TUI 阅读风格，只放当天这 5 篇）
+void ShowTodayPage(string dbPath)
+{
+    var (date, genAt, items, batch, read) = LoadTodayCache();
+    if (items.Count == 0) { MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("今天还没有值得读的——去添加或更新一些订阅源吧"), Lang.T("OK")); return; }
+    var signals = LoadSignals();
+    var (done, target, tracking) = TodayProgress(dbPath);
+    var readSet = new HashSet<int>(read);
+
+    var top = new Window { Title = " 今日哈汤 ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var header = new Label { Text = $"  {Lang.T("今日哈汤")} · {date} · {Lang.T("第 {0} 批", batch)} · {Lang.T("已完成 {0}/{1}", done, target)}", X = 0, Y = 0, Width = Dim.Fill(), Height = 1 };
+    var list = new FeedManagerList { X = 0, Y = 1, Width = Dim.Percent(38), Height = Dim.Fill(2), CanFocus = true };
+    var content = new TextView { X = Pos.Right(list) + 1, Y = 1, Width = Dim.Fill(), Height = Dim.Fill(2), ReadOnly = true, WordWrap = true, CanFocus = false };
+    var hint = new Label { Text = Lang.T("  j/k 移动 · l 点赞 · v 版本 · Esc 返回  "), X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1 };
+    top.Add(header, list, content, hint);
+
+    void MarkRead(int idx)
+    {
+        if (idx < 0 || idx >= items.Count) return;
+        int id = items[idx].ItemId;
+        if (readSet.Add(id))
+        {
+            var (d2, g2, i2, b2, r2) = LoadTodayCache();
+            if (!r2.Contains(id)) { r2.Add(id); SaveTodayCache(d2, i2, b2, r2); }
+        }
+    }
+
+    void RefreshList()
+    {
+        list.SetRows(items.Select((it, i) =>
+        {
+            string mark = readSet.Contains(it.ItemId) ? "✓ " : "  ";
+            bool alive = ArticleExists(it.ItemId, dbPath);
+            string t = alive ? CjkSpace(it.Title) : StrikeText(CjkSpace(it.Title));
+            signals.TryGetValue(it.ItemId.ToString(), out var sig);
+            string like = sig?.UserLike == true ? " ♥" : "";
+            return (it.ItemId, $"{mark}{i + 1}. {t}{like}");
+        }).ToList());
+    }
+
+    void ShowContent(int idx)
+    {
+        if (idx < 0 || idx >= items.Count) { content.Text = ""; return; }
+        var it = items[idx];
+        if (!ArticleExists(it.ItemId, dbPath))
+        {
+            content.Text = StrikeText(it.Title) + "\n\n" + Lang.T("对不起，但是源已经被删除了");
+            return;
+        }
+        string body = "";
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "SELECT i.Title, COALESCE(NULLIF(i.Content,''), i.Description,''), f.Title FROM Items i LEFT JOIN Feeds f ON i.FeedId=f.Id WHERE i.Id=@id";
+            c.Parameters.AddWithValue("@id", it.ItemId);
+            using var r = c.ExecuteReader();
+            if (r.Read())
+            {
+                string t = r.IsDBNull(0) ? "" : r.GetString(0);
+                string text = r.IsDBNull(1) ? "" : r.GetString(1);
+                string ft = r.IsDBNull(2) ? "" : r.GetString(2);
+                body = t + "\n" + Lang.T("来源 {0} · {1} · ~{2} 分钟", ft, it.Reason, it.Minutes) + "\n\n" + StripHtml(text);
+            }
+        }
+        content.Text = body;
+    }
+
+    void SelectAndShow(int idx)
+    {
+        if (idx < 0 || idx >= items.Count) return;
+        list.MoveTo(idx);          // MoveTo 是相对量；从 0 出发移动 idx
+        ShowContent(list.Selected);
+        MarkRead(list.Selected);
+        RefreshList();
+    }
+
+    RefreshList();
+    // 接着读：跳第一篇未读
+    int first = 0;
+    for (int i = 0; i < items.Count; i++) if (!readSet.Contains(items[i].ItemId)) { first = i; break; }
+    SelectAndShow(first);
+
+    list.SelectionChanged += (s, e) => { ShowContent(list.Selected); MarkRead(list.Selected); RefreshList(); };
+    top.Initialized += (s, e) => list.SetFocus();
+    top.KeyDown += (s, e) =>
+    {
+        if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }   // 直接回归原界面，不调命令行
+        else if (e.KeyCode == KeyCode.L)
+        {
+            int id = items[list.Selected].ItemId;
+            ToggleSignal(id, ai: false, null, dbPath);
+            signals = LoadSignals();
+            ShowContent(list.Selected); RefreshList();
+            e.Handled = true;
+        }
+        else if (e.KeyCode == KeyCode.V)
+        {
+            int id = items[list.Selected].ItemId;
+            RunCliCommandInTui(() => ListVersionsCli(id.ToString(), dbPath));
+            e.Handled = true;
+        }
+    };
+    Application.Run(top);
+}
+#pragma warning restore CS0618
+
 void TodayCli(string[] args, string dbPath)
 {
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
@@ -2101,9 +2521,12 @@ void TodayCli(string[] args, string dbPath)
                     }),
                     dedups = digest.Dedups.Select(c => new
                     {
-                        itemA = c.ItemIdA, titleA = c.TitleA, sourceA = c.SourceA,
-                        itemB = c.ItemIdB, titleB = c.TitleB, sourceB = c.SourceB,
-                        overlap = c.Overlap, diff = c.DiffCmd
+                        size = c.Size,
+                        representativeId = c.RepresentativeId,
+                        title = c.Title,
+                        source = c.Source,
+                        minOverlap = c.MinOverlap,
+                        members = c.Members
                     })
                 },
                 items = list.Select(i => new
@@ -2176,6 +2599,15 @@ async Task RunCli(string[] args, string dbPath)
     if (cmd is "-h" or "--help")
     {
         PrintHelp();
+        return;
+    }
+
+    if (cmd is "--version")
+    {
+        string ver = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?";
+        string build = "";
+        try { build = new FileInfo(Environment.ProcessPath ?? "").LastWriteTime.ToString("yyyy-MM-dd HH:mm"); } catch { }
+        Console.WriteLine($"sip v{ver}" + (build.Length > 0 ? $"  (built {build})" : ""));
         return;
     }
 
@@ -2382,6 +2814,7 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  --policy list|set <feedId> <action> [args]|remove <feedId>  source rules you confirm (tag / lower frequency / archive / keep / unsubscribe)"));
     Console.WriteLine(Lang.T("  --onboarding [list|<category>]|add <category> <index|all>  recommended source templates (edit templates.json)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
+    Console.WriteLine(Lang.T("  --version        show version"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
     Console.WriteLine(Lang.T("  --sync [--feed N] [--json]  update only 'due' feeds (lists last/next times)"));
@@ -3081,7 +3514,7 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 Lang.T("           lang <code> (switch UI language, e.g. zh-CN / en-US)"),
                 Lang.T("           diff <id> / export <id|feed:N|all> / export-opml / import-opml <file>"),
                 Lang.T("           feed-info <id> / like <id> / likes / purge-fulltext [id]"),
-                Lang.T("           dedup scan|list|undo / insights-interval <7d|30d|off> / telemetry ... / config"));
+                Lang.T("           dedup（无参=交互选择） / dedup scan|list|undo / insights-interval <7d|30d|off> / telemetry ... / config"));
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             var about = new Button { Text = Lang.T("About"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok, about);
@@ -3098,23 +3531,19 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
                 ReadOnly = true, WordWrap = true
             };
+            var ver = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?";
+            string build = "";
+            try { build = new FileInfo(Environment.ProcessPath ?? "").LastWriteTime.ToString("yyyy-MM-dd HH:mm"); } catch { }
             txt.Text = string.Join("\n",
                 Lang.T("🍲 sip"),
-                "",
                 Lang.T("——「品，你细品。」"),
+                Lang.T("一个本地优先的透明信息过滤器与阅读辅助器。"),
                 "",
-                Lang.T("一个让你站着把信息喝了的 RSS 阅读器核心。"),
+                Lang.T("版本 v{0}", ver),
+                Lang.T("构建时间：{0}", build),
                 "",
-                Lang.T("功能：文件夹视图 TUI + 全功能 CLI"),
-                Lang.T("      · 全文搜索  --grep / 语义搜索 --search"),
-                Lang.T("      · 版本追踪 / 快照归档 / AI 摘要"),
-                Lang.T("      · 多语言（readwithhotsoup/languages/*.json）"),
-                "",
-                Lang.T("作者：hahahotsoup with ❤"),
-                Lang.T("thanks to deepseek + opencode + chatgpt"),
-                "",
-                Lang.T("博客：https://blog.hotsouprealm.top/atom.xml"),
-                Lang.T("关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾"));
+                Lang.T("作者：hahahotsoup"),
+                Lang.T("博客：https://blog.hotsouprealm.top/"));
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
@@ -3510,6 +3939,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 case "report" or "insights":
                     ShowInsightsPage(dbPath);
                     return;
+                case "today" or "--today":
+                    ShowTodayPage(dbPath);
+                    return;
                 case "u" or "-u" or "--update":
                     if (int.TryParse(arg, out int unum))
                         RunNetworkOp(() => RefreshOneFeed(unum, dbPath));
@@ -3618,17 +4050,24 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     RunCliCommandInTui(() => PurgeFulltextCli(arg, dbPath));
                     return;
                 case "dedup" or "--dedup":
-                    RunCliCommandInTui(() => DedupCli(string.IsNullOrEmpty(arg) ? new string[] { } : arg.Split(' '), dbPath));
+                    if (string.IsNullOrWhiteSpace(arg)) { ShowDedupCandidatesDialog(dbPath); return; }
+                    RunCliCommandInTui(() => DedupCli(arg.Split(' '), dbPath));
                     return;
                 case "insights-interval" or "--insights-interval":
                     RunCliCommandInTui(() => InsightsIntervalCli(arg, dbPath));
                     return;
                 case "telemetry":
                 {
-                    // enable 需 y/n 确认，TUI 里自动 --yes 跳过（避免读 stdin 卡住）
-                    var ta = (string.IsNullOrWhiteSpace(arg) ? "" : arg + " ") + "--yes";
-                    var taArgs = ta.Split(' ').Where(x => x.Length > 0).ToArray();
-                    RunCliCommandInTui(() => TelemetryCli(taArgs, dbPath));
+                    var tpos = (arg ?? "").Split(' ').Where(x => x.Length > 0).ToArray();
+                    string tsub = tpos.Length > 0 ? tpos[0].ToLowerInvariant() : "";
+                    if (tsub == "enable")
+                    {
+                        // TUI 里不静默开启：先弹确认
+                        if (Ask(Lang.T("苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？"), Lang.T("开启"), Lang.T("取消")) == 0)
+                            RunCliCommandInTui(() => TelemetryCli(new[] { "enable", "--yes" }, dbPath));
+                        return;
+                    }
+                    RunCliCommandInTui(() => TelemetryCli(tpos, dbPath));
                     return;
                 }
                 case "config" or "--config":
@@ -3636,6 +4075,9 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     return;
                 case "policy" or "--policy":
                     RunCliCommandInTui(() => PolicyCli(string.IsNullOrEmpty(arg) ? new string[] { "list" } : arg.Split(' '), dbPath));
+                    return;
+                case "onboarding" or "--onboarding":
+                    RunCliCommandInTui(() => OnboardingCli(string.IsNullOrEmpty(arg) ? new string[] { } : arg.Split(' '), dbPath));
                     return;
                 default:
                     Ask(Lang.T("Unknown command: {0}. Press H for help", cmd), Lang.T("OK"));
@@ -4096,7 +4538,7 @@ List<string> DashboardStats(string dbPath)
 void ShowFeedManager(string dbPath)
 {
     // Dialog 全屏；列表用自绘 FeedManagerList，方向键/翻页由它自己处理，不会被吞
-    var top = new Dialog
+    var top = new Window
     {
         Title = " " + Lang.T("Manage feeds") + " ",
         X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill()
@@ -4108,7 +4550,7 @@ void ShowFeedManager(string dbPath)
     };
     var hint = new Label
     {
-        Text = Lang.T("  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · i 已隐藏 · Esc 返回  "),
+        Text = Lang.T("  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · d 加源 · i 已隐藏 · Esc 返回  "),
         X = 0, Y = Pos.AnchorEnd(1), Width = Dim.Fill(), Height = 1
     };
     top.Add(list, hint);
@@ -4162,11 +4604,6 @@ void ShowFeedManager(string dbPath)
                     if (MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("Delete feed {0}? This cannot be undone!", id), Lang.T("OK"), Lang.T("Cancel")) == 0)
                     { DeleteFeedByRealId(id, dbPath); Rebuild(); }
                 }
-                e.Handled = true;
-            }
-            else if (e.KeyCode == KeyCode.S)
-            {
-                if (id != 0) { SchedulePickerDialog(id, dbPath); Rebuild(); }
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.Enter)
@@ -4246,7 +4683,7 @@ void SchedulePickerDialog(int realId, string dbPath)
     int sel = presets.FindIndex(p => p == current);
     if (sel < 0) sel = 0;
 
-    var top = new Dialog { Title = " " + Lang.T("Update schedule") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var top = new Window { Title = " " + Lang.T("Update schedule") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
     var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
     var hint = new Label
     {
@@ -4318,7 +4755,7 @@ void FeedEditDialog(int realId, string dbPath)
         (3, Lang.T("去归档")),
         (4, Lang.T("删除"))
     };
-    var top = new Dialog { Title = " " + Lang.T("编辑源") + " · " + CjkSpace(title) + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var top = new Window { Title = " " + Lang.T("编辑源") + " · " + CjkSpace(title) + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
     var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
     var hint = new Label { Text = Lang.T("  ↑/↓ 选择 · Enter 执行 · Esc 返回  "), X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1 };
     top.Add(list, hint);
@@ -4476,7 +4913,7 @@ bool ShowStartScreen(string dbPath)
     lines.AddRange(DashboardStats(dbPath));
     lines.AddRange(TodayStartScreenLines(dbPath));   // 「今日 Sip」：引导每日少量阅读
     lines.Add("");
-    lines.Add(Lang.T("  Enter 进入  ·  Q 退出  "));
+    lines.Add(Lang.T("  Enter 进入 · 输入 today 今日哈汤 · M 订阅管理 · Q 退出  "));
 
     var sv = new StartScreenView
     {
@@ -4500,6 +4937,16 @@ bool ShowStartScreen(string dbPath)
         else if (e.KeyCode is KeyCode.Q or KeyCode.Esc)
         {
             top.RequestStop();
+            e.Handled = true;
+        }
+        else if (e.KeyCode == KeyCode.M)
+        {
+            ShowFeedManager(dbPath);
+            e.Handled = true;
+        }
+        else if (e.KeyCode == KeyCode.T)
+        {
+            ShowTodayPage(dbPath);
             e.Handled = true;
         }
     };
@@ -4655,7 +5102,7 @@ IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
                         ELSE COUNT(*) FILTER (WHERE i.Status = 'archived') OVER (PARTITION BY i.Guid) END AS ArchivedCount,
                    ROW_NUMBER() OVER (PARTITION BY i.Guid ORDER BY i.Version DESC) AS rn
             FROM Items i
-            WHERE i.FeedId = @fid AND i.Guid IS NOT NULL
+            WHERE i.FeedId = @fid AND i.Guid IS NOT NULL AND i.Status != 'dedup'
         )
         WHERE Guid = '' OR rn = 1
         ORDER BY Id
@@ -4973,6 +5420,20 @@ void DeleteFeedByRealId(int realId, string dbPath)
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
     TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "delete", title = delTitle });
+
+    // 清理孤儿 dedup 规则（删除源的规则不再有意义）
+    CleanOrphanDedup(realId);
+}
+
+// 删除源后清理孤儿 dedup 规则（该源作为被隐藏或保留方都不再有意义）
+void CleanOrphanDedup(int feedId)
+{
+    var dmap = LoadDedup();
+    int before = dmap.Count;
+    foreach (var kv in dmap.ToList())
+        if (kv.Value.HiddenFeedId == feedId || kv.Value.CanonicalFeedId == feedId)
+            dmap.Remove(kv.Key);
+    if (dmap.Count != before) SaveDedup(dmap);
 }
 
 // 从 sidecar vecs.json 移除指定 itemId（删文章/删源时清理孤儿向量）
@@ -5391,7 +5852,7 @@ void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath, bool 
                         ELSE COUNT(*) FILTER (WHERE i.Status = 'archived') OVER (PARTITION BY i.Guid) END AS ArchivedCount,
                    ROW_NUMBER() OVER (PARTITION BY i.Guid ORDER BY i.Version DESC) AS rn
             FROM Items i
-            WHERE i.FeedId = @fid AND i.Guid IS NOT NULL
+            WHERE i.FeedId = @fid AND i.Guid IS NOT NULL AND i.Status != 'dedup'
         )
         WHERE Guid = '' OR rn = 1
         ORDER BY Id
@@ -6346,6 +6807,7 @@ void DeleteFeed(int displayNum, string dbPath, bool yes = false)
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
 
+    CleanOrphanDedup(realId);
     Console.WriteLine(Lang.T("{0} deleted", title));
 }
 
@@ -7172,7 +7634,8 @@ void GrepCli(string[] args, string dbPath)
     Console.WriteLine(Lang.T("Full-text search \"{0}\": {1} hits", keyword, items.Count));
     foreach (var r in items)
     {
-        Console.WriteLine($"  [{r.ItemId}] {StripControlChars(r.Title)} ({Lang.T("{0} occurrences", r.Count)})");
+        string note = r.Count == 0 ? "  " + Lang.T("(仅命中链接/属性，未计入可见文本)") : "";
+        Console.WriteLine($"  [{r.ItemId}] {StripControlChars(r.Title)} ({Lang.T("{0} occurrences", r.Count)}){note}");
         for (int i = 0; i < r.Snippets.Count; i++)
             Console.WriteLine($"    {i + 1}. {StripControlChars(r.Snippets[i])}");
         if (r.TotalSnippets > r.Snippets.Count)
@@ -8326,4 +8789,5 @@ public class AiException : Exception
     }
 }
 #pragma warning restore SYSLIB0051
+
 

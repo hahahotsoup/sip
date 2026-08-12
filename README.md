@@ -26,6 +26,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 ```bash
 ./sip.exe            # Windows：进入 TUI（首次启动自动创建 readwithhotsoup/ 数据目录）
 ./sip.exe --help     # 或直接用 CLI
+./sip.exe --version  # 查看版本号
 ```
 
 - **单文件 + 自带官方翻译**：语言文件内嵌 exe，只拷一个 exe 也能跑

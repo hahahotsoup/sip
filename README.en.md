@@ -26,6 +26,7 @@ Download the **single-file executable** from [Releases](https://github.com/hahah
 ```bash
 ./sip.exe            # Windows: enter TUI (first launch auto-creates the readwithhotsoup/ data dir)
 ./sip.exe --help     # or use the CLI directly
+./sip.exe --version  # show the version
 ```
 
 - **Single file + built-in translations**: language files are embedded in the exe; just copy one exe and it runs

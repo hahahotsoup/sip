@@ -402,8 +402,8 @@ class StartScreenView : View
             int c = l.GetColumns();
             if (c > totalW) totalW = c;
         }
-        int x0 = Math.Max(0, (w - totalW) / 2);
-        int y0 = Math.Max(0, (h - Lines.Length) / 2);
+        int x0 = 1;                       // 完全左对齐
+        int y0 = 0;                       // 贴左上角
         for (int i = 0; i < Lines.Length; i++)
         {
             int row = y0 + i;
@@ -461,7 +461,7 @@ class TodayDigest
     public int SourceCount { get; set; }
     public List<SourceCount> NewBySource { get; set; } = new();   // 每个源新增数（含高频标记）
     public List<TodayModified> Modified { get; set; } = new();    // 被作者改过（改动概览）
-    public List<DedupCandidate> Dedups { get; set; } = new();     // 可能同文（跨源重复）
+    public List<DedupCluster> Dedups { get; set; } = new();     // 可能同文（重复簇）
 }
 
 class SourceCount
@@ -503,6 +503,17 @@ class DedupCandidate
     public string SourceB { get; set; } = "";
     public double Overlap { get; set; }      // 段落重合度
     public string DiffCmd { get; set; } = ""; // sip --diff A B
+}
+
+// 一个「重复簇」：互相重复的文章集合（代表篇 + 成员）。输出按簇，避免 16 万对的 pair 爆炸
+class DedupCluster
+{
+    public int RepresentativeId { get; set; }   // 代表篇（成员之一）
+    public string Title { get; set; } = "";
+    public string Source { get; set; } = "";
+    public List<int> Members { get; set; } = new();   // 全部成员（含代表）
+    public int Size => Members.Count;
+    public double MinOverlap { get; set; }            // 簇内最小重合度
 }
 
 class InsightsView : View
