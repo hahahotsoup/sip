@@ -19,7 +19,7 @@ Follow the hot soup teahouse, follow the hot soup teahouse, thank you 🐾
 
 ## Quick start
 
-> ⚠️ **Newly added features are not yet fully tested**: sip's data files are interoperable, open, standard formats (SQLite + plain-text JSON), so you can switch the software core at any time to migrate — you won't be locked in.
+> ✅ **Thoroughly tested (v1.1.4, overall 8.4/10)**: functionality, security, performance, stability, concurrency, and fault injection all verified — see the [full test report](./sip-完整测试报告-2026-08-12-最终版.md). sip's data files are interoperable, open, standard formats (SQLite + plain-text JSON), so you can switch the software core at any time to migrate — you won't be locked in.
 
 Download the **single-file executable** from [Releases](https://github.com/hahahotsoup/sipintui/releases) and run it directly:
 
