@@ -33,7 +33,7 @@ Download the **single-file executable** from [Releases](https://github.com/hahah
 - **Framework dependency**: requires [.NET 10 runtime](https://dotnet.microsoft.com/download)
 - **Data directory**: `readwithhotsoup/` (SQLite + file cache, fully local, copy to migrate)
 
-Building from source, `publish.ps1` cross-platform packaging, and more: see [Wiki · Getting started](https://sip.hotsouprealm.top/指南/快速开始.html).
+Building from source, `publish.ps1` cross-platform packaging, and more: see [Wiki · Getting started](https://sip.hotsouprealm.top/en/guide/quick-start.html).
 
 ---
 
@@ -46,7 +46,7 @@ Building from source, `publish.ps1` cross-platform packaging, and more: see [Wik
 | 🤖 **AI friendly** | Semantic search (RAG), LLM summaries, unified JSON, structured exit codes |
 | 🕊️ **Privacy** | Local telemetry Sumenia off by default, stored locally only, never auto-uploaded |
 
-> Full feature list and every detail: [Wiki · Features](https://sip.hotsouprealm.top/功能/).
+> Full feature list and every detail: [Wiki · Features](https://sip.hotsouprealm.top/en/features/).
 
 ---
 
@@ -63,7 +63,7 @@ sip --today             # today's hot soup
 
 > 🔒 `sip --init` involves entering an API key — **run it manually in a real interactive terminal only** (security: pipe/script input is not accepted); AI cannot run it on your behalf, you must configure it yourself.
 
-Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage](https://sip.hotsouprealm.top/使用说明/命令行.html).
+Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage](https://sip.hotsouprealm.top/en/usage/cli.html).
 
 ---
 
@@ -177,6 +177,17 @@ sip's core principle is **facts first** — it only does deterministic rules and
 - `sip --insights` shows **reading facts** per feed (opened / completed / completion rate / ♥🤖 likes / AI-call counts / subscribed & backlog) with **explainable reasons** (e.g. "opened 0 articles in 30 days", "finish rate 3%") — **the decision is yours**.
 - Telemetry now attributes AI calls (summary / search / embedding) to **article and feed**, so the report can be aggregated per feed.
 - Entry: CLI `--insights` / TUI report page (`P` key / `report` command); optional scheduled reminders via `--insights-interval`.
+
+### Shipped: today's change digest (the diff showcase)
+
+- The top of `sip --today` is a **change digest**: how many articles each feed added, ⚠ high-frequency feeds (fire-hose updates) folded separately, **articles edited by the author** with a change overview (title changed or not / lines added-removed / approx ±chars — pure diff counting, zero LLM), and ⚠ possible duplicates (cross-source repeats).
+- Each "edited by author" item links to `sip --diff <id>` — making version-tracking's **diff capability the showcase** so "help me see what changed" actually lands.
+
+### Shipped: cross-source dedup (cluster detection, user-confirmed)
+
+- `sip --dedup scan` detects **possible duplicates** (paragraph overlap, cross-source, zero LLM) and outputs **duplicate clusters** (a group of same-article rows: a representative + members); `hide-cluster <representativeId>` hides the whole cluster in one shot (keeps the representative, hides the rest), marking `Status='dedup'` and recording the rule — after which they are **automatically excluded from search / fulltext / summary / counts**, and `--sync` skips re-importing them (no resurrection). Since v1.1.4 detection is cluster-based: however many duplicates, you only get a handful of clusters — **no pair explosion, no truncation**.
+- **Hide ≠ delete**: data is preserved and recoverable (`--dedup undo`); press `i` in the manage view to review/undo hidden items.
+- Detection is a fact, the decision is yours, the rule persists — the seed of Source Policy "remembering your decisions".
 
 ### Shipped: terminology/fact refactor + Source Policy closed loop
 
