@@ -62,6 +62,18 @@ The judgment is yours; AI is just a quiet assistant watching your back.
 
 AI can help you understand information, but it never decides its value for you — it's all up to you.
 
+## A little product philosophy
+
+Honestly, the world isn't short of "smarter" readers. sip isn't trying to be smarter than them — it's trying to hand the judgment back to you.
+
+Like the line from *Let the Bullets Fly* — "I want to stand tall AND make the money." sip is a bit the same: **stand tall, and still read what you care about.** No kowtowing to algorithms, no going with the herd — and you still get to read the things that matter to you.
+
+Information itself is neither good nor bad; whether something is "worth reading" is for you to say. AI can dig up the facts and point out the changes, but "does this source still matter to me" — that's your call.
+
+That's why sip sticks to two things: **deterministic rules**, and **local storage of facts**. You set the rules, the facts stay clean, and it doesn't step past that line.
+
+Which is also why telemetry is off by default and AI just quietly watches — it's not here to live your life for you.
+
 ## A few little things inside
 
 🍵 **Today's Hot Soup**: a small bowl of worthwhile reads each day — five, or however many you set. Not greedy, no rush.
