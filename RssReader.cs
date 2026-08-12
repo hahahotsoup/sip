@@ -1017,12 +1017,12 @@ void TelemetryCli(string[] args, string dbPath)
         case "status":
         {
             var (count, first, last) = TelemetryService.Stats();
-            Console.WriteLine(Lang.T("Sumenia（苏暖泉）: {0}", TelemetryService.Consent == "enabled" ? Lang.T("开启") : TelemetryService.Consent == "disabled" ? Lang.T("关闭(用户拒绝)") : Lang.T("关闭(未选择)")));
+            Console.WriteLine(Lang.T("苏暖泉: {0}", TelemetryService.Consent == "enabled" ? Lang.T("开启") : TelemetryService.Consent == "disabled" ? Lang.T("未开启（你拒绝了）") : Lang.T("未开启（还没选择）")));
             Console.WriteLine(Lang.T("  事件数 events   : {0}", count));
             Console.WriteLine(Lang.T("  首次记录 first   : {0}", first ?? Lang.T("—")));
             Console.WriteLine(Lang.T("  最后记录 last    : {0}", last ?? Lang.T("—")));
             if (TelemetryService.Consent == "unset")
-                Console.WriteLine(Lang.T("  提示：Sumenia 默认关闭；如需开启运行 sip telemetry enable"));
+                Console.WriteLine(Lang.T("  提示：苏暖泉默认不在；如需开启运行 sip telemetry enable"));
             return;
         }
         case "show":
@@ -1038,20 +1038,38 @@ void TelemetryCli(string[] args, string dbPath)
                 if (e.Surface != null) extra += " surface=" + e.Surface;
                 Console.WriteLine($"{ts} {e.Type}{extra}" + (string.IsNullOrEmpty(e.DataJson) ? "" : $"  {e.DataJson}"));
             }
-            if (events.Count == 0) Console.WriteLine(Lang.T("(Sumenia 暂无事件记录)"));
+            if (events.Count == 0) Console.WriteLine(Lang.T("苏暖泉还没有记录到什么"));
             return;
         }
         case "enable":
+        {
+            if (TelemetryService.Consent == "enabled")
+            {
+                Console.WriteLine(Lang.T("苏暖泉已开启（仅本地记录，不会上传）"));
+                return;
+            }
+            bool yes = args.Any(a => a.Equals("--yes", StringComparison.OrdinalIgnoreCase) || a.Equals("-y", StringComparison.OrdinalIgnoreCase));
+            if (!yes)
+            {
+                Console.WriteLine(Lang.T("苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传；你随时可用 telemetry disable 关闭、export 导出。"));
+                Console.Write(Lang.T("开启吗？(y/n) "));
+                if (Console.ReadLine()?.Trim().ToLower() != "y")
+                {
+                    Console.WriteLine(Lang.T("已取消，苏暖泉仍未工作"));
+                    return;
+                }
+            }
             TelemetryService.SetConsent("enabled");
-            Console.WriteLine(Lang.T("Sumenia（苏暖泉）已开启（仅本地记录，不会上传）"));
+            Console.WriteLine(Lang.T("苏暖泉来啦（仅本地记录，不会上传）"));
             return;
+        }
         case "disable":
             TelemetryService.SetConsent("disabled");
-            Console.WriteLine(Lang.T("Sumenia（苏暖泉）已关闭（历史数据保留，不再记录新事件）"));
+            Console.WriteLine(Lang.T("苏暖泉已离开（历史数据保留，不再记录新事件）"));
             return;
         case "clear":
             TelemetryService.Clear();
-            Console.WriteLine(Lang.T("Sumenia 事件已清空（保留你的开关选择）"));
+            Console.WriteLine(Lang.T("苏暖泉已清空工作记录（保留你的开关选择）"));
             return;
         case "export":
         {
@@ -1246,6 +1264,801 @@ List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
 }
 
 // CLI：sip --today [--json] [--refresh] [--quick N]
+// 改动概览：对某篇(Guid)的最近两版跑 diff，输出标题是否变 + 增删行数 + 约±字数（纯事实，零 LLM）。
+// 少于两版返回 null。
+TodayModified? ChangeOverview(string guid, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Version, Title, Content, Description FROM Items WHERE Guid = @g ORDER BY Version";
+        cmd.Parameters.AddWithValue("@g", guid);
+        var rows = new List<(int V, string T, string Body)>();
+        using (var r = cmd.ExecuteReader())
+        {
+            while (r.Read())
+                rows.Add((r.GetInt32(0), r.GetString(1),
+                    string.IsNullOrWhiteSpace(r.IsDBNull(2) ? "" : r.GetString(2))
+                        ? (r.IsDBNull(3) ? "" : r.GetString(3)) : r.GetString(2)));
+        }
+        if (rows.Count < 2) return null;
+
+        var oldV = rows[rows.Count - 2];
+        var newV = rows[rows.Count - 1];
+        var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(oldV.Body, newV.Body);
+        int added = 0, removed = 0;
+        foreach (var l in diff.Lines)
+        {
+            if (l.Type == ChangeType.Inserted) added++;
+            else if (l.Type == ChangeType.Deleted) removed++;
+        }
+        int OldChars(string s) { int n = 0; foreach (char c in s) if (!char.IsWhiteSpace(c)) n++; return n; }
+        return new TodayModified
+        {
+            ItemId = LatestIdForGuid(guid, dbPath),
+            Title = newV.T,
+            TitleChanged = oldV.T != newV.T,
+            AddedLines = added,
+            RemovedLines = removed,
+            WordDelta = OldChars(newV.Body) - OldChars(oldV.Body)
+        };
+    }
+    catch { return null; }
+}
+
+// 某 Guid 的最新 active 版本 Id（供 --diff/--versions 定位）
+int LatestIdForGuid(string guid, string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Id FROM Items WHERE Guid = @g AND Status = 'active' ORDER BY Version DESC LIMIT 1";
+        c.Parameters.AddWithValue("@g", guid);
+        var o = c.ExecuteScalar();
+        return o == null ? 0 : Convert.ToInt32(o);
+    }
+    catch { return 0; }
+}
+
+// 构建今日变化摘要：新增按源计数 + 高频源标记 + 被作者改过（改动概览）
+TodayDigest BuildTodayDigest(string dbPath, int windowHours)
+{
+    var d = new TodayDigest();
+    var now = DateTime.Now;
+    string cutoff = now.AddHours(-windowHours).ToString("O");
+    var settings = LoadSettings();
+
+    // ① 新增按源（Version=1：真正新发布，避免与「被改过」重复计数）
+    var newBySource = new List<SourceCount>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT f.Title, COUNT(*) FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'active' AND i.Version = 1 AND i.PublishDate >= @cut
+            GROUP BY f.Id ORDER BY COUNT(*) DESC";
+        c.Parameters.AddWithValue("@cut", cutoff);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            newBySource.Add(new SourceCount { Source = r.GetString(0), Count = r.GetInt32(1) });
+    }
+
+    // ② 高频/腹泻式判定：单日新增 > 绝对阈值(20) 或 远超中位数×5（避免少源时中位数被高频源撑高）
+    double hours = Math.Max(1, windowHours);
+    var perDay = newBySource.Select(s => s.Count / (hours / 24.0)).ToList();
+    double median = perDay.Count > 0 ? perDay.OrderBy(x => x).ElementAt(perDay.Count / 2) : 0;
+    foreach (var s in newBySource)
+    {
+        double pd = s.Count / (hours / 24.0);
+        bool flood;
+        if (settings.FloodThresholdPerDay is int ft)
+            flood = pd > ft;
+        else
+            flood = pd > 20 || pd > median * 5;
+        s.Flood = flood;
+        d.NewTotal += s.Count;
+    }
+    d.NewBySource = newBySource;
+    d.SourceCount = newBySource.Count;
+
+    // ③ 被作者改过：Version>1 且近期被归档（旧版 ArchivedAt >= cutoff）
+    var modGuids = new List<(string Guid, string Title, string Feed)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT i.Guid, i.Title, f.Title
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            JOIN Items a ON a.Guid = i.Guid AND a.Status = 'archived'
+            WHERE i.Status = 'active' AND i.Version > 1
+            GROUP BY i.Guid HAVING MAX(a.ArchivedAt) >= @cut";
+        c.Parameters.AddWithValue("@cut", cutoff);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            modGuids.Add((r.GetString(0), r.GetString(1), r.GetString(2)));
+    }
+    foreach (var m in modGuids)
+    {
+        var ov = ChangeOverview(m.Guid, dbPath);
+        if (ov == null) continue;
+        ov.Source = m.Feed;
+        if (ov.ItemId == 0) ov.ItemId = LatestIdForGuid(m.Guid, dbPath);
+        d.Modified.Add(ov);
+    }
+
+    // ④ 可能同文（跨源重复）——窗口与 digest 一致
+    d.Dedups = FindNearDuplicates(dbPath, windowHours);
+    return d;
+}
+
+// 打印今日变化摘要（文本）
+void PrintTodayDigest(TodayDigest d)
+{
+    if (d.NewTotal == 0 && d.Modified.Count == 0 && d.Dedups.Count == 0) return;   // 无变化不打扰
+    Console.WriteLine("─────────────────────");
+    Console.WriteLine(Lang.T("今日变化 · 新增 {0} 篇 · 来自 {1} 个源 · 被改过 {2} 篇 · 可能同文 {3} 组", d.NewTotal, d.SourceCount, d.Modified.Count, d.Dedups.Count));
+
+    var normal = d.NewBySource.Where(s => !s.Flood).ToList();
+    var flood = d.NewBySource.Where(s => s.Flood).ToList();
+    if (normal.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine(Lang.T("正常源"));
+        foreach (var s in normal.Take(8))
+            Console.WriteLine($"├ {CjkSpace(s.Source)}   +{s.Count}");
+        if (normal.Count > 8)
+            Console.WriteLine(Lang.T("└ 其他 {0} 源  +{1}", normal.Count - 8, normal.Skip(8).Sum(x => x.Count)));
+    }
+    if (flood.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine(Lang.T("⚠ 高频源（大量更新）"));
+        foreach (var s in flood)
+            Console.WriteLine($"├ {CjkSpace(s.Source)}   +{s.Count}");
+    }
+    if (d.Modified.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine(Lang.T("被作者改过（48h 内）"));
+        foreach (var m in d.Modified)
+        {
+            var bits = new List<string>();
+            if (m.TitleChanged) bits.Add(Lang.T("标题改了"));
+            if (m.AddedLines > 0 || m.RemovedLines > 0) bits.Add(Lang.T("正文 +{0}/-{1} 行", m.AddedLines, m.RemovedLines));
+            if (m.WordDelta != 0) bits.Add(Lang.T("约 {0:+0;-0;0} 字", m.WordDelta));
+            string desc = bits.Count > 0 ? string.Join(" · ", bits) : Lang.T("内容有变");
+            Console.WriteLine($"├ {StripControlChars(m.Title)}  ✎ {desc}  →  sip --diff {m.ItemId}");
+        }
+    }
+    if (d.Dedups.Count > 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine(Lang.T("⚠ 可能同文（跨源重复）"));
+        foreach (var c in d.Dedups)
+        {
+            Console.WriteLine($"├ [{c.ItemIdA}] {StripControlChars(c.TitleA)} ({c.SourceA})  ≈  [{c.ItemIdB}] {StripControlChars(c.TitleB)} ({c.SourceB})");
+            Console.WriteLine($"│   重合度 {c.Overlap}% · {c.DiffCmd} · 隐藏: sip --dedup hide {c.ItemIdB} {c.ItemIdA}");
+        }
+    }
+}
+
+// ══════════ 跨源去重（dedup.json）：用户确认后隐藏重复，导入时跳过 ══════════
+string DedupPath() => Path.Combine(dataDir, "dedup.json");
+
+Dictionary<string, DedupRule> LoadDedup()
+{
+    try
+    {
+        if (File.Exists(DedupPath()))
+            return JsonSerializer.Deserialize<Dictionary<string, DedupRule>>(File.ReadAllText(DedupPath())) ?? new();
+    }
+    catch { }
+    return new Dictionary<string, DedupRule>();
+}
+
+void SaveDedup(Dictionary<string, DedupRule> map)
+{
+    try
+    {
+        File.WriteAllText(DedupPath(), JsonSerializer.Serialize(map,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+// 正文 → 归一化段落列表（去 HTML、按段切、去空白空段）
+List<string> NormalizeParagraphs(string text)
+{
+    var list = new List<string>();
+    if (string.IsNullOrWhiteSpace(text)) return list;
+    string plain = StripHtml(text);
+    foreach (var raw in plain.Split('\n'))
+    {
+        string p = raw.Trim();
+        if (p.Length > 0) list.Add(p);
+    }
+    return list;
+}
+
+// 段落重合度 = 较小段落集在较大段落集中的匹配数 / 较大段落数（0~1）
+double ParagraphOverlap(List<string> a, List<string> b)
+{
+    if (a.Count == 0 || b.Count == 0) return 0;
+    var bigger = a.Count >= b.Count ? a : b;
+    var smaller = a.Count >= b.Count ? b : a;
+    var set = new HashSet<string>(bigger);
+    int matched = smaller.Count(set.Contains);
+    return (double)matched / bigger.Count;
+}
+
+// 找跨源近重复候选（窗口内、不同 FeedId、段落重合度 ≥ 阈值）
+List<DedupCandidate> FindNearDuplicates(string dbPath, int windowHours)
+{
+    var res = new List<DedupCandidate>();
+    var settings = LoadSettings();
+    double thr = settings.DedupThreshold;
+    var now = DateTime.Now;
+    string cutoff = now.AddHours(-windowHours).ToString("O");
+
+    var arts = new List<(int Id, int FeedId, string Title, string Feed, string Link, string Body)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT i.Id, i.FeedId, i.Title, f.Title, i.Link,
+                   COALESCE(NULLIF(i.Content,''), i.Description,'')
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'active' AND i.PublishDate >= @cut";
+        c.Parameters.AddWithValue("@cut", cutoff);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            arts.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2), r.GetString(3),
+                r.IsDBNull(4) ? "" : r.GetString(4), r.IsDBNull(5) ? "" : r.GetString(5)));
+    }
+
+    // 预计算段落，避免重复切分
+    var paras = arts.Select(a => (a, NormalizeParagraphs(a.Body))).ToList();
+
+    var seen = new HashSet<(int, int)>();
+    for (int i = 0; i < paras.Count; i++)
+    {
+        for (int j = i + 1; j < paras.Count; j++)
+        {
+            var (a, pa) = paras[i];
+            var (b, pb) = paras[j];
+            if (a.FeedId == b.FeedId) continue;           // 只跨源
+            if (seen.Contains((a.Id, b.Id))) continue;
+            seen.Add((a.Id, b.Id));
+            double ov = ParagraphOverlap(pa, pb);
+            if (ov >= thr)
+            {
+                res.Add(new DedupCandidate
+                {
+                    ItemIdA = a.Id, TitleA = a.Title, SourceA = a.Feed,
+                    ItemIdB = b.Id, TitleB = b.Title, SourceB = b.Feed,
+                    Overlap = Math.Round(ov * 100, 0),
+                    DiffCmd = $"sip --diff {a.Id} {b.Id}"
+                });
+            }
+        }
+    }
+    return res;
+}
+
+// 隐藏某篇（Status='dedup'）+ 记规则；返回是否成功
+bool HideAsDedup(string dbPath, int hiddenId, int canonicalId)
+{
+    try
+    {
+        (int feed, string url) Get(int id)
+        {
+            using var c = new SqliteConnection($"Data Source={dbPath}");
+            c.Open();
+            var cmd = c.CreateCommand();
+            cmd.CommandText = "SELECT FeedId, Link FROM Items WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", id);
+            using var r = cmd.ExecuteReader();
+            if (!r.Read()) return (0, "");
+            return (r.GetInt32(0), r.IsDBNull(1) ? "" : r.GetString(1));
+        }
+        var (hf, hu) = Get(hiddenId);
+        var (cf, cu) = Get(canonicalId);
+        if (hf == 0 || string.IsNullOrEmpty(hu)) return false;
+
+        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        {
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE Items SET Status = 'dedup' WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", hiddenId);
+            cmd.ExecuteNonQuery();
+        }
+        var map = LoadDedup();
+        map[$"{hf}:{hu}"] = new DedupRule
+        {
+            HiddenFeedId = hf, HiddenUrl = hu,
+            CanonicalFeedId = cf, CanonicalUrl = cu,
+            At = DateTime.Now.ToString("O")
+        };
+        SaveDedup(map);
+        TelemetryService.Record("dedup", sourceId: hf, data: new { action = "hide", hiddenId, canonicalId });
+        return true;
+    }
+    catch { return false; }
+}
+
+// 撤销某条规则 + 恢复被隐藏的文章为 active
+bool UndoDedup(string dbPath, string key)
+{
+    var map = LoadDedup();
+    if (!map.TryGetValue(key, out var rule)) return false;
+    map.Remove(key);
+    SaveDedup(map);
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE Items SET Status = 'active' WHERE FeedId = @f AND Link = @u AND Status = 'dedup'";
+        cmd.Parameters.AddWithValue("@f", rule.HiddenFeedId);
+        cmd.Parameters.AddWithValue("@u", rule.HiddenUrl);
+        cmd.ExecuteNonQuery();
+    }
+    TelemetryService.Record("dedup", sourceId: rule.HiddenFeedId, data: new { action = "undo", key });
+    return true;
+}
+
+// 列出已隐藏（dedup'd）的文章（供 list / manage 复查）
+List<(int Id, string Title, string Source, string Key)> ListHiddenDedup(string dbPath)
+{
+    var map = LoadDedup();
+    var res = new List<(int, string, string, string)>();
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = @"
+            SELECT i.Id, i.Title, f.Title, i.Link
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'dedup'";
+        using var r = c.ExecuteReader();
+        while (r.Read())
+        {
+            int id = r.GetInt32(0);
+            string link = r.IsDBNull(3) ? "" : r.GetString(3);
+            int fid = 0;
+            using (var f2 = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                f2.Open();
+                var q = f2.CreateCommand();
+                q.CommandText = "SELECT FeedId FROM Items WHERE Id = @id";
+                q.Parameters.AddWithValue("@id", id);
+                var o = q.ExecuteScalar();
+                if (o != null) fid = Convert.ToInt32(o);
+            }
+            string key = $"{fid}:{link}";
+            res.Add((id, r.GetString(1), r.GetString(2), key));
+        }
+    }
+    return res;
+}
+
+#pragma warning disable CS0618
+// TUI：查看/撤销已隐藏（dedup'd）的文章（manage 界面按 i 进入）
+void ShowHiddenDedupDialog(string dbPath)
+{
+    var top = new Dialog { Title = " " + Lang.T("已隐藏的文章") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
+    var hint = new Label
+    {
+        Text = Lang.T("  j/k 移动 · r/Enter 撤销忽略 · Esc 返回  "),
+        X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1
+    };
+    top.Add(list, hint);
+
+    void Rebuild()
+    {
+        var hidden = ListHiddenDedup(dbPath);
+        list.SetRows(hidden.Select(h => (h.Id, $"[{h.Id}] {CjkSpace(h.Title)}  ({h.Source})")).ToList());
+    }
+
+    try
+    {
+        Rebuild();
+        top.Initialized += (s, e) => list.SetFocus();
+        top.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+            else if (e.KeyCode == KeyCode.R || e.KeyCode == KeyCode.Enter)
+            {
+                int id = list.SelectedId;
+                if (id != 0)
+                {
+                    var hidden = ListHiddenDedup(dbPath);
+                    var hit = hidden.FirstOrDefault(x => x.Id == id);
+                    if (hit.Key.Length > 0) { UndoDedup(dbPath, hit.Key); Rebuild(); }
+                }
+                e.Handled = true;
+            }
+        };
+        Application.Run(top);
+    }
+    catch (Exception ex)
+    {
+        MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("隐藏列表出错: {0}", ex.Message), Lang.T("OK"));
+    }
+}
+#pragma warning restore CS0618
+
+// CLI：sip --dedup scan | hide <hiddenId> <canonicalId> | list | undo <key> [--json]
+#pragma warning disable CS0618
+// TUI：在对话框里显示多行文本（用于 diff/feed-info/likes 等控制台输出命令）
+void ShowTextDialog(string title, string text)
+{
+    var dlg = new Dialog { Title = " " + title + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var tv = new TextView { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), ReadOnly = true, CanFocus = true, WordWrap = false };
+    tv.Text = string.IsNullOrWhiteSpace(text) ? Lang.T("(无输出)") : text.TrimEnd();
+    var hint = new Label { Text = Lang.T("  j/k 滚动 · q/Esc 关闭  "), X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1 };
+    dlg.Add(tv, hint);
+    dlg.KeyDown += (s, e) => { if (e.KeyCode == KeyCode.Esc || e.KeyCode == KeyCode.Q) { dlg.RequestStop(); e.Handled = true; } };
+    Application.Run(dlg);
+}
+
+// TUI：运行一个控制台命令，捕获其 stdout 并在对话框显示（避免污染 TUI 界面）
+void RunCliCommandInTui(Action run)
+{
+    var sb = new System.Text.StringBuilder();
+    var orig = Console.Out;
+    try
+    {
+        using (var sw = new StringWriter(sb)) { Console.SetOut(sw); run(); }
+    }
+    finally { Console.SetOut(orig); }
+    ShowTextDialog(Lang.T("输出"), sb.ToString());
+}
+#pragma warning restore CS0618
+
+void DedupCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+    string sub = pos.Length > 0 ? pos[0].ToLowerInvariant() : "scan";
+
+    switch (sub)
+    {
+        case "scan":
+        {
+            var cands = FindNearDuplicates(dbPath, 48);
+            if (json)
+            {
+                JsonOut(new
+                {
+                    success = true,
+                    data = new { candidates = cands.Select(c => new
+                    {
+                        itemA = c.ItemIdA, titleA = c.TitleA, sourceA = c.SourceA,
+                        itemB = c.ItemIdB, titleB = c.TitleB, sourceB = c.SourceB,
+                        overlap = c.Overlap, diff = c.DiffCmd
+                    }) }
+                });
+                return;
+            }
+            if (cands.Count == 0) { Console.WriteLine(Lang.T("未发现跨源重复")); return; }
+            Console.WriteLine(Lang.T("发现 {0} 组可能同文（段落重合度 ≥ {1:P0}）：", cands.Count, LoadSettings().DedupThreshold));
+            foreach (var c in cands)
+            {
+                Console.WriteLine($"[{c.ItemIdA}] {StripControlChars(c.TitleA)}  ({c.SourceA})");
+                Console.WriteLine($"[{c.ItemIdB}] {StripControlChars(c.TitleB)}  ({c.SourceB})");
+                Console.WriteLine($"   重合度 {c.Overlap}% · {c.DiffCmd}");
+                Console.WriteLine(Lang.T("   隐藏一篇：sip --dedup hide {0} {1}（保留 {2} 隐藏 {3}）", c.ItemIdA, c.ItemIdB, c.ItemIdA, c.ItemIdB));
+            }
+            return;
+        }
+        case "hide":
+        {
+            if (pos.Length < 3 || !int.TryParse(pos[1], out int hid) || !int.TryParse(pos[2], out int cid))
+            {
+                SetExit(); Console.WriteLine(Lang.T("用法: sip --dedup hide <hiddenId> <canonicalId>")); return;
+            }
+            bool ok = HideAsDedup(dbPath, hid, cid);
+            if (json) JsonOut(new { success = ok, data = new { hiddenId = hid, canonicalId = cid, ok } });
+            else Console.WriteLine(ok ? Lang.T("已隐藏 {0}（保留 {1}）", hid, cid) : Lang.T("隐藏失败"));
+            if (!ok) SetExit();
+            return;
+        }
+        case "list":
+        {
+            var hidden = ListHiddenDedup(dbPath);
+            if (json)
+            {
+                JsonOut(new { success = true, data = new { hidden = hidden.Select(h => new { id = h.Id, title = h.Title, source = h.Source, key = h.Key }) } });
+                return;
+            }
+            if (hidden.Count == 0) { Console.WriteLine(Lang.T("暂无已隐藏的重复文章")); return; }
+            Console.WriteLine(Lang.T("已隐藏（dedup'd）的文章："));
+            foreach (var h in hidden)
+                Console.WriteLine($"[{h.Id}] {StripControlChars(h.Title)}  ({h.Source})  →  sip --dedup undo {h.Key}");
+            return;
+        }
+        case "undo":
+        {
+            if (pos.Length < 2)
+            {
+                SetExit(); Console.WriteLine(Lang.T("用法: sip --dedup undo <key（见 list 输出）>")); return;
+            }
+            string key = pos[1];
+            bool ok = UndoDedup(dbPath, key);
+            if (json) JsonOut(new { success = ok, data = new { key, ok } });
+            else Console.WriteLine(ok ? Lang.T("已撤销忽略，文章恢复显示") : Lang.T("未找到该规则"));
+            if (!ok) SetExit();
+            return;
+        }
+        default:
+            SetExit(); Console.WriteLine(Lang.T("用法: sip --dedup scan | hide <hiddenId> <canonicalId> | list | undo <key> [--json]"));
+            return;
+    }
+}
+
+// 导入时检查跨源去重规则：命中 (feedId,url) → 阻止导入。
+// 若被忽略那篇的内容已与 canonical 分歧（重合度<阈值）→ 规则自动失效并放行（作者更新被忽略那篇）。
+bool DedupImportBlocked(SqliteConnection conn, long feedId, FeedItem item)
+{
+    try
+    {
+        var map = LoadDedup();
+        string key = $"{feedId}:{item.Link}";
+        if (!map.TryGetValue(key, out var rule)) return false;
+
+        // 取 canonical 当前内容
+        string canon = "";
+        var q = conn.CreateCommand();
+        q.CommandText = "SELECT COALESCE(NULLIF(Content,''), Description,'') FROM Items WHERE FeedId = @f AND Link = @u AND Status = 'active' LIMIT 1";
+        q.Parameters.AddWithValue("@f", rule.CanonicalFeedId);
+        q.Parameters.AddWithValue("@u", rule.CanonicalUrl);
+        var o = q.ExecuteScalar();
+        if (o != null) canon = o.ToString() ?? "";
+        if (string.IsNullOrEmpty(canon))
+        {
+            // canonical 已不存在 → 规则失效
+            map.Remove(key); SaveDedup(map);
+            return false;
+        }
+
+        double ov = ParagraphOverlap(NormalizeParagraphs(item.Content ?? ""), NormalizeParagraphs(canon));
+        if (ov >= LoadSettings().DedupThreshold) return true;   // 仍重复 → 跳过
+
+        map.Remove(key); SaveDedup(map);                         // 已分歧 → 放行
+        return false;
+    }
+    catch { return false; }
+}
+
+// ══════════ Source Policy（用户确认的规则，source_policy.json）══════════
+string SourcePolicyPath() => Path.Combine(dataDir, "source_policy.json");
+
+Dictionary<int, SourcePolicyRule> LoadSourcePolicy()
+{
+    try
+    {
+        if (File.Exists(SourcePolicyPath()))
+            return JsonSerializer.Deserialize<Dictionary<int, SourcePolicyRule>>(File.ReadAllText(SourcePolicyPath())) ?? new();
+    }
+    catch { }
+    return new Dictionary<int, SourcePolicyRule>();
+}
+
+void SaveSourcePolicy(Dictionary<int, SourcePolicyRule> map)
+{
+    try
+    {
+        File.WriteAllText(SourcePolicyPath(), JsonSerializer.Serialize(map,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+// 单源规则标记文本（-l / 报告里显示）：#tag · [动作]
+string PolicyMarker(SourcePolicyRule? p)
+{
+    if (p == null) return "";
+    var bits = new List<string>();
+    if (!string.IsNullOrWhiteSpace(p.Tag)) bits.Add("#" + p.Tag);
+    if (p.Action == "lower_frequency") bits.Add(Lang.T("降频 {0}", p.Schedule));
+    else if (p.Action == "archive") bits.Add(Lang.T("已归档"));
+    else if (p.Action == "keep") bits.Add(Lang.T("保留"));
+    else if (p.Action == "unsubscribe") bits.Add(Lang.T("退订候选"));
+    return bits.Count > 0 ? "  [" + string.Join(" · ", bits) + "]" : "";
+}
+
+// CLI：sip --policy list | set <feedId> <action> [args] | remove <feedId> [--json]
+void PolicyCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+    string sub = pos.Length > 0 ? pos[0].ToLowerInvariant() : "list";
+
+    switch (sub)
+    {
+        case "list":
+        {
+            var map = LoadSourcePolicy();
+            if (json)
+            {
+                JsonOut(new { success = true, data = new { policies = map.Select(kv => new { feedId = kv.Key, action = kv.Value.Action, schedule = kv.Value.Schedule, tag = kv.Value.Tag, note = kv.Value.Note, createdBy = kv.Value.CreatedBy, updatedAt = kv.Value.UpdatedAt }) } });
+                return;
+            }
+            if (map.Count == 0) { Console.WriteLine(Lang.T("暂无 Source Policy（用 sip --policy set <feedId> <action> 创建）")); return; }
+            foreach (var kv in map.OrderBy(x => x.Key))
+                Console.WriteLine($"[{kv.Key}] {Lang.T(kv.Value.Action)}" + (kv.Value.Tag.Length > 0 ? $"  #{kv.Value.Tag}" : "") + (kv.Value.Schedule.Length > 0 ? $"  → {kv.Value.Schedule}" : "") + (kv.Value.Note.Length > 0 ? $"  ({kv.Value.Note})" : ""));
+            return;
+        }
+        case "set":
+        {
+            if (pos.Length < 3 || !int.TryParse(pos[1], out int feedId))
+            {
+                SetExit(); Console.WriteLine(Lang.T("用法: sip --policy set <feedId> <archive|keep|lower_frequency|tag|unsubscribe> [args]")); return;
+            }
+            if (GetRealId(feedId, dbPath) == 0) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number not found"), json: json); return; }
+            string action = pos[2].ToLowerInvariant();
+            string rest = pos.Length > 3 ? string.Join(" ", pos.Skip(3)) : "";
+            var map = LoadSourcePolicy();
+            map.TryGetValue(feedId, out var rule);
+            rule ??= new SourcePolicyRule();
+            rule.Action = action;
+            rule.UpdatedAt = DateTime.Now.ToString("O");
+            rule.CreatedBy = "user";
+
+            switch (action)
+            {
+                case "lower_frequency":
+                    if (string.IsNullOrWhiteSpace(rest)) { SetExit(); Console.WriteLine(Lang.T("用法: --policy set <id> lower_frequency <30m|1h|7d|daily@08:00|...>")); return; }
+                    SetFeedSchedule(GetDisplayNum(feedId, dbPath).ToString(), rest, dbPath);
+                    rule.Schedule = rest.Trim().ToLowerInvariant();
+                    break;
+                case "archive":
+                    AddTimestampForRealId(feedId, dbPath);
+                    break;
+                case "keep":
+                    rule.Note = rest;
+                    break;
+                case "tag":
+                    rule.Tag = rest.Split(' ', 2)[0].TrimStart('#');
+                    if (rest.Contains(' ')) rule.Note = rest.Substring(rest.IndexOf(' ')).Trim();
+                    break;
+                case "unsubscribe":
+                    rule.Note = rest;
+                    break;
+                default:
+                    SetExit(); Console.WriteLine(Lang.T("未知动作: {0}", action)); return;
+            }
+            map[feedId] = rule;
+            SaveSourcePolicy(map);
+            if (json) JsonOut(new { success = true, data = new { feedId, action, tag = rule.Tag, schedule = rule.Schedule, note = rule.Note } });
+            else Console.WriteLine(Lang.T("已应用规则：{0}", Lang.T(action)) + PolicyMarker(rule));
+            return;
+        }
+        case "remove":
+        {
+            if (pos.Length < 2 || !int.TryParse(pos[1], out int feedId))
+            {
+                SetExit(); Console.WriteLine(Lang.T("用法: sip --policy remove <feedId>")); return;
+            }
+            var map = LoadSourcePolicy();
+            bool ok = map.Remove(feedId);
+            SaveSourcePolicy(map);
+            if (json) JsonOut(new { success = ok, data = new { feedId, ok } });
+            else Console.WriteLine(ok ? Lang.T("已移除规则") : Lang.T("该源无规则"));
+            return;
+        }
+        default:
+            SetExit(); Console.WriteLine(Lang.T("用法: sip --policy list | set <feedId> <action> [args] | remove <feedId> [--json]"));
+            return;
+    }
+}
+
+// ══════════ Onboarding：推荐源模板（templates.json，用户可编辑）══════════
+string TemplatesPath() => Path.Combine(dataDir, "templates.json");
+
+Dictionary<string, List<SourceTemplate>> DefaultTemplates() => new()
+{
+    ["AI"] = new()
+    {
+        new SourceTemplate { Name = "Hugging Face Blog", Url = "https://huggingface.co/blog/feed.xml" },
+        new SourceTemplate { Name = "GitHub Blog", Url = "https://github.blog/feed/" },
+        new SourceTemplate { Name = "OpenAI", Url = "https://openai.com/news/rss.xml" }
+    },
+    ["开发"] = new()
+    {
+        new SourceTemplate { Name = "Hacker News", Url = "https://news.ycombinator.com/rss" },
+        new SourceTemplate { Name = "GitHub Blog", Url = "https://github.blog/feed/" }
+    },
+    ["科技公司"] = new()
+    {
+        new SourceTemplate { Name = "BBC News", Url = "http://feeds.bbci.co.uk/news/rss.xml" }
+    }
+};
+
+Dictionary<string, List<SourceTemplate>> LoadTemplates()
+{
+    try
+    {
+        if (File.Exists(TemplatesPath()))
+            return JsonSerializer.Deserialize<Dictionary<string, List<SourceTemplate>>>(File.ReadAllText(TemplatesPath())) ?? DefaultTemplates();
+    }
+    catch { }
+    return DefaultTemplates();
+}
+
+// CLI：sip --onboarding [list] | <category> | add <category> <index|all>
+void OnboardingCli(string[] args, string dbPath)
+{
+    var templates = LoadTemplates();
+    var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+    string sub = pos.Length > 0 ? pos[0].ToLowerInvariant() : "list";
+
+    if (sub == "add")
+    {
+        if (pos.Length < 3)
+        {
+            SetExit(); Console.WriteLine(Lang.T("用法: sip --onboarding add <category> <index|all>")); return;
+        }
+        string cat = pos[1];
+        if (!templates.TryGetValue(cat, out var list))
+        {
+            SetExit(); Console.WriteLine(Lang.T("未找到分类 {0}（可用: {1}）", cat, string.Join(", ", templates.Keys))); return;
+        }
+        string which = pos[2];
+        int ok = 0, fail = 0;
+        if (which.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var t in list)
+            {
+                try { DownloadAndSaveToDb(t.Url, dbPath, interactive: false).Wait(); ok++; }
+                catch { fail++; Console.WriteLine(Lang.T("添加失败: {0} ({1})", t.Name, t.Url)); }
+            }
+        }
+        else if (int.TryParse(which, out int idx) && idx >= 1 && idx <= list.Count)
+        {
+            var t = list[idx - 1];
+            try { DownloadAndSaveToDb(t.Url, dbPath, interactive: false).Wait(); ok++; }
+            catch { fail++; Console.WriteLine(Lang.T("添加失败: {0} ({1})", t.Name, t.Url)); }
+        }
+        else { SetExit(); Console.WriteLine(Lang.T("索引无效（1~{0} 或 all）", list.Count)); return; }
+        Console.WriteLine(Lang.T("完成：成功 {0}，失败 {1}", ok, fail));
+        return;
+    }
+
+    // list / 指定分类
+    Console.WriteLine(Lang.T("开始使用 sip —— 选择你的领域，一键添加订阅源（templates.json 可编辑）："));
+    if (sub == "list" || sub == "")
+    {
+        foreach (var kv in templates)
+        {
+            Console.WriteLine();
+            Console.WriteLine(Lang.T("◆ {0}", kv.Key));
+            for (int i = 0; i < kv.Value.Count; i++)
+                Console.WriteLine($"  {i + 1}. {kv.Value[i].Name}  {kv.Value[i].Url}");
+            Console.WriteLine(Lang.T("   → sip --onboarding add {0} <索引|all>", kv.Key));
+        }
+        return;
+    }
+    if (templates.TryGetValue(sub, out var sel))
+    {
+        Console.WriteLine(Lang.T("◆ {0}", sub));
+        for (int i = 0; i < sel.Count; i++)
+            Console.WriteLine($"  {i + 1}. {sel[i].Name}  {sel[i].Url}");
+        Console.WriteLine(Lang.T("   → sip --onboarding add {0} <索引|all>", sub));
+        return;
+    }
+    SetExit(); Console.WriteLine(Lang.T("未找到分类 {0}（可用: {1}）", sub, string.Join(", ", templates.Keys)));
+}
+
 void TodayCli(string[] args, string dbPath)
 {
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
@@ -1256,6 +2069,7 @@ void TodayCli(string[] args, string dbPath)
             quick = Math.Clamp(q, 1, 5);   // 时间不够就只喝一小口：--quick N
     var (done, target, tracking) = TodayProgress(dbPath);
     var list = GetTodayList(dbPath, quick, refresh, out string generatedAt);   // 一天一碗；--refresh 重生成
+    var digest = BuildTodayDigest(dbPath, 48);   // 今日变化摘要（48h 窗口）
 
     if (json)
     {
@@ -1270,6 +2084,28 @@ void TodayCli(string[] args, string dbPath)
                 target,
                 done,
                 tracking,
+                digest = new
+                {
+                    newTotal = digest.NewTotal,
+                    sourceCount = digest.SourceCount,
+                    newBySource = digest.NewBySource.Select(s => new { source = s.Source, count = s.Count, flood = s.Flood }),
+                    modified = digest.Modified.Select(m => new
+                    {
+                        itemId = m.ItemId,
+                        title = m.Title,
+                        source = m.Source,
+                        titleChanged = m.TitleChanged,
+                        addedLines = m.AddedLines,
+                        removedLines = m.RemovedLines,
+                        wordDelta = m.WordDelta
+                    }),
+                    dedups = digest.Dedups.Select(c => new
+                    {
+                        itemA = c.ItemIdA, titleA = c.TitleA, sourceA = c.SourceA,
+                        itemB = c.ItemIdB, titleB = c.TitleB, sourceB = c.SourceB,
+                        overlap = c.Overlap, diff = c.DiffCmd
+                    })
+                },
                 items = list.Select(i => new
                 {
                     itemId = i.ItemId,
@@ -1287,6 +2123,10 @@ void TodayCli(string[] args, string dbPath)
     Console.WriteLine(Lang.T("今日哈汤 · {0}", DateTime.Now.ToString("yyyy-MM-dd")));
     if (refresh)
         Console.WriteLine(Lang.T("（已重新生成今日哈汤）"));
+
+    // 今日变化摘要
+    PrintTodayDigest(digest);
+
     Console.WriteLine("─────────────────────");
     if (list.Count == 0)
     {
@@ -1303,7 +2143,7 @@ void TodayCli(string[] args, string dbPath)
     if (tracking)
         Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇 · 已完成 {2} 篇{3}", total, target, done, done >= target ? Lang.T(" 🎉 今天结束") : ""));
     else
-        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（开启 Sumenia 可跟踪完成进度）", total, target));
+        Console.WriteLine(Lang.T("共约 {0} 分钟 · 今日目标 {1} 篇（与苏暖泉共同阅读可跟踪完成进度）", total, target));
     if (!refresh)
         Console.WriteLine(Lang.T("（今日哈汤已生成于 {0} · --refresh 可重新来一碗 · 新文章随时可从侧栏/--search/--grep 看）", generatedAt));
 }
@@ -1423,6 +2263,15 @@ async Task RunCli(string[] args, string dbPath)
             if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --insights-interval <7d|30d|off>")); return; }
             InsightsIntervalCli(args[1], dbPath);
             return;
+        case "--dedup":
+            DedupCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--policy":
+            PolicyCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--onboarding":
+            OnboardingCli(args.Skip(1).ToArray(), dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
@@ -1529,6 +2378,9 @@ void PrintHelp()
     Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)"));
     Console.WriteLine(Lang.T("  --insights [--window N d] [--json]  reading report (facts per feed; needs telemetry ON; decisions are yours)"));
     Console.WriteLine(Lang.T("  --insights-interval <7d|30d|off>  schedule the report reminder (due popup in TUI)"));
+    Console.WriteLine(Lang.T("  --dedup scan|hide <hiddenId> <canonicalId>|list|undo <key>  cross-source duplicate detection & hide (--json)"));
+    Console.WriteLine(Lang.T("  --policy list|set <feedId> <action> [args]|remove <feedId>  source rules you confirm (tag / lower frequency / archive / keep / unsubscribe)"));
+    Console.WriteLine(Lang.T("  --onboarding [list|<category>]|add <category> <index|all>  recommended source templates (edit templates.json)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine();
     Console.WriteLine(Lang.T("Update scheduling:"));
@@ -2226,7 +3078,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                 Lang.T("Commands: init / index / reindex / u / d / a / r / s / g / y / q"),
                 Lang.T("           schedule <id> <expr> (e.g. 30m / daily@10:00 / manual)"),
                 Lang.T("           sync / all"),
-                Lang.T("           lang <code> (switch UI language, e.g. zh-CN / en-US)"));
+                Lang.T("           lang <code> (switch UI language, e.g. zh-CN / en-US)"),
+                Lang.T("           diff <id> / export <id|feed:N|all> / export-opml / import-opml <file>"),
+                Lang.T("           feed-info <id> / like <id> / likes / purge-fulltext [id]"),
+                Lang.T("           dedup scan|list|undo / insights-interval <7d|30d|off> / telemetry ... / config"));
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             var about = new Button { Text = Lang.T("About"), X = Pos.Right(ok) + 1, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok, about);
@@ -2579,10 +3434,10 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
         void EnsureTelemetryConsentTui()
         {
             if (TelemetryService.Consent != "unset") return;
-            var dlg = new Dialog { Title = " " + Lang.T("Sumenia · 苏暖泉") + " ", Width = 78, Height = 16 };
+            var dlg = new Dialog { Title = " " + Lang.T("苏暖泉") + " ", Width = 78, Height = 16 };
             var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 10, ReadOnly = true, CanFocus = false, WordWrap = true };
-            txt.Text = Lang.T("Sumenia（苏暖泉）是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用情况，用于未来改进内容筛选。\n\nSumenia 默认关闭。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你可以随时查看、关闭、删除或导出。");
-            var enable = new Button { Text = Lang.T("与 Sumenia 一起阅读"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
+            txt.Text = Lang.T("苏暖泉是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用与搜索情况，用于未来改进内容筛选。\n\n苏暖泉默认不在。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你随时可用 telemetry disable 关闭、export 导出。");
+            var enable = new Button { Text = Lang.T("与苏暖泉共同阅读"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
             var keep = new Button { Text = Lang.T("我暂时不需要"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
             dlg.Add(txt, enable, keep);
             bool enabled = false;
@@ -2731,6 +3586,56 @@ async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScree
                     return;
                 case "lang" or "--lang":
                     SwitchLanguage(arg);
+                    return;
+                case "diff" or "--diff":
+                    RunCliCommandInTui(() => DiffCli(string.IsNullOrEmpty(arg) ? new string[] { "" } : arg.Split(' '), dbPath));
+                    return;
+                case "export" or "--export":
+                {
+                    string ea = string.IsNullOrWhiteSpace(arg) ? "all" : arg;
+                    if (!ea.Contains("--yes", StringComparison.OrdinalIgnoreCase)) ea = (ea + " --yes").Trim();
+                    var eaArgs = ea.Split(' ').Where(x => x.Length > 0).ToArray();
+                    RunCliCommandInTui(() => ExportCli(eaArgs, dbPath));
+                    return;
+                }
+                case "export-opml" or "--export-opml":
+                    RunCliCommandInTui(() => ExportOpmlCli(arg, dbPath));
+                    return;
+                case "import-opml" or "--import-opml":
+                    if (string.IsNullOrWhiteSpace(arg)) { Ask(Lang.T("Usage: import-opml <file.opml>"), Lang.T("OK")); return; }
+                    RunCliCommandInTui(() => ImportOpmlCli(arg, dbPath));
+                    return;
+                case "feed-info" or "--feed-info":
+                    RunCliCommandInTui(() => FeedInfoCli(string.IsNullOrEmpty(arg) ? new string[] { "" } : arg.Split(' '), dbPath));
+                    return;
+                case "like" or "--like":
+                    RunCliCommandInTui(() => LikeCli(string.IsNullOrEmpty(arg) ? new string[] { "" } : arg.Split(' '), dbPath));
+                    return;
+                case "likes" or "--likes":
+                    RunCliCommandInTui(() => LikesCli(string.IsNullOrEmpty(arg) ? new string[] { } : arg.Split(' '), dbPath));
+                    return;
+                case "purge-fulltext" or "--purge-fulltext":
+                    RunCliCommandInTui(() => PurgeFulltextCli(arg, dbPath));
+                    return;
+                case "dedup" or "--dedup":
+                    RunCliCommandInTui(() => DedupCli(string.IsNullOrEmpty(arg) ? new string[] { } : arg.Split(' '), dbPath));
+                    return;
+                case "insights-interval" or "--insights-interval":
+                    RunCliCommandInTui(() => InsightsIntervalCli(arg, dbPath));
+                    return;
+                case "telemetry":
+                {
+                    // enable 需 y/n 确认，TUI 里自动 --yes 跳过（避免读 stdin 卡住）
+                    var ta = (string.IsNullOrWhiteSpace(arg) ? "" : arg + " ") + "--yes";
+                    var taArgs = ta.Split(' ').Where(x => x.Length > 0).ToArray();
+                    RunCliCommandInTui(() => TelemetryCli(taArgs, dbPath));
+                    return;
+                }
+                case "config" or "--config":
+                    RunCliCommandInTui(() => ShowConfig(dbPath));
+                    return;
+                case "policy" or "--policy":
+                    RunCliCommandInTui(() => PolicyCli(string.IsNullOrEmpty(arg) ? new string[] { "list" } : arg.Split(' '), dbPath));
                     return;
                 default:
                     Ask(Lang.T("Unknown command: {0}. Press H for help", cmd), Lang.T("OK"));
@@ -3117,7 +4022,7 @@ bool ShowFullscreenReader(int itemId, string dbPath)
         Y = Pos.AnchorEnd(1),
         Width = Dim.Fill(),
         Height = 1,
-        TextAlignment = Alignment.Center
+        
     };
 
     var top = new Window
@@ -3203,8 +4108,8 @@ void ShowFeedManager(string dbPath)
     };
     var hint = new Label
     {
-        Text = Lang.T("  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · Esc 返回  "),
-        X = 0, Y = Pos.AnchorEnd(1), Width = Dim.Fill(), Height = 1, TextAlignment = Alignment.Center
+        Text = Lang.T("  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · i 已隐藏 · Esc 返回  "),
+        X = 0, Y = Pos.AnchorEnd(1), Width = Dim.Fill(), Height = 1
     };
     top.Add(list, hint);
 
@@ -3261,13 +4166,23 @@ void ShowFeedManager(string dbPath)
             }
             else if (e.KeyCode == KeyCode.S)
             {
-                if (id != 0) { ScheduleManagerDialog(id, dbPath); Rebuild(); }
+                if (id != 0) { SchedulePickerDialog(id, dbPath); Rebuild(); }
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.Enter)
+            {
+                if (id != 0) { FeedEditDialog(id, dbPath); Rebuild(); }
                 e.Handled = true;
             }
             else if (e.KeyCode == KeyCode.D)
             {
                 AddFeedManagerDialog(dbPath);
                 Rebuild();
+                e.Handled = true;
+            }
+            else if (e.KeyCode == KeyCode.I)
+            {
+                ShowHiddenDedupDialog(dbPath);
                 e.Handled = true;
             }
         };
@@ -3281,7 +4196,93 @@ void ShowFeedManager(string dbPath)
 }
 
 // 管理页：设置某源更新计划（对话框）
-void ScheduleManagerDialog(int realId, string dbPath)
+#pragma warning disable CS0618
+// 更新计划预设的显示名
+string ScheduleDisplayName(string p)
+{
+    return p switch
+    {
+        "manual" => Lang.T("手动"),
+        "30m" => "30m",
+        "1h" => "1h",
+        "6h" => "6h",
+        "12h" => "12h",
+        "1d" => "1d",
+        "3d" => "3d",
+        "7d" => "7d",
+        "30d" => "30d",
+        "custom" => Lang.T("自定义…"),
+        _ when p.StartsWith("daily@") => Lang.T("每天 {0}:00", p[6..].Substring(0, 2)),
+        _ when p.StartsWith("weekly@") => Lang.T("每周 {0}", p["weekly@".Length..]),
+        _ => p
+    };
+}
+
+// 左右键调整 daily/weekly 预设的小时（就地修改 presets[idx]）
+void AdjustHour(List<string> presets, int idx, int delta)
+{
+    string p = presets[idx];
+    var m = Regex.Match(p, @"^(daily@|weekly@\w+ )(\d{2}):\d{2}$");
+    if (!m.Success) return;
+    int h = int.Parse(m.Groups[2].Value);
+    h = ((h + delta) % 24 + 24) % 24;
+    presets[idx] = m.Groups[1].Value + h.ToString("00") + ":00";
+}
+
+// 管理页：更新计划（方向键预设选择器）
+void SchedulePickerDialog(int realId, string dbPath)
+{
+    string current = "";
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Schedule FROM Feeds WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", realId);
+        var o = c.ExecuteScalar();
+        if (o != null) current = (o.ToString() ?? "").Trim().ToLowerInvariant();
+    }
+    var presets = new List<string> { "manual", "30m", "1h", "6h", "12h", "1d", "3d", "7d", "30d", "daily@08:00", "daily@12:00", "daily@18:00", "weekly@Mon 08:00", "custom" };
+    int sel = presets.FindIndex(p => p == current);
+    if (sel < 0) sel = 0;
+
+    var top = new Dialog { Title = " " + Lang.T("Update schedule") + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
+    var hint = new Label
+    {
+        Text = Lang.T("  ↑/↓ 选择 · ←/→ 调时间 · Enter 应用 · Esc 取消  "),
+        X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1
+    };
+    top.Add(list, hint);
+
+    void RebuildRows() => list.SetRows(presets.Select((p, i) => (i, "  " + ScheduleDisplayName(p) + (i == sel ? "  ←" : ""))).ToList());
+    RebuildRows();
+    list.MoveTo(sel);
+
+    top.Initialized += (s, e) => list.SetFocus();
+    top.KeyDown += (s, e) =>
+    {
+        if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+        else if (e.KeyCode == KeyCode.Enter)
+        {
+            string p = presets[list.SelectedId];
+            if (p == "custom") { ScheduleCustomDialog(realId, dbPath); top.RequestStop(); e.Handled = true; return; }
+            SetFeedSchedule(GetDisplayNum(realId, dbPath).ToString(), p, dbPath);
+            top.RequestStop(); e.Handled = true;
+        }
+        else if (e.KeyCode == KeyCode.CursorLeft || e.KeyCode == KeyCode.CursorRight)
+        {
+            sel = list.SelectedId;
+            AdjustHour(presets, sel, e.KeyCode == KeyCode.CursorLeft ? -1 : 1);
+            RebuildRows();
+            e.Handled = true;
+        }
+    };
+    Application.Run(top);
+}
+
+// 更新计划：自定义表达式（TextField）
+void ScheduleCustomDialog(int realId, string dbPath)
 {
     var dlg = new Dialog { Title = " " + Lang.T("Update schedule") + " ", Width = 64, Height = 9 };
     var lbl = new Label { Text = Lang.T("Schedule (30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual): "), X = 0, Y = 0 };
@@ -3294,9 +4295,57 @@ void ScheduleManagerDialog(int realId, string dbPath)
     Application.Run(dlg);
     string expr = input.Text.Trim();
     if (string.IsNullOrEmpty(expr)) return;
-    // SetFeedSchedule 收的是列表显示编号（ROW_NUMBER），先把真实 Id 换算回去
     SetFeedSchedule(GetDisplayNum(realId, dbPath).ToString(), expr, dbPath);
 }
+
+// 管理页：单源编辑面板（Enter 进入；↑/↓ 选字段，Enter/←/→ 执行）
+void FeedEditDialog(int realId, string dbPath)
+{
+    string title = "", schedule = "";
+    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    {
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT Title, COALESCE(Schedule,'') FROM Feeds WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", realId);
+        using var r = c.ExecuteReader();
+        if (r.Read()) { title = r.GetString(0); schedule = r.GetString(1); }
+    }
+    var actions = new List<(int Id, string Line)>
+    {
+        (1, Lang.T("更新计划") + "  : " + (string.IsNullOrWhiteSpace(schedule) || schedule == "manual" ? Lang.T("手动") : schedule)),
+        (2, Lang.T("归档")),
+        (3, Lang.T("去归档")),
+        (4, Lang.T("删除"))
+    };
+    var top = new Dialog { Title = " " + Lang.T("编辑源") + " · " + CjkSpace(title) + " ", X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
+    var list = new FeedManagerList { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(1), CanFocus = true };
+    var hint = new Label { Text = Lang.T("  ↑/↓ 选择 · Enter 执行 · Esc 返回  "), X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1 };
+    top.Add(list, hint);
+    list.SetRows(actions);
+
+    top.Initialized += (s, e) => list.SetFocus();
+    top.KeyDown += (s, e) =>
+    {
+        if (e.KeyCode == KeyCode.Esc) { top.RequestStop(); e.Handled = true; }
+        else if (e.KeyCode == KeyCode.Enter || e.KeyCode == KeyCode.CursorRight)
+        {
+            switch (list.SelectedId)
+            {
+                case 1: SchedulePickerDialog(realId, dbPath); break;
+                case 2: AddTimestampForRealId(realId, dbPath); break;
+                case 3: RemoveTimestampForRealId(realId, dbPath); break;
+                case 4:
+                    if (MessageBox.Query(Application.Instance, Lang.T("Notice"), Lang.T("Delete feed {0}? This cannot be undone!", realId), Lang.T("OK"), Lang.T("Cancel")) == 0)
+                        DeleteFeedByRealId(realId, dbPath);
+                    break;
+            }
+            top.RequestStop(); e.Handled = true;
+        }
+    };
+    Application.Run(top);
+}
+#pragma warning restore CS0618
 
 // 真实源 Id → 列表显示编号（1,2,3...；找不到原样返回）
 int GetDisplayNum(int realId, string dbPath)
@@ -3315,6 +4364,7 @@ int GetDisplayNum(int realId, string dbPath)
     return realId;
 }
 
+#pragma warning disable CS0618
 // 管理页：加源对话框（下载放后台，不阻塞 TUI）
 void AddFeedManagerDialog(string dbPath)
 {
@@ -3395,7 +4445,7 @@ List<string> TodayStartScreenLines(string dbPath)
                 ? Lang.T("  共约 {0} 分钟 · 已完成 🎉 今天结束", total)
                 : Lang.T("  共约 {0} 分钟 · 目标 {1} 篇 · 已完成 {2} 篇", total, target, done));
         else
-            lines.Add(Lang.T("  共约 {0} 分钟 · 目标 {1} 篇（开启 Sumenia 可跟踪进度）", total, target));
+            lines.Add(Lang.T("  共约 {0} 分钟 · 目标 {1} 篇（与苏暖泉共同阅读可跟踪进度）", total, target));
     }
     catch { /* 起始页不因异常崩溃 */ }
     return lines;
@@ -3860,6 +4910,7 @@ void AddTimestampForRealId(int realId, string dbPath)
     cmd.CommandText = "UPDATE Feeds SET Title = @newTitle WHERE Id = @id";
     cmd.Parameters.AddWithValue("@newTitle", newTitle);
     cmd.ExecuteNonQuery();
+    TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "archive", title = oldTitle });
 }
 
 // 按真实 Id 去归档
@@ -3880,6 +4931,7 @@ void RemoveTimestampForRealId(int realId, string dbPath)
     cmd.CommandText = "UPDATE Feeds SET Title = @newTitle WHERE Id = @id";
     cmd.Parameters.AddWithValue("@newTitle", plainTitle);
     cmd.ExecuteNonQuery();
+    TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "unarchive", title = plainTitle });
 }
 
 // 按真实 Id 删除源（含文章与向量）
@@ -3911,8 +4963,16 @@ void DeleteFeedByRealId(int realId, string dbPath)
     cmd.ExecuteNonQuery();
     cmd.CommandText = "DELETE FROM Items WHERE FeedId = @id";
     cmd.ExecuteNonQuery();
+    // 删除前记录标题（用于遥测 feed 生命周期）
+    string delTitle = "";
+    var tCmd = db.CreateCommand();
+    tCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
+    tCmd.Parameters.AddWithValue("@id", realId);
+    var to = tCmd.ExecuteScalar();
+    if (to != null) delTitle = to.ToString() ?? "";
     cmd.CommandText = "DELETE FROM Feeds WHERE Id = @id";
     cmd.ExecuteNonQuery();
+    TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "delete", title = delTitle });
 }
 
 // 从 sidecar vecs.json 移除指定 itemId（删文章/删源时清理孤儿向量）
@@ -3997,6 +5057,7 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
         cmd.CommandText = "UPDATE Feeds SET Schedule = '' WHERE Id = @id";
         cmd.Parameters.AddWithValue("@id", realId);
         cmd.ExecuteNonQuery();
+        TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "schedule", schedule = "manual" });
         Console.WriteLine(Lang.T("Feed {0} set to manual updates (not automatic)", dn));
         return;
     }
@@ -4016,6 +5077,7 @@ void SetFeedSchedule(string displayNum, string expr, string dbPath)
     cmd2.Parameters.AddWithValue("@s", raw.ToLowerInvariant());
     cmd2.Parameters.AddWithValue("@id", realId);
     cmd2.ExecuteNonQuery();
+    TelemetryService.Record("feed_change", sourceId: realId, data: new { action = "schedule", schedule = raw.ToLowerInvariant() });
 
     string hint = TryParseSchedule(raw.ToLowerInvariant()) is FeedSchedule ps && !ps.IsManual && ps.Raw.Length > 0
         ? HumanSchedule(ps) : raw;
@@ -4789,6 +5851,7 @@ void ListFeedsFromDb(string dbPath, bool json = false)
     }
 
     var now = DateTime.Now;
+    var policy = LoadSourcePolicy();
     foreach (var r in rows)
     {
         var parts = new List<string>();
@@ -4800,7 +5863,8 @@ void ListFeedsFromDb(string dbPath, bool json = false)
         string healthText = FeedHealthText(r.RealId, r.Schedule, r.LastChecked, now);
         // 健康标记只显示异常（正常不显示）
         string marker = healthText == Lang.T("正常") ? "" : "  " + healthText;
-        Console.WriteLine($"[{r.DisplayNum}] {StripControlChars(r.Title)} {stats}{status}{marker}");
+        policy.TryGetValue(r.RealId, out var pl);
+        Console.WriteLine($"[{r.DisplayNum}] {StripControlChars(r.Title)} {stats}{status}{marker}{PolicyMarker(pl)}");
     }
 }
 
@@ -5092,6 +6156,10 @@ async Task DownloadAndSaveToDb(string url, string dbPath, bool interactive = tru
         insertCmd.CommandText = "SELECT last_insert_rowid()";
         feedId = (long)insertCmd.ExecuteScalar()!;
     }
+
+    // 遥测：新增订阅源（feed 生命周期，仅新源）
+    if (isNewFeed)
+        TelemetryService.Record("feed_change", sourceId: (int)feedId, data: new { action = "add", title = feed.Title });
 
     // 无论内容是否有变化，都记录「上次拉取时间」——调度只关心上次何时真正查过
     var touchCmd = conn.CreateCommand();
@@ -5444,7 +6512,9 @@ void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNewFeed =
         else
         {
             reader.Close();
-            // 新文章 → 直接插入
+            // 新文章 → 直接插入（先查跨源去重规则，命中则跳过，避免卷土重来）
+            if (DedupImportBlocked(conn, feedId, item))
+                continue;
             InsertNewItem(conn, feedId, item, guid, version: 1);
             newCount++;
         }
@@ -5954,6 +7024,7 @@ void SearchCli(string[] args, string dbPath)
 
     var results = DoSearch(query, dbPath, feedReal, threshold, json);
     if (results == null) return;
+    TelemetryService.Record("search", sourceId: feedReal, data: new { mode = "semantic", query, hits = results.Count, threshold });
 
     if (json)
     {
@@ -6019,6 +7090,7 @@ void GrepCli(string[] args, string dbPath)
 
     var hits = DoGrep(keyword, dbPath, limit);
     if (hits == null) return;
+    TelemetryService.Record("search", data: new { mode = "grep", query = keyword, hits = hits.Count });
 
     // --full：整篇摘要直出（旧行为，显式 opt-in）
     if (full)
@@ -6725,24 +7797,35 @@ Dictionary<int, (int User, int Ai)> BuildFeedLikeStats(string dbPath)
     return result;
 }
 
-// 单源规则提示：候选动作 + 一句数据依据（仅观察，不替你决定）
-(string Action, string Basis) RuleHint(int feedId, string schedule, DateTime? lastChecked, long active, long opened, long completed, long skipped, Dictionary<int, (int FailCount, string LastError, string LastOkAt)> health)
+// 单源「事实原因」列表（只陈述事实与数据，不替用户下价值结论）
+List<string> BuildReasons(int feedId, string schedule, DateTime? lastChecked, long active, long opened, long completed, long skipped, Dictionary<int, (int FailCount, string LastError, string LastOkAt)> health, DateTime now)
 {
+    var r = new List<string>();
     health.TryGetValue(feedId, out var h);
-    int fail = h.FailCount;
-    string healthText = FeedHealthText(feedId, schedule, lastChecked, DateTime.Now);
-    if (fail > 0)
-        return (Lang.T("建议退订"), Lang.T("近期拉取失败 {0} 次，可能已失效", fail));
-    if (healthText == Lang.T("⚠ 长期未更新"))
-        return (Lang.T("建议退订"), Lang.T("长期未更新"));
+    if (h.FailCount > 0)
+        r.Add(Lang.T("近期拉取失败 {0} 次", h.FailCount));
+    else if (lastChecked is DateTime lc && IsFeedStale(schedule, lc, now))
+        r.Add(Lang.T("长期未更新"));
     if (opened == 0)
-        return (active > 0 ? Lang.T("可考虑精简") : Lang.T("无文章"), Lang.T("窗口内未打开任何一篇（订阅 {0} 篇）", active));
-    double rate = completed / (double)Math.Max(1, opened);
-    if (rate < 0.4 && active > 10)
-        return (Lang.T("可考虑精简"), Lang.T("打开 {0} 篇仅读完 {1} 篇，完成率低且订阅量大", opened, completed));
-    if (rate >= 0.6 && opened >= 3)
-        return (Lang.T("保留"), Lang.T("窗口内打开 {0} 篇、读完 {1} 篇，投入度高", opened, completed));
-    return (Lang.T("按需调整"), Lang.T("窗口内打开 {0} 篇、读完 {1} 篇", opened, completed));
+        r.Add(Lang.T("窗口内未打开任何一篇（订阅 {0} 篇）", active));
+    else
+    {
+        r.Add(Lang.T("窗口内打开 {0} 篇、读完 {1} 篇、跳过 {2} 篇", opened, completed, skipped));
+        double rate = completed / (double)Math.Max(1, opened);
+        if (rate < 0.4)
+            r.Add(Lang.T("完读率仅 {0:P0}", rate));
+    }
+    return r;
+}
+
+// 来源「状态」：仅技术故障（拉取失败/长期未更新）；阅读行为属活跃度，不计入
+string FeedStatusText(int feedId, string schedule, DateTime? lastChecked, DateTime now)
+{
+    var map = LoadFeedHealth();
+    map.TryGetValue(feedId, out var e);
+    if (e.FailCount > 0) return Lang.T("✗ 失败 {0} 次", e.FailCount);
+    if (lastChecked is DateTime lc && IsFeedStale(schedule, lc, now)) return Lang.T("⚠ 长期未更新");
+    return Lang.T("正常");
 }
 
 // 构建报告数据
@@ -6767,6 +7850,7 @@ List<InsightsFeed> BuildInsights(string dbPath, int windowDays)
     var aiCalls = TelemetryService.FeedAiCallStats(windowDays);
     var likes = BuildFeedLikeStats(dbPath);
     var health = LoadFeedHealth();
+    var now = DateTime.Now;
 
     var list = new List<InsightsFeed>();
     foreach (var f in feeds)
@@ -6775,7 +7859,6 @@ List<InsightsFeed> BuildInsights(string dbPath, int windowDays)
         aiCalls.TryGetValue(f.Id, out var ac);
         likes.TryGetValue(f.Id, out var lk);
         long backlog = Math.Max(0, f.Active - rd.Opened);
-        var (action, basis) = RuleHint(f.Id, f.Schedule, f.LastChecked, f.Active, rd.Opened, rd.Completed, rd.Skipped, health);
         list.Add(new InsightsFeed
         {
             FeedId = f.Id,
@@ -6790,9 +7873,8 @@ List<InsightsFeed> BuildInsights(string dbPath, int windowDays)
             AiLikes = lk.Ai,
             LlmCalls = ac.Llm,
             EmbeddingCalls = ac.Embedding,
-            Health = FeedHealthText(f.Id, f.Schedule, f.LastChecked, DateTime.Now),
-            Action = action,
-            Basis = basis
+            Status = FeedStatusText(f.Id, f.Schedule, f.LastChecked, now),
+            Reasons = BuildReasons(f.Id, f.Schedule, f.LastChecked, f.Active, rd.Opened, rd.Completed, rd.Skipped, health, now)
         });
     }
     return list;
@@ -6847,7 +7929,7 @@ void InsightsCli(string[] args, string dbPath)
                     completionRate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) : 0,
                     userLikes = x.UserLikes, aiLikes = x.AiLikes,
                     llmCalls = x.LlmCalls, embeddingCalls = x.EmbeddingCalls,
-                    health = x.Health, action = x.Action, basis = x.Basis
+                    status = x.Status, reasons = x.Reasons
                 })
             }
         });
@@ -6863,12 +7945,13 @@ void InsightsCli(string[] args, string dbPath)
     foreach (var x in list)
     {
         string rate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) + "%" : "—";
-        string health = x.Health == Lang.T("正常") ? "" : "  " + x.Health;
-        Console.WriteLine($"[{x.FeedId}] {CjkSpace(StripControlChars(x.Title))}{health}");
+        string status = x.Status == Lang.T("正常") ? "" : "  " + x.Status;
+        Console.WriteLine($"[{x.FeedId}] {CjkSpace(StripControlChars(x.Title))}{status}");
         Console.WriteLine($"   订阅 {x.Active} 篇 · 未读积压 {x.Backlog}");
         Console.WriteLine($"   打开 {x.Opened} · 读完 {x.Completed} · 完成率 {rate} · 跳过 {x.Skipped}");
         Console.WriteLine($"   ♥ 你点赞 {x.UserLikes} · 🤖 AI 点赞 {x.AiLikes}" + (x.LlmCalls > 0 || x.EmbeddingCalls > 0 ? $" · AI 摘要 {x.LlmCalls} 次" : ""));
-        Console.WriteLine($"   观察：{x.Action} —— {x.Basis}（由你决定）");
+        foreach (var reason in x.Reasons)
+            Console.WriteLine($"   · {reason}");
     }
 }
 
@@ -6919,7 +8002,7 @@ void ShowInsightsPage(string dbPath)
     var hint = new Label
     {
         Text = Lang.T("  j/k 移动 · a 归档 · x 删除 · Esc 返回  "),
-        X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1, TextAlignment = Alignment.Center
+        X = 0, Y = Pos.AnchorEnd(0), Width = Dim.Fill(), Height = 1
     };
     top.Add(view, hint);
 
@@ -7084,19 +8167,6 @@ class LlmCfg
     public string ApiEndpoint { get; set; } = "https://api.deepseek.com/v1";
 }
 
-// TUI 树节点（订阅源或文章）
-class TuiNode
-{
-    public bool IsFeed { get; set; }    // true=订阅源父节点，false=文章叶子
-    public int FeedId { get; set; }     // 归属源 Id（文章节点也带，便于操作）
-    public long ItemId { get; set; }    // 文章 Id（源节点为 0）
-    public string Status { get; set; } = "active";  // 文章状态：active/archived/deleted
-    public string Title { get; set; } = "";
-    public string Guid { get; set; } = "";        // 文章 Guid（同一篇文章的多个版本共享）
-    public bool HasHistory { get; set; }          // 是否有被改过的旧版本（有则标题右侧有 ✎ 标记）
-    public int VersionCount { get; set; } = 1;    // 该文章共有几个版本
-}
-
 // 解析后的更新计划（见 TryParseSchedule）
 class FeedSchedule
 {
@@ -7128,880 +8198,16 @@ class DueFeed
 // 这里自绘一个轻量侧栏：来源可展开/折叠，标题按列宽换行（CJK 宽度感知），
 // 提供与旧 TreeView 用法一致的接口（SelectedObject/SetFeeds/Toggle/...），
 // 便于正文区、状态栏等其余代码无感替换。
-class FeedManagerList : View
-{
-    public List<(int Id, string Line)> Rows { get; private set; } = new();
-    public int Selected { get; private set; }
-    public event EventHandler? SelectionChanged;
-
-    public int SelectedId => Selected < Rows.Count ? Rows[Selected].Id : 0;
-
-    public void SetRows(List<(int Id, string Line)> rows)
-    {
-        Rows = rows;
-        Selected = Math.Clamp(Selected, 0, Math.Max(0, Rows.Count - 1));
-        SetNeedsDraw();
-    }
-
-    public void MoveTo(int delta)
-    {
-        if (Rows.Count == 0) return;
-        int before = Selected;
-        Selected = Math.Clamp(Selected + delta, 0, Rows.Count - 1);
-        if (Selected != before) { SelectionChanged?.Invoke(this, EventArgs.Empty); SetNeedsDraw(); }
-    }
-
-    // 方向键/PageUp/PageDown/Home/End 都由本视图单独处理，不被外层吞掉
-    protected override bool OnKeyDown(Key key)
-    {
-        if (Rows.Count == 0) return false;
-        switch (key.KeyCode)
-        {
-            case KeyCode.CursorDown:
-            case KeyCode.J: MoveTo(1); return true;
-            case KeyCode.CursorUp:
-            case KeyCode.K: MoveTo(-1); return true;
-            case KeyCode.PageDown: MoveTo(Math.Max(1, Viewport.Height - 1)); return true;
-            case KeyCode.PageUp: MoveTo(-Math.Max(1, Viewport.Height - 1)); return true;
-            case KeyCode.Home: MoveTo(-Rows.Count); return true;
-            case KeyCode.End: MoveTo(Rows.Count); return true;
-            default: return false;
-        }
-    }
-
-    protected override bool OnDrawingContent(DrawContext? context)
-    {
-        int w = Viewport.Width, h = Viewport.Height;
-        SetAttribute(GetAttributeForRole(VisualRole.Normal));
-        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
-        int top = Math.Max(0, Selected - h / 2);   // 让选中行尽量居中
-        for (int i = top; i < Math.Min(Rows.Count, top + h); i++)
-        {
-            int sy = i - top;
-            bool sel = i == Selected;
-            SetAttribute(sel
-                ? GetAttributeForRole(HasFocus ? VisualRole.Focus : VisualRole.Active)
-                : GetAttributeForRole(VisualRole.Normal));
-            string line = (sel ? "> " : "  ") + Rows[i].Line;
-            int cols = line.GetColumns();
-            if (cols > w) line = line[..Math.Max(0, w - 1)] + "…";
-            AddStr(0, sy, line);
-        }
-        return true;
-    }
-}
 
 // ══════════ 自绘侧栏（订阅源 + 文章，标题自动换行）═══════════
 // Terminal.Gui 的 TreeView 每行只能画一行，长标题会被截断；
 // 这里自绘一个轻量侧栏：来源可展开/折叠，标题按列宽换行（CJK 宽度感知），
 // 提供与旧 TreeView 用法一致的接口（SelectedObject/SetFeeds/Toggle/...），
 // 便于正文区、状态栏等其余代码无感替换。
-class SidebarRow
-{
-    public TuiNode Node { get; set; } = new();
-    public bool IsFeed { get; set; }
-    public bool IsLastChild { get; set; }   // 是否为父源下最后一篇文章（决定 └─ / ├─ 与续行竖线）
-    public List<string> Lines { get; set; } = new();
-}
 
-class SidebarView : View
-{
-    private readonly Func<int, IEnumerable<TuiNode>> _childLoader;
-    private readonly List<TuiNode> _roots = new();
-    private readonly Dictionary<int, List<TuiNode>> _articles = new();
-    private readonly HashSet<int> _expanded = new();
-    private readonly List<SidebarRow> _rows = new();
-    private int _sel;
-    private int _scrollTop;      // 第一行可见的「换行后行号」
-    private int _layoutWidth = -1;
-    private bool _layoutDirty = true;
-
-    public event EventHandler? SelectionChanged;
-
-    public SidebarView(Func<int, IEnumerable<TuiNode>> childLoader)
-    {
-        _childLoader = childLoader;
-        CanFocus = true;
-    }
-
-    public TuiNode? SelectedObject
-    {
-        get
-        {
-            if (_rows.Count == 0) return null;
-            _sel = Math.Clamp(_sel, 0, _rows.Count - 1);
-            return _rows[_sel].Node;
-        }
-    }
-
-    public void SetFeeds(IEnumerable<TuiNode> feeds)
-    {
-        _roots.Clear();
-        _roots.AddRange(feeds);
-        _articles.Clear();
-        foreach (var f in _roots)
-            _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
-        // 保留用户已展开的源（默认折叠）；已被删除的源从展开集合里清掉
-        var valid = new HashSet<int>(_roots.Select(f => f.FeedId));
-        _expanded.RemoveWhere(id => !valid.Contains(id));
-        _sel = 0;
-        _scrollTop = 0;
-        RebuildRows();
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-        SetNeedsDraw();
-    }
-
-    public void ExpandAll()
-    {
-        foreach (var f in _roots) _expanded.Add(f.FeedId);
-        RebuildRows();
-        SetNeedsDraw();
-    }
-
-    public void Toggle(TuiNode n)
-    {
-        if (n == null || !n.IsFeed) return;
-        if (!_expanded.Remove(n.FeedId)) _expanded.Add(n.FeedId);
-        RebuildRows();
-        int idx = _rows.FindIndex(r => ReferenceEquals(r.Node, n));
-        if (idx >= 0) _sel = idx;
-        EnsureSelectedVisible();
-        SetNeedsDraw();
-    }
-
-    public void MovePageUp() => MoveSelection(-Math.Max(1, Viewport.Height));
-
-    public void MovePageDown() => MoveSelection(Math.Max(1, Viewport.Height));
-
-    public void MoveDown() => MoveSelection(1);
-
-    public void MoveUp() => MoveSelection(-1);
-
-    // 定位到指定文章（外部 CLI 全屏阅读按 W 进完整 TUI 时定位当前文章）；找不到返回 false
-    public bool SelectItem(long itemId)
-    {
-        for (int i = 0; i < _rows.Count; i++)
-        {
-            if (!_rows[i].IsFeed && _rows[i].Node.ItemId == itemId)
-            {
-                _sel = i;
-                OnSelectionChanged();
-                EnsureSelectedVisible();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // 当前选中文章在全部文章中的位置（不含源行）；选中的是源时返回该源前最后一篇的位置
-    public (int Current, int Total) ArticlePosition()
-    {
-        int cur = 0, total = 0;
-        for (int i = 0; i < _rows.Count; i++)
-        {
-            if (_rows[i].IsFeed) continue;
-            total++;
-            if (i <= _sel) cur = total;
-        }
-        return (cur, total);
-    }
-
-    void RebuildRows()
-    {
-        _rows.Clear();
-        foreach (var f in _roots)
-        {
-            _rows.Add(new SidebarRow { Node = f, IsFeed = true });
-            if (_expanded.Contains(f.FeedId) && _articles.TryGetValue(f.FeedId, out var arts))
-                for (int i = 0; i < arts.Count; i++)
-                    _rows.Add(new SidebarRow { Node = arts[i], IsFeed = false, IsLastChild = i == arts.Count - 1 });
-        }
-        _sel = _rows.Count == 0 ? 0 : Math.Clamp(_sel, 0, _rows.Count - 1);
-        _layoutDirty = true;
-    }
-
-    void EnsureLayout(int width)
-    {
-        if (!_layoutDirty && _layoutWidth == width) return;
-        _layoutWidth = width;
-        _layoutDirty = false;
-        foreach (var row in _rows)
-        {
-            // 树状前缀：源用 ▼/▶ 折叠箭头，文章用 ├/└/│ 表示层级；
-            // 前缀和续行缩进都按显示列宽算，保证换行的续行与首行文字对齐
-            string prefix, continuation;
-            if (row.IsFeed)
-            {
-                prefix = _expanded.Contains(row.Node.FeedId) ? "▼ " : "▶ ";
-                continuation = "  ";
-            }
-            else
-            {
-                prefix = row.IsLastChild ? "  └─ " : "  ├─ ";
-                continuation = "  │  ";
-            }
-
-            // 只对标题本体换行，再分别拼前缀（首行）与续行缩进（其余行）
-            int prefixCols = prefix.GetColumns();
-            var wrapped = Terminal.Gui.Text.TextFormatter.WordWrapText(row.Node.Title, Math.Max(1, width - prefixCols));
-            if (wrapped.Count == 0) wrapped = new List<string> { "" };
-            var lines = new List<string>(wrapped.Count);
-            for (int i = 0; i < wrapped.Count; i++)
-                lines.Add(i == 0 ? prefix + wrapped[i] : continuation + wrapped[i]);
-            row.Lines = lines;
-        }
-        if (_scrollTop >= TotalLines() && TotalLines() > 0)
-            _scrollTop = Math.Max(0, TotalLines() - 1);
-    }
-
-    int RowStartLine(int rowIndex)
-    {
-        int line = 0;
-        for (int i = 0; i < rowIndex; i++) line += _rows[i].Lines.Count;
-        return line;
-    }
-
-    int TotalLines()
-    {
-        int n = 0;
-        foreach (var r in _rows) n += r.Lines.Count;
-        return n;
-    }
-
-    int RowForLine(int line)
-    {
-        int l = 0;
-        for (int i = 0; i < _rows.Count; i++)
-        {
-            l += _rows[i].Lines.Count;
-            if (line < l) return i;
-        }
-        return _rows.Count - 1;
-    }
-
-    void OnSelectionChanged()
-    {
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-        SetNeedsDraw();
-    }
-
-    void MoveSelection(int delta)
-    {
-        if (_rows.Count == 0) return;
-        int target = Math.Clamp(_sel + delta, 0, _rows.Count - 1);
-        if (target == _sel) return;
-        _sel = target;
-        OnSelectionChanged();
-        EnsureSelectedVisible();
-    }
-
-    void EnsureSelectedVisible()
-    {
-        if (_rows.Count == 0) return;
-        EnsureLayout(Viewport.Width);
-        int h = Viewport.Height;
-        int start = RowStartLine(_sel);
-        int end = start + _rows[_sel].Lines.Count;
-        if (start < _scrollTop) _scrollTop = start;
-        else if (end > _scrollTop + h) _scrollTop = end - h;
-        if (_scrollTop < 0) _scrollTop = 0;
-    }
-
-    protected override bool OnKeyDown(Key key)
-    {
-        switch (key.KeyCode)
-        {
-            case KeyCode.CursorUp:
-                MoveSelection(-1);
-                return true;
-            case KeyCode.CursorDown:
-                MoveSelection(1);
-                return true;
-            case KeyCode.Home:
-                MoveSelection(-_rows.Count);
-                return true;
-            case KeyCode.End:
-                MoveSelection(_rows.Count);
-                return true;
-        }
-        return false;
-    }
-
-    protected override bool OnMouseEvent(Mouse mouse)
-    {
-        if (mouse.Flags is MouseFlags.LeftButtonPressed or MouseFlags.LeftButtonClicked)
-        {
-            if (mouse.Position.HasValue)
-            {
-                EnsureLayout(Viewport.Width);
-                int row = RowForLine(mouse.Position.Value.Y + _scrollTop);
-                if (row >= 0 && row < _rows.Count)
-                {
-                    _sel = row;
-                    OnSelectionChanged();
-                    EnsureSelectedVisible();
-                }
-            }
-            SetFocus();
-            return true;
-        }
-        return false;
-    }
-
-    protected override bool OnDrawingContent(DrawContext? context)
-    {
-        int w = Viewport.Width;
-        int h = Viewport.Height;
-        EnsureLayout(w);
-        SetAttribute(GetAttributeForRole(VisualRole.Normal));
-        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
-        int line = 0;
-        for (int i = 0; i < _rows.Count; i++)
-        {
-            var row = _rows[i];
-            bool selected = i == _sel;
-            for (int li = 0; li < row.Lines.Count; li++)
-            {
-                int sy = line + li - _scrollTop;
-                if (sy >= 0 && sy < h)
-                {
-                    Terminal.Gui.Drawing.Attribute attr = selected
-                        ? (HasFocus ? GetAttributeForRole(VisualRole.Focus) : GetAttributeForRole(VisualRole.Active))
-                        : (row.IsFeed ? GetAttributeForRole(VisualRole.HotNormal) : GetAttributeForRole(VisualRole.Normal));
-                    SetAttribute(attr);
-                    AddStr(0, sy, new string(' ', w));
-                    AddStr(0, sy, row.Lines[li]);
-                }
-            }
-            line += row.Lines.Count;
-        }
-        return true;
-    }
-}
 
 // 开始界面的自绘视图：整块居中排版
-class StartScreenView : View
-{
-    public string[] Lines { get; set; } = Array.Empty<string>();
 
-    public StartScreenView()
-    {
-        SetScheme(new Scheme
-        {
-            Normal = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.Black),
-            HotNormal = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.Black),
-            Focus = new Terminal.Gui.Drawing.Attribute(StandardColor.White, StandardColor.DarkBlue),
-            HotFocus = new Terminal.Gui.Drawing.Attribute(StandardColor.BrightYellow, StandardColor.DarkBlue),
-            Highlight = new Terminal.Gui.Drawing.Attribute(StandardColor.Black, StandardColor.BrightCyan)
-        });
-    }
-
-    protected override bool OnDrawingContent(DrawContext? context)
-    {
-        int w = Viewport.Width;
-        int h = Viewport.Height;
-        SetAttribute(GetAttributeForRole(VisualRole.Normal));
-        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
-        if (Lines.Length == 0) return true;
-
-        int totalW = 0;
-        foreach (var l in Lines)
-        {
-            int c = l.GetColumns();
-            if (c > totalW) totalW = c;
-        }
-        int x0 = Math.Max(0, (w - totalW) / 2);
-        int y0 = Math.Max(0, (h - Lines.Length) / 2);
-        for (int i = 0; i < Lines.Length; i++)
-        {
-            int row = y0 + i;
-            if (row < 0 || row >= h) continue;
-            SetAttribute(GetAttributeForRole(i == 0 ? VisualRole.HotNormal : VisualRole.Normal));
-            AddStr(x0, row, Lines[i]);
-        }
-        return true;
-    }
-}
-
-// 搜索结果条目
-class SearchHit
-{
-    public int ItemId { get; set; }
-    public string Title { get; set; } = "";
-    public string Description { get; set; } = "";
-    public string Content { get; set; } = "";
-    public string Link { get; set; } = "";
-    public string FeedTitle { get; set; } = "";
-    public int FeedId { get; set; }
-    public float Score { get; set; }
-}
-
-// 全文搜索结果条目
-class FulltextVecEntry { public int ItemId { get; set; } public int FeedId { get; set; } public int ModelId { get; set; } public float[] Vector { get; set; } = Array.Empty<float>(); }
-
-// 来源健康记录（feed_health.json）
-class FeedHealthEntry { public int FailCount { get; set; } public string LastError { get; set; } = ""; public string LastOkAt { get; set; } = ""; }
-
-// 文章标记信号（article_signals.json）
-class SignalEntry
-{
-    public bool UserLike { get; set; }
-    public bool AiLike { get; set; }
-    public string AiReason { get; set; } = "";
-    public string UpdatedAt { get; set; } = "";
-}
-
-// Sip Today 条目
-class TodayItem
-{
-    public int ItemId { get; set; }
-    public string Title { get; set; } = "";
-    public string Source { get; set; } = "";
-    public string Reason { get; set; } = "";   // 为什么出现在今日（新增/更新/AI关注/你收藏过…）
-    public double Minutes { get; set; }        // 预估阅读时长
-    public int Score { get; set; }
-}
-
-// ══════════ Telemetry 服务（本地事实层）══════════
-// 硬约束：默认关闭 / 首次征得同意 / 仅本地 / 绝不自动上传 / 可查看-关闭-删除-导出 /
-//         记录事实不造画像 / 遥测损坏绝不影响 rss.db 与阅读（独立库 + 完整性检查 + 降级）
-// 性能：事件白名单 + 内存缓冲批量写（50 条或 5 秒）+ 容量上限（10 万条留 8 万）
-class TelemetryEvent
-{
-    public long Id { get; set; }
-    public string Timestamp { get; set; } = "";
-    public string SessionId { get; set; } = "";
-    public string Type { get; set; } = "";
-    public int? ArticleId { get; set; }
-    public int? SourceId { get; set; }
-    public int? VersionId { get; set; }
-    public string? Surface { get; set; }
-    public int? Position { get; set; }
-    public string DataJson { get; set; } = "";
-}
-
-static class TelemetryService
-{
-    static string _dir = "";
-    static string DbPath => Path.Combine(_dir, "telemetry.db");
-    static string ConsentPath => Path.Combine(_dir, "telemetry_consent.json");
-    static string CheckpointPath => Path.Combine(_dir, "telemetry_checkpoint.json");
-
-    static string _consent = "unset";      // unset / enabled / disabled
-    static bool _failed = false;           // 会话内连续写失败 → 降级停用
-    static int _consecFails = 0;
-    static string _sessionId = "";
-    static readonly object _lock = new();
-    static readonly List<TelemetryEvent> _buffer = new();
-    static System.Threading.Timer? _flushTimer;
-
-    public static bool IsEnabled => _consent == "enabled" && !_failed;
-    public static string Consent => _consent;
-
-    public static void Init(string dataDir)
-    {
-        _dir = dataDir;
-        try { Directory.CreateDirectory(_dir); } catch { }
-        LoadConsent();
-        CheckIntegrity();
-        _sessionId = Guid.NewGuid().ToString("N");
-        try { _flushTimer = new System.Threading.Timer(_ => Flush(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5)); } catch { }
-    }
-
-    public static void Shutdown()
-    {
-        try { _flushTimer?.Dispose(); } catch { }
-        Flush();
-        WriteCheckpoint("ok");
-    }
-
-    static void LoadConsent()
-    {
-        try
-        {
-            if (File.Exists(ConsentPath))
-            {
-                var d = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(ConsentPath));
-                if (d != null && d.TryGetValue("state", out var s) && (s == "enabled" || s == "disabled"))
-                    _consent = s;
-            }
-        }
-        catch { _consent = "unset"; }
-    }
-
-    public static void SetConsent(string state)
-    {
-        _consent = state == "enabled" ? "enabled" : "disabled";
-        try
-        {
-            File.WriteAllText(ConsentPath, JsonSerializer.Serialize(new
-            {
-                state = _consent,
-                updatedAt = DateTime.Now.ToString("O")
-            }, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
-        }
-        catch { }
-    }
-
-    // 完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃、绝不动 rss.db。
-    // 并发启动/写入时 quick_check 可能读到瞬时中间状态（误报损坏）：
-    //   · busy/locked 类错误与瞬时非 ok 结果 → 重试，不算损坏
-    //   · 连续重试仍失败 → 改名失败（文件被其他进程占用）时静默跳过，下次启动再试；不吓人、不动数据
-    static void CheckIntegrity()
-    {
-        try
-        {
-            if (!File.Exists(DbPath)) { CreateSchema(); WriteCheckpoint("created"); return; }
-            bool ok = IsSqliteFile(DbPath);
-            if (ok) ok = TryQuickCheckOk();
-            if (ok)
-            {
-                CreateSchema();   // 幂等：确保表结构与 WAL 模式（旧库首次启动即完成 WAL 迁移）
-                WriteCheckpoint("ok");
-                return;
-            }
-            string corrupt = DbPath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            try
-            {
-                File.Move(DbPath, corrupt);
-                CreateSchema();
-                WriteCheckpoint("recreated");
-                Console.Error.WriteLine("telemetry.db 完整性检查失败，已保留现场并重建：" + corrupt);
-            }
-            catch { /* 文件仍被占用（并发写入）：本次跳过，下次启动再试 */ }
-        }
-        catch { /* 完整性检查失败不阻断启动 */ }
-    }
-
-    // quick_check：带 busy_timeout；busy/locked 或瞬时非 ok 结果重试，连续多次失败才算损坏
-    static bool TryQuickCheckOk()
-    {
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                using var conn = new SqliteConnection($"Data Source={DbPath}");
-                conn.Open();
-                var c = conn.CreateCommand();
-                c.CommandText = "PRAGMA busy_timeout = 2000;";
-                c.ExecuteNonQuery();
-                c.CommandText = "PRAGMA quick_check";
-                if (c.ExecuteScalar()?.ToString() == "ok") return true;
-            }
-            catch (SqliteException ex) when (IsBusyCode(ex.SqliteErrorCode)) { /* 锁冲突：重试 */ }
-            catch { return false; }   // 真损坏/打开失败
-        }
-        return false;
-    }
-
-    // SQLITE_BUSY / SQLITE_LOCKED 系列错误码（含共享缓存/恢复/快照/超时变体）
-    internal static bool IsBusyCode(int rc) => rc is 5 or 6 or 261 or 262 or 283 or 284;
-
-    // 校验 SQLite 文件头魔数（"SQLite format 3\0"）
-    internal static bool IsSqliteFile(string path)
-    {
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-            Span<byte> head = stackalloc byte[16];
-            return fs.Read(head) >= 16 && head.SequenceEqual("SQLite format 3\0"u8);
-        }
-        catch { return false; }
-    }
-
-    static void CreateSchema()
-    {
-        using var conn = new SqliteConnection($"Data Source={DbPath}");
-        conn.Open();
-        var c = conn.CreateCommand();
-        // WAL：并发启动/写入时读者永远看到一致快照，从根上避免瞬时损坏误报
-        c.CommandText = "PRAGMA journal_mode = WAL;";
-        c.ExecuteNonQuery();
-        c.CommandText = @"
-            CREATE TABLE IF NOT EXISTS telemetry_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                article_id INTEGER,
-                source_id INTEGER,
-                version_id INTEGER,
-                surface TEXT,
-                position INTEGER,
-                data_json TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_telemetry_type ON telemetry_events(type);
-            CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry_events(timestamp);
-        ";
-        c.ExecuteNonQuery();
-    }
-
-    static void WriteCheckpoint(string status)
-    {
-        try
-        {
-            long size = File.Exists(DbPath) ? new FileInfo(DbPath).Length : 0;
-            File.WriteAllText(CheckpointPath, JsonSerializer.Serialize(new
-            {
-                status,
-                dbFile = "telemetry.db",
-                size,
-                lastOkAt = DateTime.Now.ToString("O")
-            }, new JsonSerializerOptions { WriteIndented = true }));
-        }
-        catch { }
-    }
-
-    // 事件入队（内存缓冲；只接受低频事件，滚动/按键不在此列）
-    public static void Record(string type, int? articleId = null, int? sourceId = null, int? versionId = null,
-                              string? surface = null, int? position = null, object? data = null)
-    {
-        if (!IsEnabled) return;
-        lock (_lock)
-        {
-            if (_buffer.Count >= 500) _buffer.Clear();   // 极端积压兜底，防止内存膨胀
-            _buffer.Add(new TelemetryEvent
-            {
-                Timestamp = DateTime.Now.ToString("O"),
-                SessionId = _sessionId,
-                Type = type,
-                ArticleId = articleId,
-                SourceId = sourceId,
-                VersionId = versionId,
-                Surface = surface,
-                Position = position,
-                DataJson = data == null ? "" : JsonSerializer.Serialize(data)
-            });
-        }
-        if (_buffer.Count >= 50) Flush();
-    }
-
-    // 记录 AI 调用；articleId/sourceId 可选，用于把调用归因到具体文章/源（精细到文章与源）
-    public static void RecordAiCall(string operation, string provider, string model, bool success, long durationMs,
-                                    int? articleId = null, int? sourceId = null)
-        => Record("ai_call", articleId: articleId, sourceId: sourceId, data: new { operation, provider, model, success, durationMs });
-
-    // 批量落库（best-effort；连续失败 → 本会话降级停用）
-    static void Flush()
-    {
-        if (!IsEnabled) return;
-        List<TelemetryEvent> batch;
-        lock (_lock)
-        {
-            if (_buffer.Count == 0) return;
-            batch = _buffer.ToList();
-            _buffer.Clear();
-        }
-        try
-        {
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            using var tx = conn.BeginTransaction();
-            var cmd = conn.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = @"INSERT INTO telemetry_events
-                (timestamp, session_id, type, article_id, source_id, version_id, surface, position, data_json)
-                VALUES (@ts, @sid, @type, @aid, @fsid, @vid, @sf, @pos, @dj)";
-            cmd.Parameters.Add("@ts", SqliteType.Text);
-            cmd.Parameters.Add("@sid", SqliteType.Text);
-            cmd.Parameters.Add("@type", SqliteType.Text);
-            cmd.Parameters.Add("@aid", SqliteType.Integer);
-            cmd.Parameters.Add("@fsid", SqliteType.Integer);
-            cmd.Parameters.Add("@vid", SqliteType.Integer);
-            cmd.Parameters.Add("@sf", SqliteType.Text);
-            cmd.Parameters.Add("@pos", SqliteType.Integer);
-            cmd.Parameters.Add("@dj", SqliteType.Text);
-            foreach (var e in batch)
-            {
-                cmd.Parameters["@ts"].Value = e.Timestamp;
-                cmd.Parameters["@sid"].Value = e.SessionId;
-                cmd.Parameters["@type"].Value = e.Type;
-                cmd.Parameters["@aid"].Value = (object?)e.ArticleId ?? DBNull.Value;
-                cmd.Parameters["@fsid"].Value = (object?)e.SourceId ?? DBNull.Value;
-                cmd.Parameters["@vid"].Value = (object?)e.VersionId ?? DBNull.Value;
-                cmd.Parameters["@sf"].Value = (object?)e.Surface ?? DBNull.Value;
-                cmd.Parameters["@pos"].Value = (object?)e.Position ?? DBNull.Value;
-                cmd.Parameters["@dj"].Value = e.DataJson;
-                cmd.ExecuteNonQuery();
-            }
-            tx.Commit();
-            _consecFails = 0;
-            CapIfNeeded(conn);
-        }
-        catch
-        {
-            _consecFails++;
-            if (_consecFails >= 3) _failed = true;   // 连续 3 次失败 → 本会话停用，阅读不受影响
-        }
-    }
-
-    // 容量上限：超过 10 万条 → 只保留最新 8 万
-    static void CapIfNeeded(SqliteConnection conn)
-    {
-        try
-        {
-            var c = conn.CreateCommand();
-            c.CommandText = "SELECT COUNT(*) FROM telemetry_events";
-            long n = (long)c.ExecuteScalar()!;
-            if (n > 100_000)
-            {
-                c.CommandText = "DELETE FROM telemetry_events WHERE id < (SELECT id FROM telemetry_events ORDER BY id DESC LIMIT 1 OFFSET 80000)";
-                c.ExecuteNonQuery();
-            }
-        }
-        catch { }
-    }
-
-    public static (long Count, string? First, string? Last) Stats()
-    {
-        try
-        {
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM telemetry_events";
-            using var r = c.ExecuteReader();
-            if (r.Read()) return (r.GetInt64(0), r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2));
-        }
-        catch { }
-        return (0, null, null);
-    }
-
-    public static void Clear()
-    {
-        try
-        {
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = "DELETE FROM telemetry_events";
-            c.ExecuteNonQuery();
-        }
-        catch { }
-    }
-
-    public static List<TelemetryEvent> AllEvents(int limit = 100000)
-    {
-        var list = new List<TelemetryEvent>();
-        try
-        {
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = "SELECT id, timestamp, session_id, type, article_id, source_id, version_id, surface, position, data_json FROM telemetry_events ORDER BY id DESC LIMIT @n";
-            c.Parameters.AddWithValue("@n", limit);
-            using var r = c.ExecuteReader();
-            while (r.Read())
-                list.Add(new TelemetryEvent
-                {
-                    Id = r.GetInt64(0),
-                    Timestamp = r.GetString(1),
-                    SessionId = r.GetString(2),
-                    Type = r.GetString(3),
-                    ArticleId = r.IsDBNull(4) ? null : r.GetInt32(4),
-                    SourceId = r.IsDBNull(5) ? null : r.GetInt32(5),
-                    VersionId = r.IsDBNull(6) ? null : r.GetInt32(6),
-                    Surface = r.IsDBNull(7) ? null : r.GetString(7),
-                    Position = r.IsDBNull(8) ? null : r.GetInt32(8),
-                    DataJson = r.IsDBNull(9) ? "" : r.GetString(9)
-                });
-        }
-        catch { }
-        return list;
-    }
-
-    // ── 阅读行为聚合（按源，窗口内）──
-    // 返回 FeedId → (opened, completed, skipped)；窗口按事件 timestamp 过滤；损坏/关闭时返回空
-    public static Dictionary<int, (long Opened, long Completed, long Skipped)> FeedReadingStats(int windowDays)
-    {
-        var map = new Dictionary<int, (long, long, long)>();
-        try
-        {
-            if (!IsEnabled) return map;
-            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = @"
-                SELECT source_id,
-                       SUM(CASE WHEN type = 'article_open' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN type = 'article_complete' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN type = 'article_skip' THEN 1 ELSE 0 END)
-                FROM telemetry_events
-                WHERE timestamp >= @cut AND source_id IS NOT NULL
-                GROUP BY source_id";
-            c.Parameters.AddWithValue("@cut", cutoff);
-            using var r = c.ExecuteReader();
-            while (r.Read())
-            {
-                int fid = r.GetInt32(0);
-                map[fid] = (r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
-            }
-        }
-        catch { }
-        return map;
-    }
-
-    // ── AI 调用聚合（按源，窗口内）──
-    // 返回 FeedId → { llm (摘要/对话) 次数, embedding 次数, 成功数 }；全局（无源）不计入
-    public static Dictionary<int, (long Llm, long Embedding, long Success)> FeedAiCallStats(int windowDays)
-    {
-        var map = new Dictionary<int, (long, long, long)>();
-        try
-        {
-            if (!IsEnabled) return map;
-            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = @"
-                SELECT source_id,
-                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.operation') = 'llm' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.operation') = 'embedding' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN type = 'ai_call' AND json_extract(data_json, '$.success') = 1 THEN 1 ELSE 0 END)
-                FROM telemetry_events
-                WHERE type = 'ai_call' AND timestamp >= @cut AND source_id IS NOT NULL
-                GROUP BY source_id";
-            c.Parameters.AddWithValue("@cut", cutoff);
-            using var r = c.ExecuteReader();
-            while (r.Read())
-            {
-                int fid = r.GetInt32(0);
-                map[fid] = (r.GetInt64(1), r.GetInt64(2), r.GetInt64(3));
-            }
-        }
-        catch { }
-        return map;
-    }
-
-    // ── AI 调用全局统计（窗口内，含无源调用）──
-    // 返回 (总次数, 成功数, 失败数)；另按 operation 计数（llm/embedding/其他）
-    public static (long Total, long Success, long Fail, long Llm, long Embedding) GlobalAiCallStats(int windowDays)
-    {
-        try
-        {
-            if (!IsEnabled) return (0, 0, 0, 0, 0);
-            string cutoff = DateTime.Now.AddDays(-Math.Max(1, windowDays)).ToString("O");
-            using var conn = new SqliteConnection($"Data Source={DbPath}");
-            conn.Open();
-            var c = conn.CreateCommand();
-            c.CommandText = @"
-                SELECT COUNT(*),
-                       SUM(CASE WHEN json_extract(data_json, '$.success') = 1 THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN json_extract(data_json, '$.success') = 0 THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN json_extract(data_json, '$.operation') = 'llm' THEN 1 ELSE 0 END),
-                       SUM(CASE WHEN json_extract(data_json, '$.operation') = 'embedding' THEN 1 ELSE 0 END)
-                FROM telemetry_events
-                WHERE type = 'ai_call' AND timestamp >= @cut";
-            c.Parameters.AddWithValue("@cut", cutoff);
-            using var r = c.ExecuteReader();
-            if (r.Read())
-                return (r.GetInt64(0), r.GetInt64(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4));
-        }
-        catch { }
-        return (0, 0, 0, 0, 0);
-    }
-}
 
 // 报告数据行（卡片）
 class InsightsFeed
@@ -8018,9 +8224,8 @@ class InsightsFeed
     public int AiLikes { get; set; }
     public long LlmCalls { get; set; }
     public long EmbeddingCalls { get; set; }
-    public string Health { get; set; } = "";
-    public string Action { get; set; } = "";
-    public string Basis { get; set; } = "";
+    public string Status { get; set; } = "";        // 仅技术故障：正常/⚠长期未更新/✗失败 N 次
+    public List<string> Reasons { get; set; } = new();  // 事实原因（活跃度观察，无价值结论）
 }
 
 // 应用设置
@@ -8028,99 +8233,29 @@ class SipSettings
 {
     public string InsightsInterval { get; set; } = "off";
     public string LastInsightsAt { get; set; } = "";
+    public int? FloodThresholdPerDay { get; set; }   // 今日高频源阈值（单日新增）；null=自动 max(20,中位数×5)
+    public double DedupThreshold { get; set; } = 0.8; // 跨源去重段落重合度阈值
+}
+
+// Source Policy：用户确认的「处理规则」（source_policy.json）。createdBy 永远 user，AI 永不自动写。
+class SourcePolicyRule
+{
+    public string Action { get; set; } = "";   // archive / keep / lower_frequency / tag / unsubscribe
+    public string Schedule { get; set; } = "";  // lower_frequency 的目标频率
+    public string Tag { get; set; } = "";       // tag 标签名
+    public string Note { get; set; } = "";      // 用户备注/理由
+    public string CreatedBy { get; set; } = "user";
+    public string UpdatedAt { get; set; } = "";
+}
+
+// Onboarding 推荐源模板条目（templates.json）
+class SourceTemplate
+{
+    public string Name { get; set; } = "";
+    public string Url { get; set; } = "";
 }
 
 // ══════════ 报告卡片视图（每源一张卡片，j/k 移动）═══════════
-class InsightsView : View
-{
-    public List<InsightsFeed> Feeds { get; private set; } = new();
-    public int Selected { get; private set; }
-    public event EventHandler? SelectionChanged;
-
-    public int SelectedFeedId => Selected < Feeds.Count ? Feeds[Selected].FeedId : 0;
-
-    public void SetFeeds(List<InsightsFeed> feeds)
-    {
-        Feeds = feeds;
-        Selected = Math.Clamp(Selected, 0, Math.Max(0, Feeds.Count - 1));
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-        SetNeedsDraw();
-    }
-
-    public void MoveTo(int delta)
-    {
-        if (Feeds.Count == 0) return;
-        int before = Selected;
-        Selected = Math.Clamp(Selected + delta, 0, Feeds.Count - 1);
-        if (Selected != before) { SelectionChanged?.Invoke(this, EventArgs.Empty); SetNeedsDraw(); }
-    }
-
-    // 卡片固定 6 行：标题 / 订阅积压 / 打开读完 / 点赞+AI调用 / 观察 / 分隔线
-    int CardHeight => 6;
-
-    List<string> CardLines(InsightsFeed x)
-    {
-        string rate = x.Opened > 0 ? Math.Round(100.0 * x.Completed / x.Opened, 0) + "%" : "—";
-        string health = x.Health == Lang.T("正常") ? "" : "  " + x.Health;
-        string ai = (x.LlmCalls > 0 || x.EmbeddingCalls > 0) ? $" · AI 摘要 {x.LlmCalls} 次" : "";
-        return new List<string>
-        {
-            $"[{x.FeedId}] {x.Title}{health}",
-            $"    订阅 {x.Active} 篇 · 未读积压 {x.Backlog}",
-            $"    打开 {x.Opened} · 读完 {x.Completed} · 完成率 {rate} · 跳过 {x.Skipped}",
-            $"    ♥ 你点赞 {x.UserLikes} · 🤖 AI 点赞 {x.AiLikes}{ai}",
-            $"    观察：{x.Action} —— {x.Basis}（由你决定）",
-            "──────────────────────"
-        };
-    }
-
-    protected override bool OnKeyDown(Key key)
-    {
-        if (Feeds.Count == 0) return false;
-        switch (key.KeyCode)
-        {
-            case KeyCode.CursorDown:
-            case KeyCode.J: MoveTo(1); return true;
-            case KeyCode.CursorUp:
-            case KeyCode.K: MoveTo(-1); return true;
-            case KeyCode.PageDown: MoveTo(Math.Max(1, Viewport.Height / CardHeight)); return true;
-            case KeyCode.PageUp: MoveTo(-Math.Max(1, Viewport.Height / CardHeight)); return true;
-            case KeyCode.Home: MoveTo(-Feeds.Count); return true;
-            case KeyCode.End: MoveTo(Feeds.Count); return true;
-            default: return false;
-        }
-    }
-
-    protected override bool OnDrawingContent(DrawContext? context)
-    {
-        int w = Viewport.Width, h = Viewport.Height;
-        SetAttribute(GetAttributeForRole(VisualRole.Normal));
-        for (int y = 0; y < h; y++) AddStr(0, y, new string(' ', w));
-        if (Feeds.Count == 0) return true;
-
-        int cardTop = Math.Max(0, Selected * CardHeight - (h - CardHeight) / 2);
-        for (int i = 0; i < Feeds.Count; i++)
-        {
-            int top = i * CardHeight - cardTop;
-            if (top + CardHeight < 0 || top >= h) continue;
-            var lines = CardLines(Feeds[i]);
-            bool sel = i == Selected;
-            for (int k = 0; k < CardHeight; k++)
-            {
-                int sy = top + k;
-                if (sy < 0 || sy >= h) continue;
-                SetAttribute(sel && k == 0
-                    ? GetAttributeForRole(HasFocus ? VisualRole.Focus : VisualRole.Active)
-                    : GetAttributeForRole(sel ? VisualRole.Active : VisualRole.Normal));
-                string line = (sel && k == 0 ? "▶ " : "  ") + (k < lines.Count ? lines[k] : "");
-                int cols = line.GetColumns();
-                if (cols > w) line = line[..Math.Max(0, w - 1)] + "…";
-                AddStr(0, sy, line);
-            }
-        }
-        return true;
-    }
-}
 
 // 全文搜索结果条目
 class GrepSnippetResult
@@ -8191,3 +8326,4 @@ public class AiException : Exception
     }
 }
 #pragma warning restore SYSLIB0051
+

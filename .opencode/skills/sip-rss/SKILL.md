@@ -73,9 +73,12 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --import-opml <file>` | 从 OPML 批量导入订阅源（按 FeedUrl 跳过已存在） |
 | `sip --like <编号> [--ai [理由]]` | 标记文章：默认用户点赞（♥），`--ai` 表示 AI 判断用户会喜欢（🤖）；再执行 = 取消 |
 | `sip --likes [--json]` | 列出所有标记文章 |
-| `sip --today [--json] [--refresh] [--quick N]` | 今日阅读清单（规则式选文，上限=目标 5 篇；含预估时长与理由）。**一天固定一碗**（当日缓存，新文章当天不自动进清单）；`--refresh` 显式重新生成；要当天新内容可直接 `--grep`/`--show`；开启 telemetry 后可跟踪完成进度 |
+| `sip --today [--json] [--refresh] [--quick N]` | 今日阅读清单（规则式选文，上限=目标 5 篇；含预估时长与理由）。**一天固定一碗**（当日缓存，新文章当天不自动进清单）；`--refresh` 显式重新生成；要当天新内容可直接 `--grep`/`--show`；开启 telemetry 后可跟踪完成进度。**顶部是「今日变化摘要」**：按源各新增多少、⚠ 高频源（腹泻式更新）单独折叠、被作者改过带「改动概览」（标题改没改/增删行数/约±字数，纯 diff 计数、无 LLM）、⚠ 可能同文（跨源重复）——`--json` 里 `digest.modified[].itemId` 可接 `sip --diff`，`digest.dedups[].itemA/B` 可接 `sip --dedup` |
+| `sip --dedup scan\|hide <hiddenId> <canonicalId>\|list\|undo <key> [--json]` | 跨源重复检测与隐藏：`scan` 列可能同文（段落重合度，无 LLM）；`hide` 把一篇标 `Status='dedup'` 并记 `dedup.json` 规则（此后搜索/全文/摘要/计数自动排除，且 `--sync` 导入时跳过，防卷土重来）；`list` 看已隐藏；`undo <key>` 撤销恢复。**隐藏 = 忽略不删除，非破坏可恢复**；manage 界面按 `i` 查看/撤销已隐藏 |
 | `sip telemetry status/show/enable/disable/clear/export` | 本地阅读遥测（**默认关闭**；仅本地、不上传；可查看/关闭/删除/导出） |
-| `sip --insights [--window N d] [--json]` | 阅读情况报告（**需遥测开启**）：每源卡片展示 打开/读完/完成率/跳过/♥🤖点赞/AI调用次数/健康/观察提示；**AI 不替你决定**，只列事实+规则观察，决定在你（或邀请 Agent 协助） |
+| `sip --insights [--window N d] [--json]` | 阅读情况报告（**需遥测开启**）：每源卡片展示 打开/读完/完成率/跳过/♥🤖点赞/AI调用次数/**状态（仅技术故障）**/**reasons（事实原因，无价值结论）**；**AI 不替你决定**，只列事实，决定在你 |
+| `sip --policy list \| set <feedId> <archive\|keep\|lower_frequency\|tag\|unsubscribe> [args] \| remove <feedId>` | **Source Policy 闭环**：把「你的决定」存成规则并应用。`lower_frequency <expr>` 直接设该源更新频率；`archive` 归档；`tag <名>` 打标签（`-l` 显示 `#tag`）；`keep`/`unsubscribe` 记录备注。**createdBy 永远是 user，AI 永不自动写**；`-l` 会显示规则标记 |
+| `sip --onboarding [list \| <category>] \| add <category> <index\|all>` | 推荐源模板（认知门槛）：按领域分组一键添加订阅源；`templates.json` 可编辑自定义清单 |
 | `sip --insights-interval <7d\|30d\|off>` | 设定报告定时提醒间隔（存 sip_settings.json，默认 off）；到期且遥测开启时 CLI 末尾提醒、TUI 启动自动弹出报告页；TUI 里按 `P` 或命令 `report` 随时打开 |
 | `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
@@ -192,11 +195,14 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 - **阅读进度**：`reading_progress.json` 记录滚动位置，重开文章可能提示「按 Space 跳回」——TUI 行为，AI 用 `--show ... --json` 读取不受影响。
 - **阅读报告（`--insights`）**：只有在遥测开启（`sip telemetry enable`）后才可用；报告里的打开/读完/完成率/AI 调用次数来自遥测，♥🤖 点赞来自 signals（无需遥测）。**报告只呈现事实与规则观察，AI/程序不替用户做决定**；用户可据此在报告页按 a/x 归档/删除订阅源，或邀请 Agent 协助讨论。遥测会把 AI 调用（摘要/搜索/嵌入）按文章/源归因，报告可按源统计。报告间隔用 `--insights-interval` 设定，到期自动提醒。
 - **全文/向量缓存**：`fulltext/`、`vecs.json` 会随使用增长，超出阈值自动清理；如需强制清理用 `--purge-fulltext`。
+- **跨源去重**：`--dedup`/`--today` 的「可能同文」依赖段落重合度；`hide` 后文章 `Status='dedup'`，从搜索/全文/摘要/计数里消失（数据仍在，`--dedup undo` 可恢复）。`dedup.json` 里规则会阻止该文章被 `--sync` 重新导入（除非它已被作者改成不同内容）。
+- **遥测记录**：遥测开启时，`search` 事件会记录**完整查询词**（`--grep`/`--search` 的 query），仅存本机 `telemetry.db`，可 `telemetry show/export/clear` 查看、导出、删除，**不会上传**。介意可在开启遥测前知晓此点。
 
 ## 交互说明
 
 无参数运行 `sip` 会进入 TUI（三键键盘导航），AI 场景一律走 CLI（带参数），不要进 TUI。
 
-- TUI 里按 `M`（或命令行 `manage`）是**订阅源管理页**（给人用的，AI 不需要）。
+- TUI 里按 `M`（或命令行 `manage`）是**订阅源管理页**（给人用的，AI 不需要）；manage 里 `Enter` 打开单源编辑面板、`s` 用方向键选更新计划、`i` 查看已隐藏文章。
+- **TUI 命令行与 CLI 能力对齐**：TUI 内按 Esc 呼出的命令行支持 `diff / export / export-opml / import-opml / feed-info / like / likes / purge-fulltext / dedup / insights-interval / telemetry / config` 等（输出在 TUI 对话框里展示）。AI 场景仍建议走 CLI（`--json` + 退出码更利于脚本），但在 TUI 里人也能做到和 CLI 一样的事。
 - TUI 命令行 `fetch` = 抓当前文章全文；**首次使用全文抓取需要用户输入同意短语**（一次性，交互式）。AI 一律用 `sip --fulltext <id> --yes` 跳过同意与二次确认——**不要代用户在 TUI 里操作同意流程**，需要抓全文时告诉用户或直接跑 CLI 带 `--yes`。
 - **Telemetry 默认关闭**（遥测妹纸叫**苏暖泉 / Sumenia**）：AI/非交互场景不会询问、保持关闭，无需处理；即使用户开启了遥测，也只在本地记录（`telemetry.db`），不会自动上传。

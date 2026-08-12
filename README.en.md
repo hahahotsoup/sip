@@ -19,6 +19,8 @@ Follow the hot soup teahouse, follow the hot soup teahouse, thank you 🐾
 
 ## Quick start
 
+> ⚠️ **Newly added features are not yet fully tested**: sip's data files are interoperable, open, standard formats (SQLite + plain-text JSON), so you can switch the software core at any time to migrate — you won't be locked in.
+
 Download the **single-file executable** from [Releases](https://github.com/hahahotsoup/sipintui/releases) and run it directly:
 
 ```bash
@@ -173,19 +175,25 @@ sip's core principle is **facts first** — it only does deterministic rules and
 - Telemetry now attributes AI calls (summary / search / embedding) to **article and feed**, so the report can be aggregated per feed.
 - Entry: CLI `--insights` / TUI report page (`P` key / `report` command); optional scheduled reminders via `--insights-interval`.
 
-### Planned (evolving in this direction)
+### Shipped: terminology/fact refactor + Source Policy closed loop
 
-1. **Separate terminology from facts** — the report distinguishes "status" (technical failure only: fetch failed / long-untouched) from "activity" (behavior about *you*); **low reading ≠ low value**; remove any phrasing that dresses up behavior as a value judgment.
-2. **No black-box scoring** — never emit opaque numbers like `source_score = 0.72`; any "suggestion" must carry an **explainable reason chain** (metric + value + human-readable text), leaving judgment to the user.
-3. **Source Policy closed loop** — evolve from "user finds a low-value source → handles it manually" to "Insights → suggestion → **user confirms** → source rule → information-flow adjustment":
+1. **Separate terminology from facts** — the report now separates "status" (technical failure only: fetch failed / long-untouched) from "activity" (behavior about *you*); **low reading ≠ low value**; removed value-judgment phrases like "consider unsubscribing", replaced with a `reasons` factual list.
+2. **No black-box scoring** — no opaque `source_score = 0.72`; every `reasons` item is explainable (metric + value), leaving judgment to you.
+3. **Source Policy closed loop** — `sip --policy` turns "your decision" into a persistent rule that is applied (`lower_frequency` changes the update schedule / `archive` / `tag` / `keep` / `unsubscribe` records a note); `-l` shows the rule marker. **`createdBy` is always `user`, never auto-written by AI.**
 
    ```
-   read → analyze → adjust input → better information flow
+   read → analyze(Insights) → you confirm → source rule → adjust input
    ```
 
-   Rules (archive / lower frequency / tag / unsubscribe candidate) are **always user-confirmed**; `createdBy` is always `user`, never auto-written by AI.
+### Shipped: recommended source templates (Onboarding)
 
-> These steps aim to turn sip from an "information warehouse" into an "information ingestion management system" — Insights is only the start; connecting Source Policy with personalized filtering makes the complete loop.
+- `sip --onboarding` lists recommended feeds by domain (AI / Dev / Tech), `add <category> <index|all>` adds them in one click; `templates.json` is editable.
+
+> These steps turn sip from an "information warehouse" into an "information ingestion management system" — Insights is the analysis layer, Source Policy makes "your decisions" persist, and onboarding lowers the first-use barrier.
+
+### Engineering: project decomposition (single file → modules)
+
+`sip` started as a single file `RssReader.cs`. `Sumenia.cs` (telemetry) and `Tui.cs` (view classes) were split out. **Decomposition stops here** — the rest stays single-file to keep maintenance simple.
 
 ---
 
