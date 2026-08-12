@@ -4,11 +4,23 @@
 
 > ——"Savor it, sip it slow."
 >
-> **Reading is like a warm broth — don't keep staring at the bowl; close your eyes and enjoy the taste first.**
+> **sip: your information, your history, your judgment.**
 
-sip is a wall against information noise: letting you and the AI you care about see only the content you trust.
+sip is a **local-first personal information hub**: it collects content from RSS and other sources, preserves it locally and tracks changes over time, and helps you take control of your information input through search, filtering, and agents.
 
-It is not an algorithm-driven reader, nor a feed to make you "scroll more," but a **local-first, transparent information filter and reading assistant** — you choose your sources, sip guards and helps curate them while improving the reading experience. You and your AI agents get answers from a clean, traceable dataset.
+It helps you do five things:
+
+```
+collect → preserve → track → filter → use
+```
+
+- **Collect**: RSS / RSSHub sources
+- **Preserve**: full-text fetching, version snapshots
+- **Track**: what the author changed (Version / Diff)
+- **Filter**: Insights reports, Source Policy rules, cross-source dedup, high-frequency collapsing
+- **Use**: full-text / semantic search, agents / bots, Markdown export
+
+**AI helps you understand information, but never decides its value for you** — the judgment is always yours.
 
 📖 **Full documentation lives in the [sip Wiki](https://sip.hotsouprealm.top/)** — install, CLI/TUI, AI commands, privacy, and all other details are there.
 
@@ -39,14 +51,19 @@ Building from source, `publish.ps1` cross-platform packaging, and more: see [Wik
 
 ## Core capabilities
 
-| Module | One-liner |
-|--------|-----------|
-| 📚 **Smart archiving** | Version tracking, content diff, snapshot archiving, reading progress, source health |
-| 📖 **Assisted reading** | TUI folder view, immersive reading, full-text fetch, Markdown rendering, today's hot soup |
-| 🤖 **AI friendly** | Semantic search (RAG), LLM summaries, unified JSON, structured exit codes |
-| 🕊️ **Privacy** | Local telemetry Sumenia off by default, stored locally only, never auto-uploaded |
+Grouped by the five verbs, so you can see what each part of the loop does:
 
-> Full feature list and every detail: [Wiki · Features](https://sip.hotsouprealm.top/en/features/).
+| Verb | What it carries |
+|------|----------------|
+| 📥 **Collect** | RSS / RSSHub sources, OPML import |
+| 💾 **Preserve** | full-text fetch, version snapshots, reading progress |
+| 🔎 **Track** | version history, content diff, "modified by author" |
+| 🧹 **Filter** | Insights reports, Source Policy rules, cross-source dedup, high-frequency collapsing, today's change digest |
+| 🚀 **Use** | full-text / semantic search, agents / bots, Markdown export |
+
+> Before adding a feature, ask: which part of the loop does it belong to? — it defines the product boundary and keeps the concept from over-expanding. Every detail: [Wiki · Features](https://sip.hotsouprealm.top/en/features/).
+
+> 🕊️ **Privacy**: local telemetry Sumenia is **off by default**, stored locally only, never auto-uploaded; when enabled, the `search` event records the **full query** (local only, removable via `telemetry export/clear`).
 
 ---
 
@@ -160,7 +177,7 @@ Today's information environment has three harsh truths:
 2. **Algorithms put you in a bubble** — they keep you scrolling but never tell you "why this was recommended."
 3. **The people you love lack the means to filter** — your parents and friends have no tools to protect themselves from clickbait and rumors.
 
-sip does only two things — **deterministic rules** and **local storage of facts**; anything needing judgment, explanation, or dialogue is left to agents and users. It won't make you scroll more, but it will help you read with more peace of mind.
+sip does only two things — **deterministic rules** and **local storage of facts**. Everything you care about (collect, preserve, track, filter, use) is built on top of these two; anything needing judgment, explanation, or dialogue is left to agents and users. It won't make you scroll more, but it will help you read with more peace of mind.
 
 > **When you open sip, you know what you read today is trustworthy; when your AI calls sip, you know the sources it cites are reliable.**
 
@@ -168,7 +185,7 @@ May we meet again, none the worse for wear 🍲
 
 ---
 
-## Roadmap: from "information warehouse" toward "information ingestion management"
+## Roadmap: from an "RSS reader" toward a "personal information hub"
 
 sip's core principle is **facts first** — it only does deterministic rules and local storage of facts; anything that needs judgment, explanation, or dialogue is left to the user and agents. The following plan follows this principle, preferring to go **slow rather than dress up judgment as fact**.
 
@@ -203,7 +220,7 @@ sip's core principle is **facts first** — it only does deterministic rules and
 
 - `sip --onboarding` lists recommended feeds by domain (AI / Dev / Tech), `add <category> <index|all>` adds them in one click; `templates.json` is editable.
 
-> These steps turn sip from an "information warehouse" into an "information ingestion management system" — Insights is the analysis layer, Source Policy makes "your decisions" persist, and onboarding lowers the first-use barrier.
+> These steps turn sip from an "RSS reader" into a "personal information hub" — Insights is the analysis layer, Source Policy makes "your decisions" persist, and onboarding lowers the first-use barrier.
 
 ### Engineering: project decomposition (single file → modules)
 
