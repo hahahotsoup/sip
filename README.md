@@ -65,6 +65,8 @@ sip --insights          # 阅读情况报告（按源事实，决定在你）
 sip --insights-interval 7d   # 每 7 天提醒一次报告
 ```
 
+> 🔒 `sip --init` 涉及录入 API Key，**仅在真实交互式终端手动运行**（安全考虑，不接受管道/脚本输入）；AI 无法代跑，需用户手动配置。
+
 完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.hotsouprealm.top/使用说明/命令行.html)。
 
 ---

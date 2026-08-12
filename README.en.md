@@ -61,6 +61,8 @@ sip --search "RAG"      # semantic search (run sip --init to configure AI first)
 sip --today             # today's hot soup
 ```
 
+> 🔒 `sip --init` involves entering an API key — **run it manually in a real interactive terminal only** (security: pipe/script input is not accepted); AI cannot run it on your behalf, you must configure it yourself.
+
 Complete CLI flags, TUI shortcuts, AI commands, and error codes: [Wiki · Usage](https://sip.hotsouprealm.top/使用说明/命令行.html).
 
 ---

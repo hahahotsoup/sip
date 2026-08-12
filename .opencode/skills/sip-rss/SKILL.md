@@ -16,7 +16,7 @@ sip --config                                   # ① 检查 AI 是否已配置�
 sip --search "test" --ignoresafeannouncement   # ② 试探搜索：报「尚无向量索引 / run --index」→ 需先 --index
 ```
 
-- **未配置 AI**（`--config` 无有效配置）：先跑 `sip --init`（交互式向导，会提示用户录入 API Key；若用户不在场，**告诉用户需要先手动执行 `sip --init` 或配置 ai_config.json**，不要假装已配置。stdin 被重定向时 `--init` 不崩溃，输入会回显）
+- **未配置 AI**（`--config` 无有效配置）：`--init` 是**交互式向导，仅在真实终端手动运行**（安全考虑，不接受管道/脚本输入；AI/非交互调用会被拒绝）。AI 不要代跑 `--init`——直接**告诉用户需先在真实终端手动执行 `sip --init`**（或让用户手动编辑 `ai_config.json`），不要假装已配置。
 - **「尚无向量索引」/ 搜索为空但该有内容**：先跑 `sip --index`（交互式选择源，或先 `sip -l` 看有哪些源）
 - **换了 Embedding 模型报「模型维度变化」**：跑 `sip --reindex`
 - **`--grep` 不依赖 AI**，永远可用；AI 未配置时用它做全文检索是可靠的兜底

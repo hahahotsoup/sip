@@ -2662,6 +2662,14 @@ async Task RunCli(string[] args, string dbPath)
     switch (cmd)
     {
         case "--init":
+            // 安全边界：--init 涉及录入 API Key，仅在真实交互式终端运行；
+            // 拒绝 AI/脚本经管道喂输入（stdin 被重定向时视为非交互）
+            if (Console.IsInputRedirected)
+            {
+                SetExit();
+                Console.WriteLine(Lang.T("--init 需在真实交互式终端中手动运行（安全考虑，不接受管道输入）"));
+                return;
+            }
             InitAiConfigInteractive(dbPath);
             return;
         case "--config":
@@ -8116,28 +8124,20 @@ void InitAiConfigInteractive(string dbPath)
 }
 
 // 读取密码（不回显）——跨平台简易实现。
-// 非交互环境（stdin 被重定向，Console.ReadKey 会抛异常）降级为 ReadLine（回显，可接受）
+// 密文输入：仅支持真实终端 ReadKey；非交互（stdin 重定向）下拒绝（不降级 ReadLine，防止 AI/脚本驱动）
 string ReadSecret()
 {
     var sb = new StringBuilder();
-    try
+    while (true)
     {
-        while (true)
+        var key = Console.ReadKey(true);
+        if (key.Key == ConsoleKey.Enter) break;
+        if (key.Key == ConsoleKey.Backspace && sb.Length > 0)
         {
-            var key = Console.ReadKey(true);
-            if (key.Key == ConsoleKey.Enter) break;
-            if (key.Key == ConsoleKey.Backspace && sb.Length > 0)
-            {
-                sb.Length--;
-                continue;
-            }
-            sb.Append(key.KeyChar);
+            sb.Length--;
+            continue;
         }
-    }
-    catch (Exception ex) when (ex is InvalidOperationException or IOException)
-    {
-        Console.WriteLine();  // 换行，避免与上一条提示挤在同一行
-        return Console.ReadLine()?.Trim() ?? "";
+        sb.Append(key.KeyChar);
     }
     Console.WriteLine();
     return sb.ToString();
