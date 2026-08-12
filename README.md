@@ -33,7 +33,7 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 - **框架依赖**：需预装 [.NET 10 运行时](https://dotnet.microsoft.com/download)
 - **数据目录**：`readwithhotsoup/`（SQLite + 文件缓存，全本地，拷走即迁移）
 
-从源码构建、`publish.ps1` 全平台打包等方法，见 [Wiki · 快速开始](https://sip.hotsouprealm.top/指南/快速开始.html)。
+从源码构建、`publish.ps1` 全平台打包等方法，见 [Wiki · 快速开始](https://sip.hotsouprealm.top/上手/快速开始.html)。
 
 ---
 
@@ -45,9 +45,9 @@ sip 是一堵信息防火墙：让你和你关心的 AI，只看到你信任的�
 | 📖 **辅助阅读** | TUI 文件夹视图、沉浸阅读、全文抓取、Markdown 渲染、今日哈汤 |
 | 🤖 **AI 友好** | 语义搜索（RAG）、LLM 摘要、统一 JSON、结构化退出码 |
 | 🕊️ **隐私** | 本地遥测苏暖泉（Sumenia）默认关闭、仅本地保存、绝不自动上传；开启后 `search` 事件记录**完整查询词**（仅本机，可 `telemetry export/clear`，不会上传） |
-| 📈 **阅读情况报告** | `sip --insights` 按源呈现阅读事实（打开/读完/完成率/♥🤖点赞/AI调用次数/健康），**决定在你**；可设定时提醒 |
+| 📈 **阅读情况报告** | `sip --insights` 按源呈现阅读事实（打开/读完/完成率/♥🤖点赞/AI调用次数/状态），**决定在你**；可设定时提醒 |
 
-> 完整功能清单与每项细节，见 [Wiki · 功能](https://sip.hotsouprealm.top/功能/)。
+> 完整功能清单与每项细节，见 [Wiki · 功能](https://sip.hotsouprealm.top/参考/功能.html)。
 
 ---
 
@@ -67,7 +67,7 @@ sip --insights-interval 7d   # 每 7 天提醒一次报告
 
 > 🔒 `sip --init` 涉及录入 API Key，**仅在真实交互式终端手动运行**（安全考虑，不接受管道/脚本输入）；AI 无法代跑，需用户手动配置。
 
-完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.hotsouprealm.top/使用说明/命令行.html)。
+完整 CLI 参数、TUI 快捷键、AI 命令与错误码，见 [Wiki · 使用说明](https://sip.hotsouprealm.top/使用/CLI.html)。
 
 ---
 
@@ -81,7 +81,7 @@ sip --insights-interval 7d   # 每 7 天提醒一次报告
 2. **`sip-rss` skill**（`.opencode/skills/sip-rss/SKILL.md` 或 `sip-skill.zip`）
 3. **系统提示词**（见 Wiki，让 Agent 只用 `sip --search/--grep/--show/--summary` 检索）
 
-> Telegram、Discord 由 OpenClaw 原生支持；QQ、微信需第三方桥接（OneBot/go-cqhttp、Wechaty 等）。完整步骤、提示词与示例见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用说明/Bot接入.html)。
+> Telegram、Discord 由 OpenClaw 原生支持；QQ、微信需第三方桥接（OneBot/go-cqhttp、Wechaty 等）。完整步骤、提示词与示例见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用/Bot.html)。
 
 ---
 
@@ -152,7 +152,7 @@ sip --grep "量子纠缠"     # SQL LIKE 精确匹配标题/正文/摘要
 @bot 帮我查一下"LLM Agent"相关文章
 ```
 
-Agent 自动调 `sip --today` / `sip --search`，只从你信任的源回答。见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用说明/Bot接入.html)。
+Agent 自动调 `sip --today` / `sip --search`，只从你信任的源回答。见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用/Bot.html)。
 
 ---
 
@@ -184,12 +184,12 @@ sip 的核心定位是**事实优先**——只做确定性的规则与本地事
 
 ### 已落地：今日变化摘要（diff 招牌）
 
-- `sip --today` 顶部是**今日变化摘要**：每个源各新增多少、⚠ 高频源（腹泻式更新）单独折叠、**被作者改过**带改动概览（标题改没改/增删行数/约±字数，纯 diff 计数、零 LLM）、⚠ 可能同文（跨源重复）。
+- `sip --today` 顶部是**今日变化摘要**：每个源各新增多少、⚠ 高频源（腹泻式更新）单独折叠、**被作者改过**带改动概览（标题改没改/增删行数/约±字数，纯 diff 计数、零 LLM）、⚠ 可能同文（重复簇）。
 - 「被作者改过」每篇给 `sip --diff <id>` 入口，点开看作者改了啥——把版本追踪的 **diff 能力做成招牌**，让「帮我看到变化」落到实处。
 
-### 已落地：跨源去重（用户确认版）
+### 已落地：跨源去重（簇检测，用户确认版）
 
-- `sip --dedup scan` 检测**可能同文**（段落重合度，跨源、零 LLM）；`hide` 把重复篇标 `Status='dedup'` 并记规则，之后**从搜索/全文/摘要/计数自动排除**，且 `--sync` 导入时跳过（防卷土重来）。
+- `sip --dedup scan` 检测**可能同文**（段落重合度，跨源、零 LLM），输出**重复簇**（一组同文文章：代表 + 成员）；`hide-cluster <代表Id>` 一键隐藏整簇（保留代表、隐藏其余成员），标 `Status='dedup'` 并记规则，之后**从搜索/全文/摘要/计数自动排除**，且 `--sync` 导入时跳过（防卷土重来）。v1.1.4 起为簇检测：再大的重复量也只出少量簇，**无配对爆炸、无截断**。
 - **隐藏 ≠ 删除**：数据保留、非破坏可恢复（`--dedup undo`）；manage 界面按 `i` 查看/撤销已隐藏。
 - 检测是事实、决定在你、规则持久——正是 Source Policy「记住你的决定」的雏形。
 
