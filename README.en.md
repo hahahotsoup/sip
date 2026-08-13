@@ -2,6 +2,8 @@
 
 > ——"Savor it, sip it slow."
 
+> 📖 This development phase is wrapping up for now. If you'd like to know how this software came to be, read: [《读不进去书的人，做了一个读书的软件》](https://blog.hotsouprealm.top/读不进去书的人，做了一个读书的软件/)
+
 Welcome~
 
 No matter how you found this — an AI recommendation, some forum thread, or a friend casually dropping the link — thank you for clicking in, and I hope you'll stay on this page for five minutes.
