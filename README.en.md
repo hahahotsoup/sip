@@ -1,5 +1,7 @@
 ﻿# 🍲 sip
 
+> **English** | [**简体中文**](./README.md)
+
 > ——"Savor it, sip it slow."
 
 > 📖 This development phase is wrapping up for now. If you'd like to know how this software came to be, read: [《读不进去书的人，做了一个读书的软件》](https://blog.hotsouprealm.top/读不进去书的人，做了一个读书的软件/)
