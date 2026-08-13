@@ -38,9 +38,9 @@ Take it slow, no rush. It's a cure for information overload.
 
 ## What if I really can't figure it out?
 
-Honestly, I designed for that from the start — that's why the CLI has an AI companion.
+Honestly, I designed for that from the start: sip isn't just for humans — it's for agents too.
 
-Everything the TUI can do, the CLI can do too (except `init`, which touches your API key). AI and you are first-class citizens.
+We built **agent-invocation capability** — any agent can call sip through the CLI (with a skill), with capability nearly identical to the TUI (except `init`, which touches your API key). People and AI are first-class citizens.
 
 ## What's different from other RSS readers
 
