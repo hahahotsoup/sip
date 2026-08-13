@@ -36,6 +36,18 @@ Once it's open, just feel your way around.
 
 Take it slow, no rush. It's a cure for information overload.
 
+## What it can do for you
+
+sip revolves around five verbs, each backed by real features with concrete value:
+
+- **Collect** — add a few RSS / RSSHub sources, or import from OPML in one go. All-local, no sign-up, no cloud — you pick the sources.
+- **Preserve** — fetch the full text when a summary is too short (`--fulltext`); versions are kept automatically; reading progress remembers where you stopped, so you can pick it back up.
+- **Track** — the author quietly flips a conclusion or a number? `sip --diff` shows you the before and after in one screen; silently-edited facts can't hide.
+- **Filter** — five or six sources repost the same piece? It clusters them so you don't re-read; each day a small bowl of Today's Hot Soup, not greedy; Source Policy helps you lower the frequency of or archive sources you don't read.
+- **Use** — full-text search (`--grep`) needs no AI; semantic search (`--search`) finds "similar in meaning"; export Markdown; let an agent answer only from sources you trust.
+
+At the end of the day you get three things: **information overload tamed, silently-edited facts exposed, and AI that no longer cites sources you don't trust.**
+
 ## What if I really can't figure it out?
 
 Honestly, I designed for that from the start: sip isn't just for humans — it's for agents too.
