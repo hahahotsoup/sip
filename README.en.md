@@ -66,6 +66,8 @@ What sip wants to do is what they generally don't and won't: **make information 
 
 That's why sip is a single local file: when an author edits a post it quietly keeps a version, five sources reposting the same piece get clustered, and a report lays the facts out for you. Under the hood, just two things — **deterministic rules**, and **local storage of facts**. The judgment is yours; AI is just a quiet assistant helping you understand, never deciding the value for you.
 
+A fuller side-by-side is on the [Wiki · Competitor comparison](https://sip.hotsouprealm.top/了解/竞品对比.html).
+
 AI can help you understand information, but it never decides its value for you — it's all up to you.
 
 ## A little product philosophy
