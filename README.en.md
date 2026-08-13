@@ -96,7 +96,7 @@ Oh, and `sip --init` asks for your API key, so run it yourself in a real termina
 
 ## Want AI to answer only from sources you trust?
 
-Wire sip into a group or bot with OpenClaw or Cherry Studio — it answers only from your subscribed sources. Junk citations, goodbye.
+Wire sip into a group or bot with OpenClaw or Cherry Studio — it answers only from your subscribed sources. Junk citations, goodbye. Setup steps: [Wiki · Bot Integration](https://sip.hotsouprealm.top/使用/Bot.html).
 
 ## More
 

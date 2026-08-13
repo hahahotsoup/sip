@@ -96,7 +96,7 @@ AI 可以帮你理解信息，但它不替你决定信息的价值——一切�
 
 ## 想让 AI 只从你信任的源回答？
 
-用 OpenClaw 或 Cherry Studio 把 sip 挂到群或机器人里，它只会用你订阅源里的内容回答。垃圾引用，再见。
+用 OpenClaw 或 Cherry Studio 把 sip 挂到群或机器人里，它只会用你订阅源里的内容回答。垃圾引用，再见。接入步骤见 [Wiki · Bot 接入](https://sip.hotsouprealm.top/使用/Bot.html)。
 
 ## 关于安全
 
