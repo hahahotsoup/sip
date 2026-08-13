@@ -56,21 +56,15 @@ We built **agent-invocation capability** — any agent can call sip through the 
 
 ## What's different from other RSS readers
 
-FreshRSS, Feedly, Inoreader are all fine, but sip has a different temperament.
+FreshRSS, Feedly, Inoreader are all fine — when it comes to aggregating subscriptions and showing articles, they do it well, and sip isn't trying to compete with them on that.
 
-Most readers live in the cloud and hand you folders and tags.
+What sip wants to do is what they generally don't and won't: **make information trustworthy, traceable, and usable by AI.**
 
-sip is local SQLite; when an author edits a post, it quietly keeps a version and you can see the diff.
+- The author edits a post or flips a conclusion? `--diff` leaves you the trace of change, instead of you forever seeing the old version.
+- Want AI to look things up but worry it cites junk? AI only searches the sources you subscribed to.
+- Information overload keeping you scrolling? A small bowl of Today's Hot Soup each day, then close it.
 
-Five or six sources repost the same piece? It clusters them so you don't re-read.
-
-It can also run a reading report, lay the facts out, and let you make the call.
-
-What sip does, plainly, is **collect, preserve, track, filter, and use** the information you care about.
-
-Under the hood, just two things — **deterministic rules**, and **local storage of facts**.
-
-The judgment is yours; AI is just a quiet assistant watching your back.
+That's why sip is a single local file: when an author edits a post it quietly keeps a version, five sources reposting the same piece get clustered, and a report lays the facts out for you. Under the hood, just two things — **deterministic rules**, and **local storage of facts**. The judgment is yours; AI is just a quiet assistant helping you understand, never deciding the value for you.
 
 AI can help you understand information, but it never decides its value for you — it's all up to you.
 
