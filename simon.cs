@@ -1,4 +1,4 @@
-﻿// ===== 孟思琳(simon)——安全守护与数据加密(从 RssReader.cs 拆出)=====
+// ===== 孟思琳(simon)——安全守护与数据加密(从 RssReader.cs 拆出)=====
 // 与 RssReader.cs 同属 partial class Program(入口文件顶层语句生成的类),
 // 可自由调用 RssReader.cs 的顶层函数与基础设施;入口的 RunCli 经
 // SimonCheckBlock/SimonCli 与此文件交互。
@@ -54,9 +54,24 @@ static List<SimonEvent> SimonLoadEvents()
     return new();
 }
 
+// 凭据作用域:按数据目录哈希隔离——同一用户的多个 sip 副本(不同目录)互不影响;
+// 同目录的不同 exe 版本(升级)共享同一作用域。环境变量可覆盖(自动化测试用)。
+static string SimonScopeHash()
+{
+    try
+    {
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(dataDir)))[..12];
+    }
+    catch { return "default"; }
+}
+
 // 挡位存储:权威值在系统凭据库(文件编辑无法降挡——孟思琳不能被改 JSON 绕过);
 // sip_settings.json 仅作缓存/兼容(凭据库缺失时回退)。升降挡只经程序接口。
-static string SimonLevelKey() => Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME") ?? "simon_db_key";
+static string SimonLevelKey()
+{
+    string? t = Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME");
+    return string.IsNullOrEmpty(t) ? "simon_level_" + SimonScopeHash() : t;
+}
 
 static int SimonLevelGet()
 {
@@ -244,8 +259,12 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
 // ── 数据加密(挡位 3:SQLCipher 加密 rss.db;敏感 JSON 文件 AES 加密)────────────────
 // 密钥只存系统凭据库(与 API Key 同机制),绝不落盘到项目文件
 
-// 密钥名可用环境变量覆盖:自动化测试用隔离密钥名,绝不读写/覆盖真实用户的系统凭据
-static string SimonKeyName() => Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME") ?? "simon_db_key";
+// 密钥名:按数据目录哈希隔离(多副本独立密钥);环境变量可覆盖(自动化测试用)
+static string SimonKeyName()
+{
+    string? t = Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME");
+    return string.IsNullOrEmpty(t) ? "simon_db_key_" + SimonScopeHash() : t;
+}
 
 static string SimonDbKey()
 {
