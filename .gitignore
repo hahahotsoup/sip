@@ -20,3 +20,6 @@ readwithhotsoup/
 ## OS
 .DS_Store
 Thumbs.db
+
+## Backup bundles
+*.bundle
