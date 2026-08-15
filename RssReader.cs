@@ -2868,13 +2868,19 @@ static string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath,
         else
             md.Append(Lang.T("(No summary, press G for full content)"));
     }
-    return md.ToString();
+    // 返回前统一过滤控制字符:标题/元信息/正文/fulltext/AI 摘要都可能来自
+    // 不可信 RSS 源,含 ANSI 转义序列会注入终端(CLI 导出与 TUI 渲染共用此函数)。
+    // StripControlChars 保留 \n \t \r,不影响 Markdown 语法字符。
+    return StripControlChars(md.ToString());
 }
 
 // 中文排版：在汉字与相邻的英文/数字之间插入空格，让混排更清爽
+// 同时过滤控制字符（ANSI 转义等）：本函数是 TUI 标题/列表/对话框标题的公共渲染入口，
+// 恶意源可在标题里塞 ESC 序列注入终端——CLI 路径已有单独过滤，这里兜底 TUI 全部标题路径
 static string CjkSpace(string s)
 {
     if (string.IsNullOrEmpty(s)) return s;
+    s = StripControlChars(s);
     return Regex.Replace(s,
         @"(?<=[\u4E00-\u9FFF])(?=[A-Za-z0-9@#%])|(?<=[A-Za-z0-9@#%])(?=[\u4E00-\u9FFF])",
         " ");
