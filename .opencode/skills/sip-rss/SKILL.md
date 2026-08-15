@@ -83,6 +83,21 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --summary <编号>` | 为文章生成 LLM 摘要（`--json` 结构化输出） |
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
+| `sip simon status [--json] \| level <1\|2\|3> \| export-key <file> \| import-key <file>` | 孟思琳(simon)安全守护（**默认开启、无法关闭**，只有挡位 1/2/3）：`status` 查当前挡位与加密状态（`--json` 结构化）；`level` 调挡位（**降挡只能在 TUI 命令栏**，CLI 降挡报 `SIMON_LOCKED`，AI 不要代跑）；`export-key`/`import-key` 换机迁移加密密钥 |
+
+## ⚠️ 安全守护：孟思琳(simon)——命令可能被拦，先查挡位
+
+`sip simon status` 返回的挡位**决定哪些 CLI 命令可用**。默认开启、无法关闭，只有 1/2/3 三挡；命令被拒**不是 bug，是守护在拦截**：
+
+| 挡位 | 名称 | CLI 行为 |
+|------|------|----------|
+| 1 | 基础 | 不拦截，行为与以往一致 |
+| 2 | 严格 | **CLI 写操作一律拒绝**（增删改源 `-d`/`-r`/`-u`/`--sync`/`--update-all`、归档 `-a`、`--fulltext`、`--dedup hide*`、`--policy set`、`telemetry enable` 等非只读命令）；只读命令可用 |
+| 3 | 极致 | **CLI 全部拒绝，唯一例外 `sip simon status`**；全部数据加密（SQLCipher + AES，密钥只存系统凭据库，按数据目录隔离） |
+
+- **命令被拒时先查挡位**：跑 `sip simon status --json` 确认当前挡位，再向用户解释——挡位 2 时改用只读命令（`--grep`/`--show`/`-l`/`--diff`/`--today`/`--dedup scan` 等）或建议用户去 TUI 操作；挡位 3 时 CLI 只剩 `sip simon status`，一切操作都要用户在 TUI 里做。**不要反复重试被拒的命令。**
+- **降挡只能在 TUI 命令栏进行**（真人坐在键盘前）；CLI 调用 `sip simon level` 降挡报 `SIMON_LOCKED`——AI 永远不能代跑降挡，告知用户自己在 TUI 里调。
+- 挡位 3 的加密密钥自动生成、按数据目录隔离（多副本互不影响）；换机迁移用 `sip simon export-key` 导出密钥。
 
 ## 退出码（脚本/AI 判断成败）
 
@@ -95,7 +110,7 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `2` | 网络 / 服务不可达：`NETWORK_ERROR`、`MODEL_UNAVAILABLE`、下载超时 |
 | `3` | 资源未就绪：AI 未配置、API Key 缺失/无效、`NO_INDEX`、源/文章不存在、空查询 |
 
-错误文本格式：`Error [错误码] 消息` + `Suggestion:` + `Details:` 三行式；`--json` 模式错误为 `{"success": false, "error": {"code": ...}}`。**用退出码 + 文本/JSON 双重判断成败**，别只靠解析文本。
+错误文本格式：`Error [错误码] 消息` + `Suggestion:` + `Details:` 三行式；`--json` 模式错误为 `{"success": false, "error": {"code": ...}}`。**用退出码 + 文本/JSON 双重判断成败**，别只靠解析文本。simon 相关错误码：`SIMON_LOCKED`（降挡被拒/守护拦截）、`ENCRYPT_FAILED`（挡位 3 加密失败，数据仍为明文，可重试）、`USAGE`（参数错误）。
 
 ## 两种场景
 
@@ -203,6 +218,6 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 无参数运行 `sip` 会进入 TUI（三键键盘导航），AI 场景一律走 CLI（带参数），不要进 TUI。
 
 - TUI 里按 `M`（或命令行 `manage`）是**订阅源管理页**（给人用的，AI 不需要）；manage 里 `Enter` 打开单源编辑面板、`s` 用方向键选更新计划、`i` 查看已隐藏文章。
-- **TUI 命令行与 CLI 能力对齐**：TUI 内按 Esc 呼出的命令行支持 `diff / export / export-opml / import-opml / feed-info / like / likes / purge-fulltext / dedup / insights-interval / telemetry / config` 等（输出在 TUI 对话框里展示）。AI 场景仍建议走 CLI（`--json` + 退出码更利于脚本），但在 TUI 里人也能做到和 CLI 一样的事。
+- **TUI 命令行与 CLI 能力对齐**：TUI 内按 Esc 呼出的命令行支持 `diff / export / export-opml / import-opml / feed-info / like / likes / purge-fulltext / dedup / insights-interval / telemetry / config / simon` 等（输出在 TUI 对话框里展示）。AI 场景仍建议走 CLI（`--json` + 退出码更利于脚本），但在 TUI 里人也能做到和 CLI 一样的事；**降挡（`simon level` 调低）只能在这里做**。
 - TUI 命令行 `fetch` = 抓当前文章全文；**首次使用全文抓取需要用户输入同意短语**（一次性，交互式）。AI 一律用 `sip --fulltext <id> --yes` 跳过同意与二次确认——**不要代用户在 TUI 里操作同意流程**，需要抓全文时告诉用户或直接跑 CLI 带 `--yes`。
 - **Telemetry 默认关闭**（遥测妹纸叫**苏暖泉 / Sumenia**）：AI/非交互场景不会询问、保持关闭，无需处理；即使用户开启了遥测，也只在本地记录（`telemetry.db`），不会自动上传。
