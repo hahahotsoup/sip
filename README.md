@@ -80,7 +80,9 @@ sip 想做的，是它们普遍没做、也不打算做的：**让信息可信�
 
 ## 里面还有几个小东西
 
-🍵 **今日哈汤**（每天一小碗值得读的）、💧 **苏暖泉**（默认不在的遥测萌妹纸）、📜 **版本追踪**（改稿 diff）、🔒 **孟思琳**（永远在岗的安全守护）。角色档案见 [Wiki · 梗百科](https://sip.hotsouprealm.top/梗百科.html)。
+🍵 **今日哈汤**（每天一小碗值得读的）、💧 **苏暖泉**（默认不在的遥测萌妹纸）、📜 **版本追踪**（改稿 diff）、🔒 **孟思琳**（永远在岗的安全守护）。
+
+角色档案见 [Wiki · 梗百科](https://sip.hotsouprealm.top/梗百科.html)。
 
 ## 至于怎么用
 
@@ -129,6 +131,7 @@ sip 天生保守，因为它觉得信息首先是你的：
 
 来看我们的自测试报告：[https://sip.hotsouprealm.top/测试报告.html](https://sip.hotsouprealm.top/%E6%B5%8B%E8%AF%95%E6%8A%A5%E5%91%8A.html)
 
+来看我们的软件梗：[https://sip.hotsouprealm.top/梗百科.html](https://sip.hotsouprealm.top/梗百科.html)
 ---
 
 当你打开 sip 时，你知道今天读到的东西是可信的；当你的 AI 调用 sip 时，你知道它引用的来源是可靠的。
