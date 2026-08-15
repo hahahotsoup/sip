@@ -392,8 +392,7 @@
   "The original text is already long. Did you mean to fetch? Fetch anyway?": "原文已经很长喵，你是不是误触了？仍要抓取全文吗？",
   "The summary is too short. Type fetch to get the full text.": "摘要太短喵，输入 fetch 抓全文",
   "  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · Esc 返回  ": "  j/k 移动 · u 更新 · a 归档 · r 去归档 · x 删除 · s 计划 · d 加源 · Esc 返回（管好喵~）",
-  "是的，我愿意与作者达成合理使用约定": "是的，我愿意与作者达成合理使用约定"
-,
+  "是的，我愿意与作者达成合理使用约定": "是的，我愿意与作者达成合理使用约定",
   "      · 版本追踪 / 快照归档 / AI 摘要": "      · 版本追踪 / 快照归档 / AI 摘要（都记着呢喵~）",
   "      · 多语言（readwithhotsoup/languages/*.json）": "      · 多语言（readwithhotsoup/languages/*.json，换语言喵~）",
   "      · 全文搜索  --grep / 语义搜索 --search": "      · 全文搜索  --grep / 语义搜索 --search（搜搜喵~）",
@@ -408,10 +407,8 @@
   "关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾": "关注热汤茶馆喵 关注热汤茶馆谢谢喵 🐾（一定要来哦！）",
   "一个让你站着把信息喝了的 RSS 阅读器核心": "一个让你站着把信息喝了的 RSS 阅读器核心（喝汤喵~）",
   "一个让你站着把信息喝了的 RSS 阅读器核心。": "一个让你站着把信息喝了的 RSS 阅读器核心。（喝汤喵~）",
-  "作者：hahahotsoup with ❤": "作者：hahahotsoup with ❤（用心做的喵~）"
-,
-  "▷ 按 Space 跳回上次位置": "▷ 按 Space 跳回上次位置"
-,
+  "作者：hahahotsoup with ❤": "作者：hahahotsoup with ❤（用心做的喵~）",
+  "▷ 按 Space 跳回上次位置": "▷ 按 Space 跳回上次位置",
   "✗ 失败 {0} 次": "✗ 失败 {0} 次",
   "⚠ 长期未更新": "⚠ 长期未更新",
   " [摘要]": " [摘要]",
@@ -434,13 +431,11 @@
   "No feeds found in the OPML file": "OPML 文件里没有订阅源",
   "Import done: {0} added, {1} skipped (already exist), {2} failed": "导入完成：新增 {0}，跳过 {1}（已存在），失败 {2}",
   "  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)": "  --feed-info <编号>  来源身份与健康（类型/作者/官网/更新时间/状态；--json）",
-  "  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds": "  --export-opml [文件]  导出订阅源为 OPML；--import-opml <文件> 导入订阅源"
-,
+  "  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds": "  --export-opml [文件]  导出订阅源为 OPML；--import-opml <文件> 导入订阅源",
   "Usage: sip --like <article-id> [--ai [reason]]": "用法: sip --like <文章编号> [--ai [理由]]",
   "Usage: sip telemetry status | show [--limit N] | enable | disable | clear | export [file]": "用法: sip telemetry status | show [--limit N] | enable | disable | clear | export [文件]",
   "  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks": "  --like <编号> [--ai [理由]]  标记文章（♥ 用户 / 🤖 AI）；--likes 查看标记",
-  "  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)": "  telemetry status|show|enable|disable|clear|export  苏暖泉（Sumenia）阅读遥测喵（默认关闭）"
-,
+  "  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)": "  telemetry status|show|enable|disable|clear|export  苏暖泉（Sumenia）阅读遥测喵（默认关闭）",
   "  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)": "  --today [--json]  今日阅读清单（规则式选文，引导每日少量阅读）",
   "你的阅读情况报告已就绪，运行 sip --insights 查看": "你的阅读情况报告好了喵~ 跑 sip --insights 就能看啦！",
   "阅读情况报告需要先开启遥测": "阅读情况报告要先开遥测喵~",
@@ -574,5 +569,22 @@
   "  Enter 进入 · 输入 today 今日哈汤 · M 订阅管理 · Q 退出  ": "  Enter 进入 · 输入 today 今日哈汤 · M 订阅管理 · Q 退出  ",
   " ": "-",
   "(": "中",
-  "-": "n"
+  "-": "n",
+  "🔒 孟思琳(simon): 数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…": "🔒 孟思琳(simon)喵…数据库检查中(上次没好好退出;大库要 30 秒,仅此一次)。等着。",
+  "哎呀，麻烦我修复下数据库——检测到损坏，已保留现场并重建：{0}": "哼，又坏了？麻烦，让我修一下——已保留现场并重建：{0}",
+  "永远作为此软件的最后一道安全防线。": "永远作为此软件的最后一道安全防线。不然呢？指望谁？",
+  "🔒 孟思琳(simon) 拦截: {0}": "🔒 孟思琳(simon) 拦截喵：{0} 想都别想。",
+  "挡位 3(极致):非交互调用已禁止写操作({0});只读命令仍可用。交互终端或调低挡位可解除": "挡位 3(极致)喵：写操作？禁止。只读还行。不服？回终端再说。",
+  "挡位 {0}(严格):非交互调用已禁止破坏性操作({1})": "挡位 {0}(严格)喵：破坏性操作？禁止。呵。",
+  "降挡需要真实交互终端(安全考虑,不接受管道输入)——孟思琳不允许被脚本调弱": "降挡？呵，不允许。脚本也配指挥我？",
+  "孟思琳(simon) 守护挡位: {0} → {1}": "孟思琳(simon) 守护挡位：{0} → {1} 哼，随你。",
+  "孟思琳(simon) 安全守护": "孟思琳(simon) 安全守护喵",
+  "挡位: {0}({1})——默认开启,无法关闭,只能调节": "挡位：{0}({1})——默认开启、无法关闭、只能调节。别想着关。",
+  "数据库修复: {0} 次": "数据库修复：{0} 次 啧，都是我在干活。",
+  "已拦截非交互调用: {0} 次": "已拦截非交互调用：{0} 次 拦的就是这些。",
+  "基础": "基础（就这样吧）",
+  "严格": "严格（呵）",
+  "极致": "极致（哼）",
+  "🔒 孟思琳(simon) 则永远在岗：数据库自愈、SSRF 防护、终端注入拦截、非交互调用管控——默认开启且无法关闭，只能调节挡位。永远作为此软件的最后一道安全防线。": "🔒 孟思琳(simon)？哼，本小姐一直在——数据库坏了找我，想搞事别找我。默认开启、关不掉，只能调挡位。永远作为此软件的最后一道安全防线，不满意？忍着。",
+  "苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？\n\n🔒 孟思琳(simon) 守护着这一切——默认开启、无法关闭，永远作为此软件的最后一道安全防线。": "苏暖泉要开始记东西了喵：开了啥、读完没、AI 干了啥。数据只在本机，绝不自动上传。开吗？\n\n🔒 孟思琳(simon) 管着这一切——默认开启、无法关闭，永远作为最后一道防线。想关？做梦。"
 }

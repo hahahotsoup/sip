@@ -35,6 +35,13 @@ using Terminal.Gui.Text;
 try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* 某些重定向场景可能不支持，忽略 */ }
 try { Console.InputEncoding = new System.Text.UTF8Encoding(false); } catch { /* 同上，忽略 */ }
 
+// 孟思琳(simon):启用 SQLCipher provider。
+// 注意顺序:2.1.x 的 SQLitePCL.Batteries_V2.Init(由 Microsoft.Data.Sqlite 首次连接时触发)
+// 会无条件覆盖 provider——必须先完成默认初始化,再 SetProvider(sqlcipher) 切换
+using (var _initConn = new SqliteConnection("Data Source=:memory:")) { _initConn.Open(); }
+try { SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlcipher()); }
+catch (Exception ex) { Console.Error.WriteLine("[diag] SetProvider failed: " + ex.GetType().Name + ": " + ex.Message); }
+
 // 数据目录 = exe 同级下的 readwithhotsoup 文件夹（首次启动自动创建）
 // 数据库、AI 配置、语言文件等所有配置文件都放在这里，方便整体备份/迁移
 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -283,7 +290,7 @@ static bool ArticleContentShort(string dbPath, int itemId)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Content, Description FROM Items WHERE Id = @id";
@@ -383,7 +390,7 @@ static string? FetchAndExtract(string url)
 // 返回 (全文, 退出码, 错误信息)；0=成功；错误时不再打 Console，由调用方展示
 static (string? Text, int ExitCode, string? Error) DoFetchCore(string dbPath, int itemId)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT i.Link, i.Content, i.Description, i.FeedId FROM Items i WHERE i.Id = @id";
@@ -420,7 +427,7 @@ static (string? Text, int ExitCode, string? Error) FetchFulltext(string dbPath, 
 {
     // 先读元信息判断是否过短（用于二次确认）；不存在直接返回错误
     string? content = null, desc = null, title = null;
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -507,7 +514,7 @@ static bool FeedHasVectors(string dbPath, int feedId)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM Vectors WHERE FeedId = @f";
@@ -522,7 +529,7 @@ static int CurrentEmbeddingModelId(string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
@@ -739,7 +746,7 @@ static void FeedInfoCli(string[] args, string dbPath)
     if (realId == 0) { ReportError("FEED_NOT_FOUND", Lang.T("Feed number {0} not found", dn), json: json); return; }
 
     string title = "", link = "", url = "", rawXml = "", schedule = "", lastChecked = "", lastArticle = "";
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -754,7 +761,7 @@ static void FeedInfoCli(string[] args, string dbPath)
         schedule = r.IsDBNull(4) ? "" : r.GetString(4);
         lastChecked = r.IsDBNull(5) ? "" : r.GetString(5);
     }
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -814,7 +821,7 @@ static void ExportOpmlCli(string arg, string dbPath)
 {
     string file = string.IsNullOrWhiteSpace(arg) ? "feeds.opml" : arg;
     var feeds = new List<(string Title, string Url)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -851,7 +858,7 @@ static bool FeedUrlExists(string dbPath, string url)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM Feeds WHERE FeedUrl = @u";
@@ -952,7 +959,7 @@ static int? GetArticleFeedId(int itemId, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var c = conn.CreateCommand();
         c.CommandText = "SELECT FeedId FROM Items WHERE Id = @id";
@@ -996,7 +1003,7 @@ static void LikesCli(string[] args, string dbPath)
     }
     // 查标题
     var titles = new Dictionary<int, string>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -1217,7 +1224,7 @@ static List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
     var now = DateTime.Now;
     var freshCutoff = now.AddHours(-48);
 
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -1310,7 +1317,7 @@ static TodayModified? ChangeOverview(string guid, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Version, Title, Content, Description FROM Items WHERE Guid = @g ORDER BY Version";
@@ -1353,7 +1360,7 @@ static int LatestIdForGuid(string guid, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var c = conn.CreateCommand();
         c.CommandText = "SELECT Id FROM Items WHERE Guid = @g AND Status = 'active' ORDER BY Version DESC LIMIT 1";
@@ -1374,7 +1381,7 @@ static TodayDigest BuildTodayDigest(string dbPath, int windowHours)
 
     // ① 新增按源（Version=1：真正新发布，避免与「被改过」重复计数）
     var newBySource = new List<SourceCount>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -1408,7 +1415,7 @@ static TodayDigest BuildTodayDigest(string dbPath, int windowHours)
 
     // ③ 被作者改过：Version>1 且近期被归档（旧版 ArchivedAt >= cutoff）
     var modGuids = new List<(string Guid, string Title, string Feed)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -1547,7 +1554,7 @@ static List<DedupCandidate> FindNearDuplicates(string dbPath, int windowHours)
     string cutoff = now.AddHours(-windowHours).ToString("O");
 
     var arts = new List<(int Id, int FeedId, string Title, string Feed, string Link, string Body)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -1617,7 +1624,7 @@ static List<DedupCluster> FindDuplicateClusters(string dbPath, int windowHours)
     string cutoff = DateTime.Now.AddHours(-windowHours).ToString("O");
 
     var arts = new List<(int Id, int FeedId, string Title, string Feed, string Body)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -1706,7 +1713,7 @@ static string? HideAsDedup(string dbPath, int hiddenId, int canonicalId)
         if (!ArticleExists(canonicalId, dbPath)) return Lang.T("保留的文章不存在");
         (string Status, int Feed, string Url) Get(int id)
         {
-            using var c = new SqliteConnection($"Data Source={dbPath}");
+            using var c = OpenDb(dbPath);
             c.Open();
             var cmd = c.CreateCommand();
             cmd.CommandText = "SELECT Status, FeedId, Link FROM Items WHERE Id = @id";
@@ -1727,7 +1734,7 @@ static string? HideAsDedup(string dbPath, int hiddenId, int canonicalId)
         if (ov < LoadSettings().DedupThreshold)
             return Lang.T("两篇正文不相似（段落重合度仅 {0:P0}），可能不是重复，不予隐藏", ov);
 
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = OpenDb(dbPath))
         {
             conn.Open();
             var cmd = conn.CreateCommand();
@@ -1756,7 +1763,7 @@ static bool UndoDedup(string dbPath, string key)
     if (!map.TryGetValue(key, out var rule)) return false;
     map.Remove(key);
     SaveDedup(map);
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -1774,7 +1781,7 @@ static List<(int Id, string Title, string Source, string Key)> ListHiddenDedup(s
 {
     var map = LoadDedup();
     var res = new List<(int, string, string, string)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -1788,7 +1795,7 @@ static List<(int Id, string Title, string Source, string Key)> ListHiddenDedup(s
             int id = r.GetInt32(0);
             string link = r.IsDBNull(3) ? "" : r.GetString(3);
             int fid = 0;
-            using (var f2 = new SqliteConnection($"Data Source={dbPath}"))
+            using (var f2 = OpenDb(dbPath))
             {
                 f2.Open();
                 var q = f2.CreateCommand();
@@ -1874,7 +1881,7 @@ static string ArticleGuidById(int id, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var c = conn.CreateCommand();
         c.CommandText = "SELECT Guid FROM Items WHERE Id = @id";
@@ -1888,7 +1895,7 @@ static string ArticleGuidById(int id, string dbPath)
 // 文章正文（去 HTML）
 static string ArticleBodyById(int id, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var c = conn.CreateCommand();
     c.CommandText = "SELECT COALESCE(NULLIF(Content,''), Description,'') FROM Items WHERE Id = @id";
@@ -1901,7 +1908,7 @@ static string ArticleTitleById(int id, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var c = conn.CreateCommand();
         c.CommandText = "SELECT Title FROM Items WHERE Id = @id";
@@ -2486,7 +2493,7 @@ static async Task RunCli(string[] args, string dbPath)
     // 孟思琳(simon)守护配置(读命令,永不拦截)
     if (cmd == "simon")
     {
-        SimonCli(args.Skip(1).ToArray());
+        SimonCli(args.Skip(1).ToArray(), dbPath);
         return;
     }
 
@@ -2787,7 +2794,7 @@ static int GetDisplayNum(int realId, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Id, ROW_NUMBER() OVER (ORDER BY Id) AS dn FROM Feeds";
@@ -2818,7 +2825,7 @@ static void TrimFulltextCache(int maxFiles = 200, long maxBytes = 200L * 1024 * 
 // 起始页「今日哈汤」区块：规则清单 + 目标进度（引导习惯，不堆量）
 static string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath, int wrapWidth, bool showFetchHint = false)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
@@ -3106,7 +3113,7 @@ static string StripHtml(string html)
 // 按真实 Id 归档（不查显示编号）
 static void AddTimestampForRealId(int realId, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
@@ -3123,7 +3130,7 @@ static void AddTimestampForRealId(int realId, string dbPath)
 // 按真实 Id 去归档
 static void RemoveTimestampForRealId(int realId, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
@@ -3146,7 +3153,7 @@ static void DeleteFeedByRealId(int realId, string dbPath)
 {
     // 先取该源全部文章 Id（用于清理全文缓存与 sidecar 向量）
     var ids = new List<int>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -3162,7 +3169,7 @@ static void DeleteFeedByRealId(int realId, string dbPath)
     }
     RemoveFulltextVecs(ids);
 
-    using var db = new SqliteConnection($"Data Source={dbPath}");
+    using var db = OpenDb(dbPath);
     db.Open();
     var cmd = db.CreateCommand();
     cmd.CommandText = "DELETE FROM Vectors WHERE FeedId = @id";
@@ -3214,7 +3221,7 @@ static async Task UpdateFeed(int displayNum, string dbPath)
     int realId = GetRealId(displayNum, dbPath);
     if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Title, FeedUrl FROM Feeds WHERE Id = @id";
@@ -3274,7 +3281,7 @@ static void SetFeedSchedule(string displayNum, string expr, string dbPath)
     if (raw.Length == 0 || raw.Equals("manual", StringComparison.OrdinalIgnoreCase))
     {
         // 清空计划 = 手动，不自动更新
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "UPDATE Feeds SET Schedule = '' WHERE Id = @id";
@@ -3293,7 +3300,7 @@ static void SetFeedSchedule(string displayNum, string expr, string dbPath)
         return;
     }
 
-    using var conn2 = new SqliteConnection($"Data Source={dbPath}");
+    using var conn2 = OpenDb(dbPath);
     conn2.Open();
     var cmd2 = conn2.CreateCommand();
     cmd2.CommandText = "UPDATE Feeds SET Schedule = @s WHERE Id = @id";
@@ -3326,7 +3333,7 @@ static async Task SyncCli(string[] extra, string dbPath)
     if (feedReal.HasValue && due.Count == 0)
     {
         // 限定单个源但未到期 → 提示还差多久
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Title, LastCheckedAt, Schedule FROM Feeds WHERE Id = @id";
@@ -3392,7 +3399,7 @@ static async Task SyncCli(string[] extra, string dbPath)
 // --update-all：强制更新所有订阅源（等价 TUI F6）
 static async Task UpdateAllCli(string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Id, Title, FeedUrl FROM Feeds ORDER BY Id";
@@ -3437,7 +3444,7 @@ static void InitDatabase(string dbPath)
 
     // $ 开头是"字符串插值"：把 {dbPath} 替换成实际路径
     // using 保证连接用完会自动关闭，不占资源
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();  // 打开连接
 
     var cmd = conn.CreateCommand();  // 创建一个命令对象
@@ -3564,7 +3571,7 @@ static void EnsureFtsIndexed(string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         long itemsMax, ftsMax;
         var c = conn.CreateCommand();
@@ -3628,7 +3635,7 @@ static void CheckMainDbIntegrity(string dbPath)
             try { File.Delete(cleanMarker); } catch { }
             return;
         }
-        Console.Error.WriteLine(Lang.T("数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…"));
+        Console.Error.WriteLine(Lang.T("🔒 孟思琳(simon): 数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…"));
         bool ok = TelemetryService.IsSqliteFile(dbPath);
         if (ok)
         {
@@ -3655,7 +3662,7 @@ static void CheckMainDbIntegrity(string dbPath)
             Console.Error.WriteLine("rss.db 完整性检查异常（文件可能被占用，本次跳过自愈）：" + ex.Message);
             return;
         }
-        Console.Error.WriteLine("rss.db 完整性检查失败，已保留现场并重建：" + corrupt);
+        Console.Error.WriteLine(Lang.T("哎呀，麻烦我修复下数据库——检测到损坏，已保留现场并重建：{0}", corrupt));
     }
     catch { /* 完整性检查失败不阻断启动 */ }
 }
@@ -3668,7 +3675,7 @@ static bool QuickCheckOk(string dbPath)
     {
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            using var conn = OpenDb(dbPath);
             conn.Open();
             var c = conn.CreateCommand();
             c.CommandText = "PRAGMA busy_timeout = 2000;";
@@ -3685,7 +3692,7 @@ static bool QuickCheckOk(string dbPath)
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
 static void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath, bool json = false, int limit = 0)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // 查 Feed 标题
@@ -3799,7 +3806,7 @@ static bool ArticleExists(int itemId, string dbPath)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM Items WHERE Id = @id";
@@ -3813,7 +3820,7 @@ static bool ArticleExists(int itemId, string dbPath)
 // 不做任何渲染，标题/来源/链接/作者等元信息 + 原始正文（Content 原文，空则 Description）原样输出
 static void ShowArticleJson(int itemId, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
@@ -3861,7 +3868,7 @@ static void ListVersionsCli(string arg, string dbPath, bool json = false)
 {
     if (!int.TryParse(arg, out int itemId)) { SetExit(); Console.WriteLine(Lang.T("The number must be numeric")); return; }
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var gCmd = conn.CreateCommand();
     gCmd.CommandText = "SELECT Guid, Title FROM Items WHERE Id = @id";
@@ -3950,7 +3957,7 @@ static void DiffCli(string[] args, string dbPath)
 
     // 查文章 + 所有版本正文
     string guid;
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var gCmd = conn.CreateCommand();
@@ -3970,7 +3977,7 @@ static void DiffCli(string[] args, string dbPath)
     }
 
     var rows = new List<(int Version, string Text)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -4089,7 +4096,7 @@ static void ExportCli(string[] args, string dbPath)
 static List<int> GetActiveItemIds(string dbPath, int? feedReal)
 {
     var list = new List<int>();
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Id FROM Items WHERE Status = 'active'" + (feedReal.HasValue ? " AND FeedId = @fid" : "") + " ORDER BY Id";
@@ -4119,7 +4126,7 @@ static void ExportArticlesToDir(List<int> itemIds, string dir, string dbPath)
 static void ListFeedsFromDb(string dbPath, bool json = false)
 {
     var rows = new List<(int RealId, int DisplayNum, string Title, int Active, int Archived, int Deleted, DateTime? LastChecked, string Schedule)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var cmd = conn.CreateCommand();
@@ -4299,7 +4306,7 @@ static List<DueFeed> GetDueFeeds(string dbPath)
 {
     var now = DateTime.Now;
     var list = new List<DueFeed>();
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Id, Title, FeedUrl, LastCheckedAt, Schedule FROM Feeds ORDER BY Id";
@@ -4421,7 +4428,7 @@ static async Task DownloadAndSaveToDb(string url, string dbPath, bool interactiv
     var feed = FeedReader.ReadFromString(rawXml);
 
     // --- 第 3 步：打开数据库 ---
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // 第 4~5 步(源更新 + 文章比对/插入)包进一个事务:大源导入从逐条 fsync 变为一次提交,
@@ -4517,7 +4524,7 @@ static async Task MaybeIndexNewArticles(long feedId, string dbPath, bool ask = t
     if (!File.Exists(ConfigPath(dbPath))) return;
 
     var cfg = LoadConfig(dbPath);
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
@@ -4620,7 +4627,7 @@ static bool IsArchived(string title)
 // 返回 0 表示找不到
 static int GetRealId(int displayNum, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
@@ -4641,7 +4648,7 @@ static void DeleteFeed(int displayNum, string dbPath, bool yes = false)
     int realId = GetRealId(displayNum, dbPath);
     if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // 1. 查标题和文章数，用于确认提示
@@ -4689,7 +4696,7 @@ static void AddTimestamp(int displayNum, string dbPath)
     int realId = GetRealId(displayNum, dbPath);
     if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // 1. 查当前标题
@@ -4723,7 +4730,7 @@ static void RemoveTimestamp(int displayNum, string dbPath)
     int realId = GetRealId(displayNum, dbPath);
     if (realId == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number not found")); return; }
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // 1. 查当前标题
@@ -5135,7 +5142,7 @@ static float CosineSimilarity(float[] a, float[] b)
 // 注册/获取当前 embedding 模型，返回 Models.Id；维度变化时更新 IsCurrent
 static int EnsureModel(string dbPath, EmbeddingCfg emb)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Id FROM Models WHERE Provider = @p AND ModelName = @m AND ModelType = 'embedding'";
@@ -5165,7 +5172,7 @@ static int EnsureModel(string dbPath, EmbeddingCfg emb)
 // 检查是否需要重新索引（模型维度变化时提醒）
 static string? CheckDimensionMismatch(string dbPath, EmbeddingCfg emb)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT ModelName, Dimensions FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
@@ -5184,7 +5191,7 @@ static string? CheckDimensionMismatch(string dbPath, EmbeddingCfg emb)
 // 保存向量（幂等：同文章 + 同模型只留一条）
 static void SaveVector(string dbPath, int feedId, int itemId, int modelId, float[] vector)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
@@ -5212,7 +5219,7 @@ static async Task IndexArticlesCli(string[] extraArgs, string dbPath)
     Console.Write(Lang.T("Enter feed numbers to embed (comma-separated, \"all\" for all): "));
     string input = Console.ReadLine()?.Trim() ?? "";
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var feedIds = new List<int>();
     if (input.Equals("all", StringComparison.OrdinalIgnoreCase))
@@ -5281,7 +5288,7 @@ static async Task ReindexCli(string dbPath)
 {
     EnsureAiPrompted();
     var cfg = LoadConfig(dbPath);
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     var cmd = conn.CreateCommand();
@@ -5565,7 +5572,7 @@ static (List<string> Snippets, int Total) ExtractGrepSnippets(string haystack, s
 static List<GrepHit>? DoGrep(string keyword, string dbPath, int limit = 200, int? feedReal = null)
 {
     if (string.IsNullOrWhiteSpace(keyword)) { SetExit(); Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
 
     // FTS5 优先(百万级从秒级降到毫秒级);索引缺失/查询失败/短词(trigram 需 ≥3 字符)时回退 LIKE
@@ -5692,7 +5699,7 @@ static List<SearchHit>? DoSearch(string query, string dbPath, int? feedReal = nu
     var vec = SafeEmbed(query, cfg, json, sourceId: feedReal).GetAwaiter().GetResult();
     if (vec == null) return null;
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var modelCmd = conn.CreateCommand();
     modelCmd.CommandText = "SELECT Id FROM Models WHERE IsCurrent = 1 AND ModelType = 'embedding'";
@@ -5762,7 +5769,7 @@ static SearchHit? GetSearchHitForItem(string dbPath, int itemId, float score)
 {
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT i.Title, i.Description, i.Content, i.Link, i.FeedId, f.Title FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id AND i.Status = 'active'";
@@ -5787,7 +5794,7 @@ static SearchHit? GetSearchHitForItem(string dbPath, int itemId, float score)
 // 按真实 Id 更新单个源（TUI 用）
 static void RefreshOneFeed(int realId, string dbPath)
 {
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT FeedUrl FROM Feeds WHERE Id = @id";
@@ -5803,7 +5810,7 @@ static void DeleteArticleByGuid(string guid, string dbPath)
 {
     // 先取该 Guid 全部 Id（清理全文缓存与 sidecar 向量）
     var ids = new List<int>();
-    using (var q = new SqliteConnection($"Data Source={dbPath}"))
+    using (var q = OpenDb(dbPath))
     {
         q.Open();
         var c = q.CreateCommand();
@@ -5819,7 +5826,7 @@ static void DeleteArticleByGuid(string guid, string dbPath)
     }
     RemoveFulltextVecs(ids);
 
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "DELETE FROM Vectors WHERE ItemId IN (SELECT Id FROM Items WHERE Guid = @g)";
@@ -5879,7 +5886,7 @@ static async Task<string?> CallLlmAsync(string prompt, AiConfig cfg, int? articl
 static async Task<(bool Ok, string? Summary)> SummarizeItem(string dbPath, int itemId, bool json = false, bool quiet = false)
 {
     var cfg = LoadConfig(dbPath);
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Title, Content, Description, Summary, FeedId FROM Items WHERE Id = @id AND Status = 'active'";
@@ -5949,7 +5956,7 @@ static async Task SummaryCli(string arg, string dbPath, bool json = false)
         int feedReal = GetRealId(feedDisplay, dbPath);
         if (feedReal == 0) { SetExit(); Console.WriteLine(Lang.T("Feed number {0} not found", feedDisplay)); return; }
 
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active' AND FeedId = @fid AND (Summary IS NULL OR Summary = '')";
@@ -5998,7 +6005,7 @@ static async Task SummaryCli(string arg, string dbPath, bool json = false)
 static async Task SummaryAllCli(string dbPath)
 {
     EnsureAiPrompted();
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = "SELECT Id, Title FROM Items WHERE Status = 'active' AND (Summary IS NULL OR Summary = '')";
@@ -6217,8 +6224,9 @@ static string? SimonCheckBlock(string cmd, string[] args)
     return null;
 }
 
-// CLI:sip simon status [--json] | level <1|2|3>
-static void SimonCli(string[] args)
+// CLI:sip simon status [--json] | level <1|2|3> | export-key <file> | import-key <file>
+// fromTui=true 表示从 TUI 命令栏调用:降挡(关闭/调弱安全功能)只允许在 TUI 里进行
+static void SimonCli(string[] args, string dbPath, bool fromTui = false)
 {
     string sub = args.Length > 0 ? args[0].ToLowerInvariant() : "status";
     if (sub == "level")
@@ -6229,17 +6237,70 @@ static void SimonCli(string[] args)
         }
         var s = LoadSettings();
         int cur = Math.Clamp(s.SimonLevel, 1, 3);
-        if (lvl < cur && Console.IsInputRedirected)
+        if (lvl < cur && !fromTui)
         {
-            // 降挡必须交互终端:AI/脚本不能把守护调弱
+            // 降挡只能从 TUI 进行(真人坐在键盘前的强交互环境);
+            // CLI 一律拒绝——即使交互终端,CLI 也常被脚本/AI 包装调用,不能作为降挡通道
             SetExit();
-            Console.WriteLine(Lang.T("降挡需要真实交互终端(安全考虑,不接受管道输入)——孟思琳不允许被脚本调弱"));
+            Console.WriteLine(Lang.T("降挡只能在 TUI 界面里进行(安全考虑)——孟思琳不允许被脚本或 CLI 调弱"));
             return;
         }
         s.SimonLevel = lvl;
         SaveSettings(s);
         SimonRecord("level_change", $"{cur} → {lvl}", lvl);
         Console.WriteLine(Lang.T("孟思琳(simon) 守护挡位: {0} → {1}", cur, lvl));
+        // 升到挡位 3 → 加密 rss.db(明文库迁移为 SQLCipher;密钥存系统凭据库)
+        if (lvl >= 3 && cur < 3)
+        {
+            string? err = SimonEncryptDb(dbPath);
+            if (err == null) Console.WriteLine(Lang.T("数据文件已加密(SQLCipher),原库备份为 {0}", ".plaintext.bak"));
+            else { SetExit(); Console.WriteLine(Lang.T("加密失败: {0}(数据仍为明文,请重试)", err)); }
+        }
+        return;
+    }
+    if (sub == "export-key")
+    {
+        // 交互式导出密钥备份(换机迁移用);非交互拒绝——防脚本偷走密钥
+        if (Console.IsInputRedirected)
+        {
+            SetExit(); Console.WriteLine(Lang.T("export-key 需要真实交互终端(安全考虑,不接受管道输入)")); return;
+        }
+        if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip simon export-key <file>")); return; }
+        string file = args[1];
+        Console.WriteLine(Lang.T("即将把数据库加密密钥写入 {0}。该文件可解密你的全部数据,请妥善保管(如密码管理器)。继续? (y/n) ", file));
+        if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
+        try
+        {
+            File.WriteAllText(file, "sip-simon-key-v1\n" + SimonDbKey() + "\n");
+            Console.WriteLine(Lang.T("密钥已导出到 {0}", file));
+        }
+        catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("导出失败: {0}", ex.Message)); }
+        return;
+    }
+    if (sub == "import-key")
+    {
+        // 交互式导入密钥备份(换机恢复);非交互拒绝
+        if (Console.IsInputRedirected)
+        {
+            SetExit(); Console.WriteLine(Lang.T("import-key 需要真实交互终端(安全考虑,不接受管道输入)")); return;
+        }
+        if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip simon import-key <file>")); return; }
+        try
+        {
+            var lines = File.ReadAllLines(args[1]);
+            if (lines.Length < 2 || lines[0].Trim() != "sip-simon-key-v1")
+            {
+                SetExit(); Console.WriteLine(Lang.T("密钥文件格式不正确")); return;
+            }
+            string key = lines[1].Trim();
+            if (key.Length < 16) { SetExit(); Console.WriteLine(Lang.T("密钥文件格式不正确")); return; }
+            Console.WriteLine(Lang.T("将覆盖当前密钥(若库已加密且密钥不同,数据将无法读取)。继续? (y/n) "));
+            if (Console.ReadLine()?.Trim().ToLower() != "y") { Console.WriteLine(Lang.T("Cancelled")); return; }
+            CredSet("simon_db_key", key);
+            SimonRecord("key_import", "密钥已从备份导入");
+            Console.WriteLine(Lang.T("密钥已导入"));
+        }
+        catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("导入失败: {0}", ex.Message)); }
         return;
     }
     if (sub is "status" or "show" or "list")
@@ -6248,6 +6309,7 @@ static void SimonCli(string[] args)
         var evs = SimonLoadEvents();
         var repairs = evs.Where(e => e.Type == "repair_db").ToList();
         var blocks = evs.Where(e => e.Type == "blocked_cmd").ToList();
+        bool encrypted = File.Exists(Path.Combine(dataDir, ".db-encrypted"));
         if (args.Contains("--json", StringComparer.OrdinalIgnoreCase))
         {
             JsonOut(new
@@ -6258,6 +6320,7 @@ static void SimonCli(string[] args)
                     name = "孟思琳(simon)",
                     level,
                     canDisable = false,
+                    encryption = encrypted ? "on" : "off",
                     repairs = repairs.Count,
                     blocked = blocks.Count,
                     recent = evs.TakeLast(10).Select(e => new { ts = e.Ts, type = e.Type, level = e.Level, detail = e.Detail })
@@ -6268,6 +6331,8 @@ static void SimonCli(string[] args)
         string levelName = level switch { 2 => Lang.T("严格"), 3 => Lang.T("极致"), _ => Lang.T("基础") };
         Console.WriteLine(Lang.T("孟思琳(simon) 安全守护"));
         Console.WriteLine(Lang.T("挡位: {0}({1})——默认开启,无法关闭,只能调节", level, levelName));
+        Console.WriteLine(Lang.T("数据加密: {0}(密钥在系统凭据库,自动生成;开启后不可逆)", encrypted ? Lang.T("已开启") : Lang.T("未开启")));
+        Console.WriteLine(Lang.T("永远作为此软件的最后一道安全防线。"));
         Console.WriteLine(Lang.T("数据库修复: {0} 次", repairs.Count));
         foreach (var e in repairs.TakeLast(3))
             Console.WriteLine(Lang.T("  · {0} {1}", TryParseIso(e.Ts) is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : e.Ts, e.Detail));
@@ -6276,7 +6341,105 @@ static void SimonCli(string[] args)
             Console.WriteLine(Lang.T("  · {0} {1}", TryParseIso(e.Ts) is DateTime dt2 ? dt2.ToString("yyyy-MM-dd HH:mm") : e.Ts, e.Detail));
         return;
     }
-    SetExit(); Console.WriteLine(Lang.T("Usage: sip simon status [--json] | level <1|2|3>"));
+    SetExit(); Console.WriteLine(Lang.T("Usage: sip simon status [--json] | level <1|2|3> | export-key <file> | import-key <file>"));
+}
+
+// ── 数据加密(挡位 3:SQLCipher 加密 rss.db;敏感 JSON 文件 AES 加密)────────────────
+// 密钥只存系统凭据库(与 API Key 同机制),绝不落盘到项目文件
+
+static string SimonDbKey()
+{
+    string? k = CredGet("simon_db_key");
+    if (!string.IsNullOrEmpty(k)) return k;
+    var bytes = new byte[32];
+    System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+    k = Convert.ToBase64String(bytes);
+    CredSet("simon_db_key", k);
+    return k;
+}
+
+// 库是否明文(SQLite 魔数头);文件不存在视为明文(将新建)
+static bool IsPlaintextDb(string path)
+{
+    try
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+        Span<byte> head = stackalloc byte[16];
+        return fs.Read(head) >= 16 && head.SequenceEqual("SQLite format 3\0"u8);
+    }
+    catch { return true; }
+}
+
+// 统一打开数据库:数据目录存在 .db-encrypted 标记(挡位 3 加密过)时执行 PRAGMA key 解锁。
+// 不用连接字符串 Password(Microsoft.Data.Sqlite 9.x 会检查原生库是否支持加密,报错 'e_sqlite3');
+// PRAGMA key 在打开后、任何查询前执行,SQLCipher 标准用法。
+// 与挡位无关——降挡后加密库仍可读;挡位 3 只决定「是否把明文库迁移为加密」
+static SqliteConnection OpenDb(string dbPath)
+{
+    string dir = Path.GetDirectoryName(dbPath) ?? "";
+    bool encrypted = File.Exists(Path.Combine(dir, ".db-encrypted"));
+    var conn = new SqliteConnection($"Data Source={dbPath}");
+    conn.Open();
+    if (encrypted)
+    {
+        using var c = conn.CreateCommand();
+        // PRAGMA 不支持参数绑定;key 为 base64(仅 A-Za-z0-9+/=),无引号,拼接安全
+        c.CommandText = "PRAGMA key = '" + SimonDbKey() + "'";
+        c.ExecuteNonQuery();
+    }
+    return conn;
+}
+
+// 把明文 rss.db 迁移为 SQLCipher 加密(挡位 3 开启时调用;原文件备份 .plaintext.bak)。
+// 做法:带 key 的连接创建加密目标库,在其中 ATTACH 明文源逐表复制;
+// ItemsFts 及其 shadow 表(ItemsFts_*)不迁移——启动时 InitDatabase 重建,首次 grep 懒回填 FTS
+static string? SimonEncryptDb(string dbPath)
+{
+    try
+    {
+        if (File.Exists(dbPath) && IsPlaintextDb(dbPath))
+        {
+            string key = SimonDbKey();
+            string encPath = dbPath + ".enc";
+            if (File.Exists(encPath)) File.Delete(encPath);
+            using (var dst = new SqliteConnection($"Data Source={encPath}"))
+            {
+                dst.Open();   // 创建目标库
+                var c = dst.CreateCommand();
+                c.CommandText = "PRAGMA key = '" + key + "'";   // key 为 base64,无引号
+                c.ExecuteNonQuery();   // 之后创建的库即加密
+                c.CommandText = $"ATTACH DATABASE '{dbPath.Replace("'", "''")}' AS src KEY ''";
+                c.ExecuteNonQuery();
+                c.CommandText = "SELECT sql FROM src.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'ItemsFts%' AND sql IS NOT NULL";
+                var schemas = new List<string>();
+                using (var r = c.ExecuteReader())
+                    while (r.Read()) schemas.Add(r.GetString(0));
+                foreach (var s in schemas)
+                {
+                    c.CommandText = s.Replace("CREATE TABLE ", "CREATE TABLE main.");
+                    c.ExecuteNonQuery();
+                }
+                foreach (var t in new[] { "Feeds", "Items", "Models", "Vectors" })
+                {
+                    c.CommandText = $"INSERT INTO main.\"{t}\" SELECT * FROM src.\"{t}\"";
+                    c.ExecuteNonQuery();
+                }
+                c.CommandText = "INSERT INTO main.sqlite_sequence SELECT * FROM src.sqlite_sequence";
+                try { c.ExecuteNonQuery(); } catch { }
+                c.CommandText = "DETACH DATABASE src";
+                c.ExecuteNonQuery();
+            }
+            SqliteConnection.ClearAllPools();
+            File.Copy(dbPath, dbPath + ".plaintext.bak", overwrite: true);
+            File.Delete(dbPath);
+            File.Move(encPath, dbPath);
+            // 加密标记:OpenDb 据此执行 PRAGMA key(SQLCipher 4 文件头是标准头,无法靠头识别)
+            try { File.WriteAllText(Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted"), DateTime.Now.ToString("O")); } catch { }
+            return null;
+        }
+        return null;
+    }
+    catch (Exception ex) { return ex.Message; }
 }
 
 // 解析报告间隔：off / 0 → null；Nd → N 天；否则 null（无效）
@@ -6327,7 +6490,7 @@ static Dictionary<int, (int User, int Ai)> BuildFeedLikeStats(string dbPath)
         var ids = signals.Keys.Where(k => int.TryParse(k, out _)).Select(int.Parse).Distinct().ToList();
         if (ids.Count == 0) return result;
         var feedOf = new Dictionary<int, int>();
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = OpenDb(dbPath))
         {
             conn.Open();
             var c = conn.CreateCommand();
@@ -6384,7 +6547,7 @@ static string FeedStatusText(int feedId, string schedule, DateTime? lastChecked,
 static List<InsightsFeed> BuildInsights(string dbPath, int windowDays)
 {
     var feeds = new List<(int Id, string Title, string Schedule, DateTime? LastChecked, long Active)>();
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();

@@ -49,10 +49,12 @@ public sealed class SipInstance : IDisposable
         return (p.ExitCode, so, se);
     }
 
-    /// <summary>直接对隔离库执行 SQL(构造 fixture / 断言 DB 状态)。</summary>
+    /// <summary>直接对隔离库执行 SQL(构造 fixture / 断言 DB 状态)。
+    /// Pooling=False:连接用完即真正关闭,不占文件句柄——否则池连接会让
+    /// sip 子进程无法替换 rss.db(加密迁移时 File.Move 报"被其他进程占用")</summary>
     public void Exec(string sql, params (string Name, object Value)[] parameters)
     {
-        using var conn = new SqliteConnection($"Data Source={DbPath}");
+        using var conn = new SqliteConnection($"Data Source={DbPath};Pooling=False");
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
@@ -63,7 +65,7 @@ public sealed class SipInstance : IDisposable
 
     public string? QueryScalar(string sql, params (string Name, object Value)[] parameters)
     {
-        using var conn = new SqliteConnection($"Data Source={DbPath}");
+        using var conn = new SqliteConnection($"Data Source={DbPath};Pooling=False");
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;

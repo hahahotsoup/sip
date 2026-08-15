@@ -1,0 +1,19 @@
+{
+  "🔒 孟思琳(simon): 数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…": "🔒 Simon (孟思琳): database integrity check in progress (last exit was abnormal; ~30s on large DBs, one-time)…",
+  "哎呀，麻烦我修复下数据库——检测到损坏，已保留现场并重建：{0}": "Oh dear, let me fix the database — corruption detected, scene preserved and rebuilt: {0}",
+  "永远作为此软件的最后一道安全防线。": "Forever the last line of defense for this software.",
+  "🔒 孟思琳(simon) 拦截: {0}": "🔒 Simon blocked: {0}",
+  "挡位 3(极致):非交互调用已禁止写操作({0});只读命令仍可用。交互终端或调低挡位可解除": "Level 3 (max): non-interactive writes are blocked ({0}); read-only commands still work. Use an interactive terminal or lower the level.",
+  "挡位 {0}(严格):非交互调用已禁止破坏性操作({1})": "Level {0} (strict): destructive operations blocked for non-interactive calls ({1})",
+  "降挡需要真实交互终端(安全考虑,不接受管道输入)——孟思琳不允许被脚本调弱": "Downgrading requires a real interactive terminal (security) — Simon cannot be weakened by scripts",
+  "孟思琳(simon) 守护挡位: {0} → {1}": "Simon guardian level: {0} → {1}",
+  "孟思琳(simon) 安全守护": "Simon security guardian",
+  "挡位: {0}({1})——默认开启,无法关闭,只能调节": "Level: {0} ({1}) — always on, cannot be disabled, level only",
+  "数据库修复: {0} 次": "Database repairs: {0}",
+  "已拦截非交互调用: {0} 次": "Non-interactive calls blocked: {0}",
+  "基础": "basic",
+  "严格": "strict",
+  "极致": "max",
+  "🔒 孟思琳(simon) 则永远在岗：数据库自愈、SSRF 防护、终端注入拦截、非交互调用管控——默认开启且无法关闭，只能调节挡位。永远作为此软件的最后一道安全防线。": "🔒 Simon (孟思琳) stands guard always: DB self-heal, SSRF protection, terminal-injection stripping, non-interactive call control — on by default, cannot be disabled, level only. Forever the last line of defense.",
+  "苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？\n\n🔒 孟思琳(simon) 守护着这一切——默认开启、无法关闭，永远作为此软件的最后一道安全防线。": "Sumenia will record: which articles are opened/finished/skipped, plus AI calls and searches. Data stays local only, sip never uploads. Enable?\n\n🔒 Simon guards all of this — always on, cannot be disabled, forever the last line of defense."
+}

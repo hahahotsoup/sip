@@ -102,7 +102,7 @@ static void ShowTodayPage(string dbPath)
             return;
         }
         string body = "";
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = OpenDb(dbPath))
         {
             conn.Open();
             var c = conn.CreateCommand();
@@ -305,7 +305,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             int chars = 0;
             try
             {
-                using var conn = new SqliteConnection($"Data Source={dbPath}");
+                using var conn = OpenDb(dbPath);
                 conn.Open();
                 var c = conn.CreateCommand();
                 c.CommandText = "SELECT LENGTH(COALESCE(Content,'')), LENGTH(COALESCE(Description,'')) FROM Items WHERE Id = @id";
@@ -358,6 +358,10 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             }
         }
 
+        // 全库计数缓存:在 RebuildTree 时一次算好。
+        // UpdateStats 只读缓存——百万级库的 COUNT(*) 需 200ms+,每次按键都查会让键盘不跟手
+        int _statsFeeds = 0, _statsArticles = 0;
+
         void UpdateStats()
         {
             // 检测到阅读进度时，状态行优先显示跳转提示（标题栏会截断，这里更显眼）
@@ -366,20 +370,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 statsLabel.Text = Lang.T("▷ 按 Space 跳回上次位置");
                 return;
             }
-            int feeds = 0, articles = 0;
-            try
-            {
-                using var conn = new SqliteConnection($"Data Source={dbPath}");
-                conn.Open();
-                var c = conn.CreateCommand();
-                c.CommandText = "SELECT (SELECT COUNT(*) FROM Feeds), (SELECT COUNT(*) FROM Items WHERE Status = 'active')";
-                using var rr = c.ExecuteReader();
-                if (rr.Read()) { feeds = rr.GetInt32(0); articles = rr.GetInt32(1); }
-            }
-            catch { }
             var (cur, tot) = tree.ArticlePosition();
-            statsLabel.Text = Lang.T("feeds {0} · article {1}/{2}", feeds, cur, Math.Max(articles, tot));
-            top.Title = $" sip RSS Reader · {Lang.T("feeds {0}", feeds)} ";
+            statsLabel.Text = Lang.T("feeds {0} · article {1}/{2}", _statsFeeds, cur, Math.Max(_statsArticles, tot));
+            top.Title = $" sip RSS Reader · {Lang.T("feeds {0}", _statsFeeds)} ";
         }
 
         // 正文/概要模式 + 链接导航状态（供状态栏快捷键引用）
@@ -475,16 +468,20 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
         void RebuildTree()
         {
             var feeds = new List<TuiNode>();
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            int totalActive = 0;
+            using var conn = OpenDb(dbPath);
             conn.Open();
             var cmd = conn.CreateCommand();
+            // 一次 GROUP BY 拿全部源的计数(原每源 3 个相关子查询,百万库 100 源要扫 300 万行)
             cmd.CommandText = @"
-                SELECT Id, Title,
-                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'active')   AS ActiveCount,
-                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'archived') AS ArchiveCount,
-                       (SELECT COUNT(*) FROM Items WHERE FeedId = Feeds.Id AND Status = 'deleted')  AS DeleteCount
-                FROM Feeds
-                ORDER BY Id
+                SELECT f.Id, f.Title,
+                       COUNT(i.Id) FILTER (WHERE i.Status = 'active')   AS ActiveCount,
+                       COUNT(i.Id) FILTER (WHERE i.Status = 'archived') AS ArchiveCount,
+                       COUNT(i.Id) FILTER (WHERE i.Status = 'deleted')  AS DeleteCount
+                FROM Feeds f
+                LEFT JOIN Items i ON i.FeedId = f.Id
+                GROUP BY f.Id
+                ORDER BY f.Id
             ";
             using var r = cmd.ExecuteReader();
             while (r.Read())
@@ -494,6 +491,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 int active = r.GetInt32(2);
                 int archive = r.GetInt32(3);
                 int deleted = r.GetInt32(4);
+                totalActive += active;
                 var parts = new List<string>();
                 if (active > 0) parts.Add(Lang.T("{0} current", active + deleted));
                 if (archive > 0) parts.Add(Lang.T("{0} changed", archive));
@@ -501,6 +499,8 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 string stats = string.Join("，", parts);
                 feeds.Add(new TuiNode { IsFeed = true, FeedId = id, Title = $"{CjkSpace(title)} {stats}" });
             }
+            _statsFeeds = feeds.Count;
+            _statsArticles = totalActive;
             tree.SetFeeds(feeds);   // 默认折叠；用户展开的源在 SetFeeds 里会保留
             UpdateStats();
         }
@@ -547,7 +547,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             if (n == null || n.IsFeed || string.IsNullOrEmpty(n.Guid)) return;
 
             var versions = new List<(long Id, int Version, string Status, string At)>();
-            using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+            using (var conn = OpenDb(dbPath))
             {
                 conn.Open();
                 var cmd = conn.CreateCommand();
@@ -659,7 +659,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
 
         void RefreshAllFeeds()
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            using var conn = OpenDb(dbPath);
             conn.Open();
             var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT Id, FeedUrl FROM Feeds";
@@ -788,7 +788,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
 
         void ShowHelpDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("Keyboard help") + " ", Width = 56, Height = 22 };
+            // 全屏对话框:内容一屏放下,不需要滚动;初始焦点给 OK 按钮
+            // (焦点在按钮上时 ←/→ 切换按钮、Enter 确认——避免焦点落在 TextView 上方向键全被吞)
+            var dlg = new Dialog { Title = " " + Lang.T("Keyboard help") + " ", Width = Dim.Fill(), Height = Dim.Fill() };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
@@ -830,12 +832,13 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             dlg.Add(txt, ok, about);
             ok.Accepted += (s, e) => dlg.RequestStop();
             about.Accepted += (s, e) => { dlg.RequestStop(); ShowAboutDialog(); };
+            dlg.Initialized += (s, e) => ok.SetFocus();   // 焦点给按钮,方向键/Enter 可用
             Application.Run(dlg);
         }
 
         void ShowAboutDialog()
         {
-            var dlg = new Dialog { Title = " " + Lang.T("About") + " ", Width = 60, Height = 18 };
+            var dlg = new Dialog { Title = " " + Lang.T("About") + " ", Width = Dim.Fill(), Height = Dim.Fill() };
             var txt = new TextView
             {
                 X = 0, Y = 0, Width = Dim.Fill(2), Height = Dim.Fill(2),
@@ -857,6 +860,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();
+            dlg.Initialized += (s, e) => ok.SetFocus();
             Application.Run(dlg);
         }
 
@@ -1173,9 +1177,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
         void EnsureTelemetryConsentTui()
         {
             if (TelemetryService.Consent != "unset") return;
-            var dlg = new Dialog { Title = " " + Lang.T("苏暖泉") + " ", Width = 78, Height = 16 };
-            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 10, ReadOnly = true, CanFocus = false, WordWrap = true };
-            txt.Text = Lang.T("苏暖泉是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用与搜索情况，用于未来改进内容筛选。\n\n苏暖泉默认不在。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你随时可用 telemetry disable 关闭、export 导出。");
+            var dlg = new Dialog { Title = " " + Lang.T("苏暖泉") + " ", Width = 78, Height = 20 };
+            var txt = new TextView { X = 0, Y = 0, Width = Dim.Fill(2), Height = 13, ReadOnly = true, CanFocus = false, WordWrap = true };
+            txt.Text = Lang.T("苏暖泉是一个会主动了解你阅读习惯的软萌妹纸：她会记录哪些文章被打开/读完/跳过、AI 调用与搜索情况，用于未来改进内容筛选。\n\n苏暖泉默认不在。开启后数据仅保存在本机 telemetry.db，sip 绝不会自动上传；你随时可用 telemetry disable 关闭、export 导出。\n\n🔒 孟思琳(simon) 则永远在岗：数据库自愈、SSRF 防护、终端注入拦截、非交互调用管控——默认开启且无法关闭，只能调节挡位。永远作为此软件的最后一道安全防线。");
             var enable = new Button { Text = Lang.T("与苏暖泉共同阅读"), IsDefault = false, X = 0, Y = Pos.Bottom(txt) + 1 };
             var keep = new Button { Text = Lang.T("我暂时不需要"), IsDefault = true, X = Pos.Right(enable) + 2, Y = Pos.Bottom(txt) + 1 };
             dlg.Add(txt, enable, keep);
@@ -1373,7 +1377,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                     if (tsub == "enable")
                     {
                         // TUI 里不静默开启：先弹确认
-                        if (Ask(Lang.T("苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？"), Lang.T("开启"), Lang.T("取消")) == 0)
+                        if (Ask(Lang.T("苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？\n\n🔒 孟思琳(simon) 守护着这一切——默认开启、无法关闭，永远作为此软件的最后一道安全防线。"), Lang.T("开启"), Lang.T("取消")) == 0)
                             RunCliCommandInTui(() => TelemetryCli(new[] { "enable", "--yes" }, dbPath));
                         return;
                     }
@@ -1389,6 +1393,19 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 case "onboarding" or "--onboarding":
                     RunCliCommandInTui(() => OnboardingCli(string.IsNullOrEmpty(arg) ? new string[] { } : arg.Split(' '), dbPath));
                     return;
+                case "simon" or "--simon":
+                {
+                    // 孟思琳(simon)守护:从 TUI 可升降挡(降挡是唯一被允许的通道,需确认)
+                    var spos = (arg ?? "").Split(' ').Where(x => x.Length > 0).ToArray();
+                    if (spos.Length >= 2 && spos[0].Equals("level", StringComparison.OrdinalIgnoreCase)
+                        && int.TryParse(spos[1], out int lvl) && lvl < LoadSettings().SimonLevel)
+                    {
+                        if (Ask(Lang.T("确定要把孟思琳(simon)守护挡位从 {0} 降到 {1} 吗?(降挡后仍无法关闭,只能再升回)", LoadSettings().SimonLevel, lvl), Lang.T("降挡"), Lang.T("取消")) != 0)
+                            return;
+                    }
+                    RunCliCommandInTui(() => SimonCli(spos, dbPath, fromTui: true));
+                    return;
+                }
                 default:
                     Ask(Lang.T("Unknown command: {0}. Press H for help", cmd), Lang.T("OK"));
                     return;
@@ -1573,7 +1590,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 return;
             }
             var cfg = LoadConfig(dbPath);
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            using var conn = OpenDb(dbPath);
             conn.Open();
             var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -1622,7 +1639,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             if (ans != 0) return;
 
             var cfg = LoadConfig(dbPath);
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            using var conn = OpenDb(dbPath);
             conn.Open();
             var cmd = conn.CreateCommand();
             cmd.CommandText = "DELETE FROM Vectors";
@@ -1820,10 +1837,19 @@ static List<string> DashboardStats(string dbPath)
     long dbSize = 0; string lastSync = "";
     try
     {
-        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        using var conn = OpenDb(dbPath);
         conn.Open();
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT (SELECT COUNT(*) FROM Feeds), (SELECT COUNT(*) FROM Items WHERE Status='active'), (SELECT COUNT(*) FROM Items), (SELECT COUNT(*) FROM Items WHERE Status='archived'), (SELECT COUNT(*) FROM Vectors), (SELECT MAX(LastCheckedAt) FROM Feeds)";
+        // 合并为一次 Items 扫描 + 两个小表(原 6 个独立全库 COUNT,百万库要扫 5 遍)
+        cmd.CommandText = @"
+            SELECT f.feeds, i.total, i.active, i.archived, v.vectors, f.lastSync
+            FROM (SELECT COUNT(*) AS feeds, MAX(LastCheckedAt) AS lastSync FROM Feeds) f,
+                 (SELECT COUNT(*) AS total,
+                         COUNT(*) FILTER (WHERE Status = 'active') AS active,
+                         COUNT(*) FILTER (WHERE Status = 'archived') AS archived
+                  FROM Items) i,
+                 (SELECT COUNT(*) AS vectors FROM Vectors) v
+        ";
         using var r = cmd.ExecuteReader();
         if (r.Read())
         {
@@ -1870,7 +1896,7 @@ static void ShowFeedManager(string dbPath)
     void Rebuild()
     {
         var rows = new List<(int Id, string Line)>();
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = OpenDb(dbPath))
         {
             conn.Open();
             var c = conn.CreateCommand();
@@ -1983,7 +2009,7 @@ static void AdjustHour(List<string> presets, int idx, int delta)
 static void SchedulePickerDialog(int realId, string dbPath)
 {
     string current = "";
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -2052,7 +2078,7 @@ static void ScheduleCustomDialog(int realId, string dbPath)
 static void FeedEditDialog(int realId, string dbPath)
 {
     string title = "", schedule = "";
-    using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+    using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var c = conn.CreateCommand();
@@ -2134,7 +2160,7 @@ static List<string> TodayStartScreenLines(string dbPath)
 
         // 首次启动（还没有订阅源）：不显示空清单，给引导文案
         int feedCount = 0;
-        using (var conn = new SqliteConnection($"Data Source={dbPath}"))
+        using (var conn = OpenDb(dbPath))
         {
             conn.Open();
             var c = conn.CreateCommand();
@@ -2277,7 +2303,7 @@ static Markdown CreateMarkdownView()
 static IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath, int limit = 0)
 {
     var nodes = new List<TuiNode>();
-    using var conn = new SqliteConnection($"Data Source={dbPath}");
+    using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
