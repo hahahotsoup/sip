@@ -6250,12 +6250,16 @@ static string? SimonCheckBlock(string cmd, string[] args)
 // fromTui=true 表示从 TUI 命令栏调用:降挡(关闭/调弱安全功能)只允许在 TUI 里进行
 static void SimonCli(string[] args, string dbPath, bool fromTui = false)
 {
+    bool json = args.Contains("--json", StringComparer.OrdinalIgnoreCase);
     string sub = args.Length > 0 ? args[0].ToLowerInvariant() : "status";
     if (sub == "level")
     {
         if (args.Length < 2 || !int.TryParse(args[1], out int lvl) || lvl is < 1 or > 3)
         {
-            SetExit(); Console.WriteLine(Lang.T("Usage: sip simon level <1|2|3>  (1=基础 2=严格 3=极致;无法关闭)")); return;
+            SetExit();
+            if (json) JsonOut(new { success = false, error = new { code = "USAGE", message = Lang.T("Usage: sip simon level <1|2|3>  (1=基础 2=严格 3=极致;无法关闭)") } });
+            else Console.WriteLine(Lang.T("Usage: sip simon level <1|2|3>  (1=基础 2=严格 3=极致;无法关闭)"));
+            return;
         }
         var s = LoadSettings();
         int cur = Math.Clamp(s.SimonLevel, 1, 3);
@@ -6264,13 +6268,13 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
             // 降挡只能从 TUI 进行(真人坐在键盘前的强交互环境);
             // CLI 一律拒绝——即使交互终端,CLI 也常被脚本/AI 包装调用,不能作为降挡通道
             SetExit();
-            Console.WriteLine(Lang.T("降挡只能在 TUI 界面里进行(安全考虑)——孟思琳不允许被脚本或 CLI 调弱"));
+            if (json) JsonOut(new { success = false, error = new { code = "SIMON_LOCKED", level = cur, message = Lang.T("降挡只能在 TUI 界面里进行(安全考虑)——孟思琳不允许被脚本或 CLI 调弱") } });
+            else Console.WriteLine(Lang.T("降挡只能在 TUI 界面里进行(安全考虑)——孟思琳不允许被脚本或 CLI 调弱"));
             return;
         }
         s.SimonLevel = lvl;
         SaveSettings(s);
         SimonRecord("level_change", $"{cur} → {lvl}", lvl);
-        Console.WriteLine(Lang.T("孟思琳(simon) 守护挡位: {0} → {1}", cur, lvl));
         // 升到挡位 3 → 加密 rss.db(明文库迁移为 SQLCipher;密钥存系统凭据库)
         if (lvl >= 3 && cur < 3)
         {
@@ -6278,9 +6282,20 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
             if (err == null)
             {
                 SimonEncryptSensitiveFiles();   // 迁移 fulltext 缓存 + dedup.json 为 AES 加密
-                Console.WriteLine(Lang.T("数据文件已加密(SQLCipher),原库备份为 {0}", ".plaintext.bak"));
+                if (json) JsonOut(new { success = true, data = new { level = lvl, encryption = "on", backup = ".plaintext.bak" } });
+                else Console.WriteLine(Lang.T("数据文件已加密(SQLCipher),原库备份为 {0}", ".plaintext.bak"));
             }
-            else { SetExit(); Console.WriteLine(Lang.T("加密失败: {0}(数据仍为明文,请重试)", err)); }
+            else
+            {
+                SetExit();
+                if (json) JsonOut(new { success = false, error = new { code = "ENCRYPT_FAILED", level = lvl, message = err } });
+                else Console.WriteLine(Lang.T("加密失败: {0}(数据仍为明文,请重试)", err));
+            }
+        }
+        else
+        {
+            if (json) JsonOut(new { success = true, data = new { level = lvl } });
+            else Console.WriteLine(Lang.T("孟思琳(simon) 守护挡位: {0} → {1}", cur, lvl));
         }
         return;
     }
