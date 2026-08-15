@@ -6215,14 +6215,10 @@ static List<SimonEvent> SimonLoadEvents()
 
 static int CurrentSimonLevel() => Math.Clamp(LoadSettings().SimonLevel, 1, 3);
 
-// 挡位 2 的破坏性命令(不可逆/清空类):非交互调用拒绝
-static bool SimonIsDestructive(string cmd, string sub)
-    => cmd is "-r" or "--remove" or "--purge-fulltext"
-       || (cmd == "telemetry" && sub == "clear")
-       || (cmd == "--dedup" && sub is "undo" or "hide" or "hide-cluster")
-       || (cmd == "--policy" && sub == "remove");
+// 挡位 2 的写命令 = 一切非只读命令(用户语义:2 级起不允许写入数据库)
+// 挡位 3 = 所有 CLI 调用(唯一例外 simon status,见 SimonCheckBlock)
 
-// 挡位 3 的读命令白名单(其余全是写,非交互拒绝)
+// 挡位 3 的读命令白名单(挡位 2 用:非只读即写,一律拦截)
 static bool SimonIsReadOnly(string cmd, string sub)
     => cmd is "-l" or "--list" or "--show" or "--content" or "--versions" or "--history"
           or "--diff" or "--grep" or "--search" or "--today" or "--feed-info" or "--export-opml"
@@ -6231,18 +6227,19 @@ static bool SimonIsReadOnly(string cmd, string sub)
        || (cmd == "--dedup" && sub is "list" or "scan")
        || (cmd == "--policy" && sub == "list");
 
-// 统一拦截入口:返回被拦截的原因;null=放行
+// 统一拦截入口:返回被拦截的原因;null=放行。
+// 用户语义:挡位 2 = CLI 写操作一律拒绝;挡位 3 = CLI 所有调用一律拒绝。
+// CLI 本身(含交互终端)是不可信通道;TUI 命令栏不经此检查,永远是真人通道。
+// 唯一例外:simon status(守护状态查询)在任意挡位放行,否则挡位 3 下无法查看守护状态。
 static string? SimonCheckBlock(string cmd, string[] args)
 {
-    if (Console.IsInputRedirected)   // 非交互(脚本/Agent/管道)才拦;交互终端用户就在键盘前
-    {
-        int level = CurrentSimonLevel();
-        string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "";
-        if (level >= 3 && !SimonIsReadOnly(cmd, sub))
-            return Lang.T("挡位 3(极致):非交互调用已禁止写操作({0});只读命令仍可用。交互终端或调低挡位可解除", cmd);
-        if (level >= 2 && SimonIsDestructive(cmd, sub))
-            return Lang.T("挡位 {0}(严格):非交互调用已禁止破坏性操作({1})", level, cmd);
-    }
+    int level = CurrentSimonLevel();
+    string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "";
+    bool isSimonStatus = cmd == "simon" && (sub is "" or "status" or "show" or "list" or "--json");
+    if (level >= 3 && !isSimonStatus)
+        return Lang.T("挡位 3(极致):CLI 调用已全部拒绝({0});只允许通过 TUI 使用。", cmd);
+    if (level >= 2 && !SimonIsReadOnly(cmd, sub))
+        return Lang.T("挡位 {0}(严格):CLI 写操作已拒绝({1});只读命令可用,或到 TUI 操作。", level, cmd);
     return null;
 }
 
@@ -6438,6 +6435,9 @@ static string? SimonEncryptDb(string dbPath)
 {
     try
     {
+        // 幂等:已加密(.db-encrypted 标记)直接跳过——SQLCipher 4 保留标准文件头,
+        // 不能用 IsPlaintextDb 判断;否则降挡后再次升挡会误判明文、尝试重复加密
+        if (File.Exists(Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted"))) return null;
         if (File.Exists(dbPath) && IsPlaintextDb(dbPath))
         {
             string key = SimonDbKey();

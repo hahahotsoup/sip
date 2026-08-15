@@ -34,18 +34,21 @@ public class SimonTests
     }
 
     [Fact]
-    public void Level2_BlocksDestructive_NonInteractive()
+    public void Level2_BlocksAllWrites_ReadOnlyStillWorks()
     {
         using var sip = NewInstance();
         Assert.Equal(0, sip.Run("simon", "level", "2").ExitCode);
 
-        var (exit, stdout, _) = sip.Run("-r", "1", "--yes");
-        Assert.Equal(3, exit);
-        Assert.Contains("孟思琳", stdout);
+        // 挡位 2:CLI 写操作一律拒绝(无论交互/非交互)——删除、更新、添加、点赞全拒
+        Assert.Equal(3, sip.Run("-r", "1", "--yes").ExitCode);
+        Assert.Equal(3, sip.Run("-u", "1").ExitCode);
+        Assert.Equal(3, sip.Run("-d", "http://example.com/f.xml").ExitCode);
+        Assert.Equal(3, sip.Run("--like", "1").ExitCode);
+        Assert.Contains("孟思琳", sip.Run("-r", "1", "--yes").Stdout);
 
         // 只读命令不受影响
-        var (exit2, _, _) = sip.Run("-l");
-        Assert.Equal(0, exit2);
+        Assert.Equal(0, sip.Run("-l").ExitCode);
+        Assert.Equal(0, sip.Run("simon", "status").ExitCode);
 
         // 拦截事件已记录
         var (exit3, status, _) = sip.Run("simon", "status", "--json");
@@ -63,16 +66,19 @@ public class SimonTests
     }
 
     [Fact]
-    public void Level3_BlocksAllWrites_ReadOnlyStillWorks()
+    public void Level3_BlocksAllCli_ExceptSimonStatus()
     {
         using var sip = NewInstance();
         Assert.Equal(0, sip.Run("simon", "level", "3").ExitCode);
 
-        Assert.Equal(3, sip.Run("-u", "1").ExitCode);          // 更新(写)
-        Assert.Equal(3, sip.Run("--like", "1").ExitCode);      // 点赞(写)
-        Assert.Equal(0, sip.Run("-l").ExitCode);               // 列表(读)
-        Assert.Equal(0, sip.Run("--grep", "熊猫").ExitCode);   // 搜索(读)
-        Assert.Equal(0, sip.Run("simon", "status").ExitCode);  // simon 自身(读)
+        // 挡位 3:CLI 所有调用一律拒绝(读写都拒)
+        Assert.Equal(3, sip.Run("-u", "1").ExitCode);          // 写
+        Assert.Equal(3, sip.Run("--like", "1").ExitCode);      // 写
+        Assert.Equal(3, sip.Run("-l").ExitCode);               // 读也拒
+        Assert.Equal(3, sip.Run("--grep", "熊猫").ExitCode);   // 读也拒
+        Assert.Equal(3, sip.Run("--help").ExitCode);           // 帮助也拒
+        // 唯一例外:simon status(守护状态查询)
+        Assert.Equal(0, sip.Run("simon", "status").ExitCode);
     }
 
     [Fact]
