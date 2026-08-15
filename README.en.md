@@ -1,4 +1,4 @@
-﻿# 🍲 sip
+# 🍲 sip
 
 > **English** | [**简体中文**](./README.md)
 
@@ -94,6 +94,8 @@ Which is also why telemetry is off by default and AI just quietly watches — it
 
 📜 **Version tracking**: author changes a claim or a number, you see the diff — almost like git.
 
+🔒 **Simon (孟思琳)**: the always-on security guardian — DB self-heal, SSRF/terminal-injection protection, non-interactive call control. On by default, cannot be disabled, level only.
+
 ## As for how to use it
 
 Besides clicking in the UI, the CLI works too:
@@ -109,6 +111,27 @@ Oh, and `sip --init` asks for your API key, so run it yourself in a real termina
 ## Want AI to answer only from sources you trust?
 
 Wire sip into a group or bot with OpenClaw or Cherry Studio — it answers only from your subscribed sources. Junk citations, goodbye. Setup steps: [Wiki · Bot Integration](https://sip.hotsouprealm.top/使用/Bot.html).
+
+## About security
+
+sip is conservative by nature, because it believes information is yours first:
+
+- All data stays local — no sign-up, no cloud, no upload. Copy `readwithhotsoup` and you've migrated.
+- Telemetry is off by default; only after you turn it on does it record locally, never uploading; clear/export anytime.
+- Full-text fetching has SSRF protection: http/https only; internal/loopback/cloud-metadata addresses rejected.
+- The database has integrity checks and WAL — it self-heals after crashes, no data loss.
+- `--init` must be run manually in a real terminal — API keys never enter scripts or logs.
+- Sensitive records (search terms) stay local; clear with `telemetry export/clear` anytime.
+- **Simon (孟思琳) security guardian**: DB self-heal, SSRF/terminal-injection protection — on by default, cannot be disabled, level only (`sip simon status`). Level 2 rejects all CLI writes; level 3 rejects all CLI calls (only `simon status` remains; everything goes through the TUI, and downgrades only in the TUI command bar). Level 3 also encrypts all data (SQLCipher + AES) with an auto-generated key in the OS credential store (scoped per data directory, so multiple copies don't interfere) — other software can't read your data; migrate machines with `sip simon export-key`.
+
+In one sentence: it doesn't collect, track, or secretly upload your stuff.
+
+## Recently
+
+- ⚡ **Million-scale adaptation**: on a 1M-article library — `--grep` full-text search 2.2s → 0.5s (FTS5, Chinese substring searchable), the TUI opens instantly (lazy sidebar), `--today` 7.5s → 3s, whole-feed updates in one transaction.
+- 🧪 **Automated test baseline**: 38 process-level black-box cases (CLI contract / SSRF matrix / dedup invariants / terminal injection / Simon guard & encryption round-trips) + GitHub Actions CI — automatic regression on every change.
+- 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — level 3 encrypts everything; keys are auto-generated in the OS credential store; you never have to remember any key.
+- 🌐 **sip-web**: an optional local web UI (Python stdlib + single HTML, zero dependencies) that translates browser requests into sip CLI calls — [github.com/hahahotsoup/sip-webapiextra](https://github.com/hahahotsoup/sip-webapiextra)
 
 ## More
 

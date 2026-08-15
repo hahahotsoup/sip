@@ -108,15 +108,16 @@ sip 天生保守，因为它觉得信息首先是你的：
 - 数据库带完整性检查和 WAL，就算崩溃也能自愈，不丢数据
 - `--init` 只让你在真实终端手动跑——API Key 不进脚本、不进日志
 - 搜索词等敏感记录只在本地，可 `telemetry export/clear` 随时清掉
-- **孟思琳(simon)安全守护**：数据库损坏自动修复、SSRF/终端注入防护、非交互调用管控——默认开启、无法关闭、只能调节挡位（`sip simon status`，降挡只能在 TUI 命令栏）。挡位 3 可对整个数据文件加密（SQLCipher + AES），密钥自动生成、只存系统凭据库，其他软件读不到你的数据；换机迁移用 `sip simon export-key`
+- **孟思琳(simon)安全守护**：数据库损坏自动修复、SSRF/终端注入防护——默认开启、无法关闭、只能调节挡位（`sip simon status`）。挡位 2 起 CLI 写操作一律拒绝，挡位 3 起 CLI 全部拒绝（只留 `simon status`，一切操作走 TUI；降挡只能在 TUI 命令栏）。挡位 3 同时加密全部数据（SQLCipher + AES），密钥自动生成、只存系统凭据库（按数据目录隔离，多副本互不影响），其他软件读不到你的数据；换机迁移用 `sip simon export-key`
 
 一句话：它不收集、不追踪、不偷偷上传你的东西。
 
 ## 最近在折腾什么
 
 - ⚡ **百万级适配**：100 万篇文章的库实测——`--grep` 全文搜索 2.2 秒 → 0.5 秒（FTS5 索引，中文子串可搜），TUI 秒开（侧栏懒加载），`--today` 7.5 秒 → 3 秒，大源更新一次事务提交
-- 🧪 **自动化测试基线**：37 个进程级黑盒用例（CLI 契约 / SSRF 矩阵 / 去重不变量 / 终端注入 / simon 守护与加密往返）+ GitHub Actions CI——每次改动自动回归
+- 🧪 **自动化测试基线**：38 个进程级黑盒用例（CLI 契约 / SSRF 矩阵 / 去重不变量 / 终端注入 / simon 守护与加密往返）+ GitHub Actions CI——每次改动自动回归
 - 🔒 **孟思琳(simon)**：默认开启、无法关闭的安全守护（见上节），挡位 3 给全部数据加密（SQLCipher + AES），密钥自动生成只存系统凭据库——其他软件读不到你的数据，你也不用记任何密钥
+- 🌐 **sip-web**：可选的本地 Web 界面（Python 标准库 + 单页 HTML，零依赖），把浏览器请求翻译成 sip CLI 调用——[github.com/hahahotsoup/sip-webapiextra](https://github.com/hahahotsoup/sip-webapiextra)
 
 ## 更细的东西
 
