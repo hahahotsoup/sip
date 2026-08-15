@@ -1221,17 +1221,20 @@ static List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
     {
         conn.Open();
         var cmd = conn.CreateCommand();
+        // 只考虑近 30 天文章:评分里 7 天外全是负分,旧文不可能进今日哈汤;
+        // 且不读 Content/Description 全文本(只取长度)——百万库全表+全文读取曾是启动页卡死的元凶
         cmd.CommandText = @"
-            SELECT Id, Title, PublishDate, Version, Content, Description, FeedTitle
+            SELECT Id, Title, PublishDate, Version, LENGTH(Content), LENGTH(Description), FeedTitle
             FROM (
                 SELECT i.Id, i.Title, i.PublishDate, i.Version, i.Content, i.Description,
                        i.Guid, f.Title AS FeedTitle,
                        ROW_NUMBER() OVER (PARTITION BY i.Guid ORDER BY i.Version DESC) AS rn
                 FROM Items i JOIN Feeds f ON i.FeedId = f.Id
-                WHERE i.Status = 'active' AND i.Guid IS NOT NULL
+                WHERE i.Status = 'active' AND i.Guid IS NOT NULL AND i.PublishDate >= @cut
             )
             WHERE Guid = '' OR rn = 1
             ORDER BY Id";
+        cmd.Parameters.AddWithValue("@cut", now.AddDays(-30).ToString("O"));
         using var r = cmd.ExecuteReader();
         while (r.Read())
         {
@@ -1239,8 +1242,8 @@ static List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
             string title = r.GetString(1);
             DateTime? pub = r.IsDBNull(2) ? null : TryParseIso(r.GetString(2));
             int version = r.GetInt32(3);
-            string content = r.IsDBNull(4) ? "" : r.GetString(4);
-            string desc = r.IsDBNull(5) ? "" : r.GetString(5);
+            int contentLen = r.IsDBNull(4) ? 0 : r.GetInt32(4);
+            int descLen = r.IsDBNull(5) ? 0 : r.GetInt32(5);
             string source = r.GetString(6);
 
             int score = 0;
@@ -1249,7 +1252,7 @@ static List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
             else if (pub is DateTime p2 && p2 >= now.AddDays(-7)) { score += 1; }
             else score -= 1;
             if (version > 1) { score += 2; reasons.Add(Lang.T("有更新")); }
-            string q = ContentQuality(content, desc);
+            string q = ContentQualityByLen(contentLen, descLen);
             if (q == "full") score += 1;
             else if (q == "empty") score -= 1;
             if (q == "short") reasons.Add(Lang.T("仅摘要"));
@@ -1260,7 +1263,7 @@ static List<TodayItem> BuildTodayList(string dbPath, int limit = 10)
                 if (sig.UserLike) { score += 2; reasons.Add(Lang.T("你收藏过")); }
             }
 
-            int chars = Math.Max(content.Length, desc.Length);
+            int chars = Math.Max(contentLen, descLen);
             double minutes = Math.Max(0.5, Math.Round(chars / (5.0 * 60.0), 1));   // ≈300 字/分
             // 没有任何具体理由时给个兜底（近期可读全文）
             if (reasons.Count == 0) reasons.Add(q == "short" ? Lang.T("仅摘要") : Lang.T("近期"));
@@ -2468,6 +2471,25 @@ static async Task RunCli(string[] args, string dbPath)
 {
     var cmd = args[0].ToLower();
 
+    // 孟思琳(simon)安全守护:非交互调用按挡位拦截(挡位 1 不拦,行为不变)
+    string? simonBlock = SimonCheckBlock(cmd, args);
+    if (simonBlock != null)
+    {
+        SimonRecord("blocked_cmd", $"{cmd} {string.Join(' ', args.Skip(1))}", CurrentSimonLevel());
+        bool json = args.Contains("--json", StringComparer.OrdinalIgnoreCase);
+        if (json) JsonOut(new { success = false, error = new { code = "SIMON_BLOCKED", level = CurrentSimonLevel(), message = simonBlock } });
+        else Console.WriteLine(Lang.T("🔒 孟思琳(simon) 拦截: {0}", simonBlock));
+        SetExit(3);   // 3=策略拒绝
+        return;
+    }
+
+    // 孟思琳(simon)守护配置(读命令,永不拦截)
+    if (cmd == "simon")
+    {
+        SimonCli(args.Skip(1).ToArray());
+        return;
+    }
+
     // 原文阅读：sip --show <文章编号>
     //   默认 → 全屏阅读界面（无侧栏，W 进入完整 TUI，Esc/Q 退出），给人读文章
     //   --json → 原文 JSON 打到标准输出（未渲染），供 AI / 脚本读取
@@ -2713,6 +2735,7 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
     Console.WriteLine(Lang.T("  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)"));
     Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)"));
+    Console.WriteLine(Lang.T("  simon status|level <1|2|3>  security guardian (default ON, cannot disable; 2=block destructive CLI, 3=block all writes) · 孟思琳"));
     Console.WriteLine(Lang.T("  --insights [--window N d] [--json]  reading report (facts per feed; needs telemetry ON; decisions are yours)"));
     Console.WriteLine(Lang.T("  --insights-interval <7d|30d|off>  schedule the report reminder (due popup in TUI)"));
     Console.WriteLine(Lang.T("  --dedup scan|hide <hiddenId> <canonicalId>|list|undo <key>  cross-source duplicate detection & hide (--json)"));
@@ -3477,6 +3500,8 @@ static void InitDatabase(string dbPath)
         CREATE INDEX IF NOT EXISTS idx_items_guid ON Items (Guid);
         CREATE INDEX IF NOT EXISTS idx_items_feedid ON Items (FeedId);
         CREATE INDEX IF NOT EXISTS idx_items_status ON Items (Status);
+        -- TUI 侧栏计数与按源查询的复合索引(RebuildTree 一次 GROUP BY 扫全表受益)
+        CREATE INDEX IF NOT EXISTS idx_items_feed_status ON Items (FeedId, Status);
         -- 窗口类命令(今日哈汤/去重簇)按发布时间过滤,百万级必须走索引
         CREATE INDEX IF NOT EXISTS idx_items_pubdate ON Items (PublishDate);
         -- 被改过文章查询(Status='active' AND Version>1)
@@ -3589,8 +3614,9 @@ static void SyncFtsDelete(SqliteConnection conn, long itemId)
 }
 
 // 主库完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃
-// 性能：正常退出会写 .clean-exit 标记(见 MarkCleanExit),下次启动跳过全库 quick_check
-// (百万级 + FTS 索引的库可达 2GB+,全检 30s+);异常退出(无标记)才做全检,自愈能力保留
+// 性能：.clean-exit 标记 = 「最近一次完整性检查通过」。有标记 → 跳过全库 quick_check
+// (百万级 + FTS 索引的库可达 2GB+,全检 30s+);无标记才全检,检查通过后立即写标记——
+// 之后即使进程被强杀/断电,下次启动也无需再全检(SQLite WAL 崩溃自恢复,打开时自带校验)
 static void CheckMainDbIntegrity(string dbPath)
 {
     try
@@ -3602,14 +3628,21 @@ static void CheckMainDbIntegrity(string dbPath)
             try { File.Delete(cleanMarker); } catch { }
             return;
         }
+        Console.Error.WriteLine(Lang.T("数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…"));
         bool ok = TelemetryService.IsSqliteFile(dbPath);
         if (ok)
         {
             // 独立方法 + 显式 Dispose：确保句柄释放后文件才能改名
             ok = QuickCheckOk(dbPath);
         }
-        if (ok) return;
+        if (ok)
+        {
+            // 检查通过 → 立即写标记,避免「每次强杀后下次启动都全检」的恶性循环
+            try { File.WriteAllText(cleanMarker, DateTime.Now.ToString("O")); } catch { }
+            return;
+        }
         string corrupt = dbPath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        SimonRecord("repair_db", Lang.T("检测到数据库损坏,已保留现场并重建: {0}", Path.GetFileName(corrupt)));
         try
         {
             SqliteConnection.ClearAllPools();
@@ -5540,6 +5573,7 @@ static List<GrepHit>? DoGrep(string keyword, string dbPath, int limit = 200, int
     var hits = FtsSuitable(keyword)
         ? (TryGrepFts(conn, keyword, limit, feedReal) ?? TryGrepLike(conn, keyword, limit, feedReal))
         : TryGrepLike(conn, keyword, limit, feedReal);
+    if (hits == null) { SetExit(); Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
 
     // Description 可能是 HTML，转纯文本便于阅读
     for (int i = 0; i < hits.Count; i++)
@@ -6111,6 +6145,140 @@ static void SaveSettings(SipSettings s)
     catch { }
 }
 
+// ══════════ 孟思琳(simon)——安全守护(默认开启,无法关闭,只能调节挡位)══════════
+// 挡位:1=基础(完整性自愈+基础防护,现状能力) 2=严格(非交互禁破坏性写)
+//       3=极致(非交互禁全部写 + 数据加密[Phase B])
+// 原则:挡位只能 1/2/3(无 0=不可关闭);降挡必须真实交互终端(防 AI/脚本把守护调弱)
+
+class SimonEvent
+{
+    public string Ts { get; set; } = "";
+    public string Type { get; set; } = "";     // repair_db / blocked_cmd / level_change
+    public int? Level { get; set; }
+    public string Detail { get; set; } = "";
+}
+
+static string SimonEventsPath() => Path.Combine(dataDir, "simon_events.json");
+
+static void SimonRecord(string type, string detail, int? level = null)
+{
+    try
+    {
+        var evs = new List<SimonEvent>();
+        if (File.Exists(SimonEventsPath()))
+            evs = JsonSerializer.Deserialize<List<SimonEvent>>(File.ReadAllText(SimonEventsPath())) ?? new();
+        evs.Add(new SimonEvent { Ts = DateTime.Now.ToString("O"), Type = type, Level = level, Detail = detail });
+        if (evs.Count > 200) evs.RemoveRange(0, evs.Count - 200);   // 只留最近 200 条
+        File.WriteAllText(SimonEventsPath(), JsonSerializer.Serialize(evs,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
+    }
+    catch { }
+}
+
+static List<SimonEvent> SimonLoadEvents()
+{
+    try
+    {
+        if (File.Exists(SimonEventsPath()))
+            return JsonSerializer.Deserialize<List<SimonEvent>>(File.ReadAllText(SimonEventsPath())) ?? new();
+    }
+    catch { }
+    return new();
+}
+
+static int CurrentSimonLevel() => Math.Clamp(LoadSettings().SimonLevel, 1, 3);
+
+// 挡位 2 的破坏性命令(不可逆/清空类):非交互调用拒绝
+static bool SimonIsDestructive(string cmd, string sub)
+    => cmd is "-r" or "--remove" or "--purge-fulltext"
+       || (cmd == "telemetry" && sub == "clear")
+       || (cmd == "--dedup" && sub is "undo" or "hide" or "hide-cluster")
+       || (cmd == "--policy" && sub == "remove");
+
+// 挡位 3 的读命令白名单(其余全是写,非交互拒绝)
+static bool SimonIsReadOnly(string cmd, string sub)
+    => cmd is "-l" or "--list" or "--show" or "--content" or "--versions" or "--history"
+          or "--diff" or "--grep" or "--search" or "--today" or "--feed-info" or "--export-opml"
+          or "--help" or "-h" or "--version" or "--insights" or "--insights-interval" or "simon"
+       || (cmd == "telemetry" && sub is "status" or "show");
+
+// 统一拦截入口:返回被拦截的原因;null=放行
+static string? SimonCheckBlock(string cmd, string[] args)
+{
+    if (Console.IsInputRedirected)   // 非交互(脚本/Agent/管道)才拦;交互终端用户就在键盘前
+    {
+        int level = CurrentSimonLevel();
+        string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "";
+        if (level >= 3 && !SimonIsReadOnly(cmd, sub))
+            return Lang.T("挡位 3(极致):非交互调用已禁止写操作({0});只读命令仍可用。交互终端或调低挡位可解除", cmd);
+        if (level >= 2 && SimonIsDestructive(cmd, sub))
+            return Lang.T("挡位 {0}(严格):非交互调用已禁止破坏性操作({1})", level, cmd);
+    }
+    return null;
+}
+
+// CLI:sip simon status [--json] | level <1|2|3>
+static void SimonCli(string[] args)
+{
+    string sub = args.Length > 0 ? args[0].ToLowerInvariant() : "status";
+    if (sub == "level")
+    {
+        if (args.Length < 2 || !int.TryParse(args[1], out int lvl) || lvl is < 1 or > 3)
+        {
+            SetExit(); Console.WriteLine(Lang.T("Usage: sip simon level <1|2|3>  (1=基础 2=严格 3=极致;无法关闭)")); return;
+        }
+        var s = LoadSettings();
+        int cur = Math.Clamp(s.SimonLevel, 1, 3);
+        if (lvl < cur && Console.IsInputRedirected)
+        {
+            // 降挡必须交互终端:AI/脚本不能把守护调弱
+            SetExit();
+            Console.WriteLine(Lang.T("降挡需要真实交互终端(安全考虑,不接受管道输入)——孟思琳不允许被脚本调弱"));
+            return;
+        }
+        s.SimonLevel = lvl;
+        SaveSettings(s);
+        SimonRecord("level_change", $"{cur} → {lvl}", lvl);
+        Console.WriteLine(Lang.T("孟思琳(simon) 守护挡位: {0} → {1}", cur, lvl));
+        return;
+    }
+    if (sub is "status" or "show" or "list")
+    {
+        int level = CurrentSimonLevel();
+        var evs = SimonLoadEvents();
+        var repairs = evs.Where(e => e.Type == "repair_db").ToList();
+        var blocks = evs.Where(e => e.Type == "blocked_cmd").ToList();
+        if (args.Contains("--json", StringComparer.OrdinalIgnoreCase))
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    name = "孟思琳(simon)",
+                    level,
+                    canDisable = false,
+                    repairs = repairs.Count,
+                    blocked = blocks.Count,
+                    recent = evs.TakeLast(10).Select(e => new { ts = e.Ts, type = e.Type, level = e.Level, detail = e.Detail })
+                }
+            });
+            return;
+        }
+        string levelName = level switch { 2 => Lang.T("严格"), 3 => Lang.T("极致"), _ => Lang.T("基础") };
+        Console.WriteLine(Lang.T("孟思琳(simon) 安全守护"));
+        Console.WriteLine(Lang.T("挡位: {0}({1})——默认开启,无法关闭,只能调节", level, levelName));
+        Console.WriteLine(Lang.T("数据库修复: {0} 次", repairs.Count));
+        foreach (var e in repairs.TakeLast(3))
+            Console.WriteLine(Lang.T("  · {0} {1}", TryParseIso(e.Ts) is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : e.Ts, e.Detail));
+        Console.WriteLine(Lang.T("已拦截非交互调用: {0} 次", blocks.Count));
+        foreach (var e in blocks.TakeLast(3))
+            Console.WriteLine(Lang.T("  · {0} {1}", TryParseIso(e.Ts) is DateTime dt2 ? dt2.ToString("yyyy-MM-dd HH:mm") : e.Ts, e.Detail));
+        return;
+    }
+    SetExit(); Console.WriteLine(Lang.T("Usage: sip simon status [--json] | level <1|2|3>"));
+}
+
 // 解析报告间隔：off / 0 → null；Nd → N 天；否则 null（无效）
 static int? TryParseInsightsInterval(string raw)
 {
@@ -6547,6 +6715,9 @@ class SipSettings
     public string LastInsightsAt { get; set; } = "";
     public int? FloodThresholdPerDay { get; set; }   // 今日高频源阈值（单日新增）；null=自动 max(20,中位数×5)
     public double DedupThreshold { get; set; } = 0.8; // 跨源去重段落重合度阈值
+    // 孟思琳(simon)安全守护挡位:1=基础 2=严格 3=极致。
+    // 默认开启、无法关闭(无 0),只能调节挡位——降挡必须交互终端
+    public int SimonLevel { get; set; } = 1;
 }
 
 // Source Policy：用户确认的「处理规则」（source_policy.json）。createdBy 永远 user，AI 永不自动写。

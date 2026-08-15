@@ -34,6 +34,8 @@ public sealed class SipInstance : IDisposable
             FileName = Path.Combine(Root, OperatingSystem.IsWindows() ? "sip.exe" : "sip"),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // 重定向 stdin → 子进程 Console.IsInputRedirected=true,稳定模拟「非交互(脚本/Agent)调用」
+            RedirectStandardInput = true,
             UseShellExecute = false,
             // 程序统一 UTF-8 输出;不显式指定会按系统默认(GBK)解码导致乱码
             StandardOutputEncoding = System.Text.Encoding.UTF8,
