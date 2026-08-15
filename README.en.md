@@ -38,6 +38,8 @@ Single-file builds for Windows / macOS / Linux. No sign-up, no cloud — everyth
 
 Once it's open, just feel your way around.
 
+> 🌐 **Don't want to touch the terminal? Try sip-web** — one command starts a zero-dependency **local web UI**: subscribe, read, and search right in your browser, no command line needed. [Take a look →](https://github.com/hahahotsoup/sip-webapiextra)
+
 Take it slow, no rush. It's a cure for information overload.
 
 ## What it can do for you
@@ -131,7 +133,6 @@ In one sentence: it doesn't collect, track, or secretly upload your stuff.
 - ⚡ **Million-scale adaptation**: on a 1M-article library — `--grep` full-text search 2.2s → 0.5s (FTS5, Chinese substring searchable), the TUI opens instantly (lazy sidebar), `--today` 7.5s → 3s, whole-feed updates in one transaction.
 - 🧪 **Automated test baseline**: 38 process-level black-box cases (CLI contract / SSRF matrix / dedup invariants / terminal injection / Simon guard & encryption round-trips) + GitHub Actions CI — automatic regression on every change.
 - 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — level 3 encrypts everything; keys are auto-generated in the OS credential store; you never have to remember any key.
-- 🌐 **sip-web**: an optional local web UI (Python stdlib + single HTML, zero dependencies) that translates browser requests into sip CLI calls — [github.com/hahahotsoup/sip-webapiextra](https://github.com/hahahotsoup/sip-webapiextra)
 
 ## More
 
