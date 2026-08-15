@@ -75,12 +75,14 @@ if (args.Length > 0)
     RemindDueFeeds(args, dbPath);
     RemindDueInsights(args, dbPath);
     TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
+    MarkCleanExit(dataDir);
     return AiState.ExitCode;
 }
 
 // ══════════ TUI 模式（无参数时进入）══════════
 var tuiExit = await RunTui(dbPath);
 TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
+MarkCleanExit(dataDir);
 return tuiExit;
 
 public partial class Program
@@ -3143,6 +3145,8 @@ static void DeleteFeedByRealId(int realId, string dbPath)
     cmd.CommandText = "DELETE FROM Vectors WHERE FeedId = @id";
     cmd.Parameters.AddWithValue("@id", realId);
     cmd.ExecuteNonQuery();
+    cmd.CommandText = "DELETE FROM ItemsFts WHERE rowid IN (SELECT Id FROM Items WHERE FeedId = @id)";
+    cmd.ExecuteNonQuery();
     cmd.CommandText = "DELETE FROM Items WHERE FeedId = @id";
     cmd.ExecuteNonQuery();
     // 删除前记录标题（用于遥测 feed 生命周期）
@@ -3473,6 +3477,14 @@ static void InitDatabase(string dbPath)
         CREATE INDEX IF NOT EXISTS idx_items_guid ON Items (Guid);
         CREATE INDEX IF NOT EXISTS idx_items_feedid ON Items (FeedId);
         CREATE INDEX IF NOT EXISTS idx_items_status ON Items (Status);
+        -- 窗口类命令(今日哈汤/去重簇)按发布时间过滤,百万级必须走索引
+        CREATE INDEX IF NOT EXISTS idx_items_pubdate ON Items (PublishDate);
+        -- 被改过文章查询(Status='active' AND Version>1)
+        CREATE INDEX IF NOT EXISTS idx_items_status_version ON Items (Status, Version);
+
+        -- 全文检索索引(FTS5 + trigram,中文子串可搜):
+        -- 数据在 Items,此表只存索引,rowid = Items.Id,由代码增量维护(见 SyncFtsInsert / 删除路径)
+        CREATE VIRTUAL TABLE IF NOT EXISTS ItemsFts USING fts5(Title, Content, Description, Summary, tokenize='trigram');
     ";
     cmd.ExecuteNonQuery();
 
@@ -3509,12 +3521,87 @@ static void InitDatabase(string dbPath)
     catch (SqliteException) { /* 列已存在则忽略 */ }
 }
 
+// 正常退出标记:下次启动跳过全库 quick_check(大库省 30s+);
+// 进程异常退出/被杀时不写标记,下次启动仍会全检,完整性自愈能力不变
+static void MarkCleanExit(string dataDir)
+{
+    try { File.WriteAllText(Path.Combine(dataDir, ".clean-exit"), DateTime.Now.ToString("O")); } catch { }
+}
+
+// ══════════ FTS5 全文索引维护（百万级 grep 的关键；trigram 中文子串可搜）══════════
+// ItemsFts 只存索引,rowid = Items.Id;数据在 Items,由代码增量维护。
+// 老库/新库首次搜索时懒回填(一次性),之后增量同步。
+
+// 懒回填:DoGrep 前检查 FTS 是否已覆盖 Items,未覆盖则重建。
+// 注意:fts5 的 COUNT(*) 需扫全部索引(百万级 30s+),改用 MAX(rowid) 对比,
+// 回填按 Items.Id 顺序插入,MAX(rowid) == MAX(Id) 即视为已覆盖。
+static void EnsureFtsIndexed(string dbPath)
+{
+    try
+    {
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        long itemsMax, ftsMax;
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT MAX(Id) FROM Items";
+        var io = c.ExecuteScalar();
+        itemsMax = io == null || io is DBNull ? 0 : Convert.ToInt64(io);
+        c.CommandText = "SELECT MAX(rowid) FROM ItemsFts";
+        var fo = c.ExecuteScalar();
+        ftsMax = fo == null || fo is DBNull ? 0 : Convert.ToInt64(fo);   // 空表 MAX 返回 DBNull,必须处理
+        if (ftsMax >= itemsMax) return;
+        if (itemsMax > 1000) Console.Error.WriteLine(Lang.T("Building full-text index (one-time, first search)..."));
+        c.CommandText = "DELETE FROM ItemsFts"; c.ExecuteNonQuery();
+        c.CommandText = "INSERT INTO ItemsFts(rowid, Title, Content, Description, Summary) SELECT Id, Title, Content, Description, Summary FROM Items";
+        c.ExecuteNonQuery();
+    }
+    catch { /* FTS 不可用(旧 SQLite 无 trigram)时搜索自动回退 LIKE */ }
+}
+
+// 新文章插入后同步 FTS 索引(在调用方事务内;失败静默,下次懒回填会补齐)
+static void SyncFtsInsert(SqliteConnection conn, long itemId, string title, string content, string desc, string summary)
+{
+    try
+    {
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO ItemsFts(rowid, Title, Content, Description, Summary) VALUES (@id, @t, @c, @d, @s)";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        cmd.Parameters.AddWithValue("@t", title ?? "");
+        cmd.Parameters.AddWithValue("@c", content ?? "");
+        cmd.Parameters.AddWithValue("@d", desc ?? "");
+        cmd.Parameters.AddWithValue("@s", summary ?? "");
+        cmd.ExecuteNonQuery();
+    }
+    catch { }
+}
+
+// 删除文章(含全部版本)时同步删除 FTS 行
+static void SyncFtsDelete(SqliteConnection conn, long itemId)
+{
+    try
+    {
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM ItemsFts WHERE rowid = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        cmd.ExecuteNonQuery();
+    }
+    catch { }
+}
+
 // 主库完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃
+// 性能：正常退出会写 .clean-exit 标记(见 MarkCleanExit),下次启动跳过全库 quick_check
+// (百万级 + FTS 索引的库可达 2GB+,全检 30s+);异常退出(无标记)才做全检,自愈能力保留
 static void CheckMainDbIntegrity(string dbPath)
 {
     try
     {
         if (!File.Exists(dbPath)) return;  // 新建库走正常建表流程
+        string cleanMarker = Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".clean-exit");
+        if (File.Exists(cleanMarker))
+        {
+            try { File.Delete(cleanMarker); } catch { }
+            return;
+        }
         bool ok = TelemetryService.IsSqliteFile(dbPath);
         if (ok)
         {
@@ -3578,7 +3665,8 @@ static void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath
     cmd.CommandText = @"
         SELECT Id, Title, Version,
                ROW_NUMBER() OVER (ORDER BY Id) AS DisplayNum,
-               VersionCount, ArchivedCount, Content, Description
+               VersionCount, ArchivedCount,
+               LENGTH(Content) AS ContentLen, LENGTH(Description) AS DescLen
         FROM (
             SELECT i.Id, i.Title, i.Version, i.Guid, i.Content, i.Description,
                    CASE WHEN i.Guid = '' THEN 1
@@ -3610,9 +3698,9 @@ static void ListArticlesFromDb(int feedRealId, int feedDisplayNum, string dbPath
         string title = reader.GetString(1);
         int displayNum = reader.GetInt32(3);
         int archived = reader.GetInt32(5);
-        string content = reader.IsDBNull(6) ? "" : reader.GetString(6);
-        string desc = reader.IsDBNull(7) ? "" : reader.GetString(7);
-        items.Add((realId, displayNum, title, archived > 0, ContentQuality(content, desc)));
+        int contentLen = reader.IsDBNull(6) ? 0 : reader.GetInt32(6);
+        int descLen = reader.IsDBNull(7) ? 0 : reader.GetInt32(7);
+        items.Add((realId, displayNum, title, archived > 0, ContentQualityByLen(contentLen, descLen)));
     }
 
     // 信号（点赞/AI 标记）只读一次，避免每篇文章重复读磁盘文件
@@ -3664,6 +3752,13 @@ static string ContentQuality(string content, string desc)
     string c = string.IsNullOrWhiteSpace(content) ? desc : content;
     if (string.IsNullOrWhiteSpace(c)) return "empty";
     return c.Trim().Length < 100 ? "short" : "full";
+}
+
+// 按长度判质量(列表/搜索只关心长度时,避免把全文文本列读出来——百万级列表的关键优化)
+static string ContentQualityByLen(int contentLen, int descLen)
+{
+    if (contentLen <= 0 && descLen <= 0) return "empty";
+    return Math.Max(contentLen, descLen) < 100 ? "short" : "full";
 }
 
 // 文章是否存在（--show 全屏模式启动前检查，避免进空界面）
@@ -4296,6 +4391,10 @@ static async Task DownloadAndSaveToDb(string url, string dbPath, bool interactiv
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
 
+    // 第 4~5 步(源更新 + 文章比对/插入)包进一个事务:大源导入从逐条 fsync 变为一次提交,
+    // 中途失败整体回滚,不会留下半截数据
+    using var tx = conn.BeginTransaction();
+
     // --- 第 4 步：检查是否已存在同名且未归档的订阅源 ---
     // 已归档的（标题带时间戳）不参与比对，直接当新源处理
     string? oldXml = GetActiveRawXml(feed.Title, conn);
@@ -4369,6 +4468,7 @@ static async Task DownloadAndSaveToDb(string url, string dbPath, bool interactiv
     // --- 第 5 步：ShowDiff 负责检测文章变化 + 输出 + 执行归档/插入/标记删除 ---
     // 新源 → 全量插入不过滤；旧源 → 逐篇比对
     ShowDiff(feed, feedId, conn, isNewFeed);
+    tx.Commit();   // 源更新 + 文章变更一次性落盘
 
     Console.WriteLine(Lang.T("{0} saved", feed.Title));
 
@@ -4649,6 +4749,11 @@ static void InsertNewItem(SqliteConnection conn, long feedId, FeedItem item, str
     cmd.Parameters.AddWithValue("@guid", guid);
     cmd.Parameters.AddWithValue("@ver", version);
     cmd.ExecuteNonQuery();
+
+    // 全文索引增量同步(与插入同事务;失败静默,懒回填会兜底)
+    cmd.CommandText = "SELECT last_insert_rowid()";
+    long newId = (long)cmd.ExecuteScalar()!;
+    SyncFtsInsert(conn, newId, item.Title ?? "", item.Content ?? "", item.Description ?? "", "");
 }
 
 // ══════════ ShowDiff（文章级别）：检测新增/修改/删除 + 输出 + 执行 ══════════
@@ -5429,43 +5534,119 @@ static List<GrepHit>? DoGrep(string keyword, string dbPath, int limit = 200, int
     if (string.IsNullOrWhiteSpace(keyword)) { SetExit(); Console.WriteLine(Lang.T("Enter a search keyword")); return null; }
     using var conn = new SqliteConnection($"Data Source={dbPath}");
     conn.Open();
-    var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
-        SELECT i.Id, i.Title, i.Description, i.Content, i.Summary, i.Link, f.Title AS FeedTitle
-        FROM Items i
-        JOIN Feeds f ON i.FeedId = f.Id
-        WHERE i.Status = 'active'
-          " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
-          AND (i.Title LIKE @kw ESCAPE '\' OR i.Content LIKE @kw ESCAPE '\' OR i.Description LIKE @kw ESCAPE '\' OR i.Summary LIKE @kw ESCAPE '\')
-        ORDER BY i.Id
-        LIMIT @limit
-    ";
-    // 转义 LIKE 通配符（% _ \），让关键词按字面匹配而非被当作通配符
-    string escaped = keyword.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-    cmd.Parameters.AddWithValue("@kw", "%" + escaped + "%");
-    cmd.Parameters.AddWithValue("@limit", Math.Max(1, limit));
-    if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
-    var hits = new List<GrepHit>();
-    using (var r = cmd.ExecuteReader())
-    {
-        while (r.Read())
-        {
-            hits.Add(new GrepHit
-            {
-                ItemId = r.GetInt32(0),
-                Title = r.GetString(1),
-                Description = r.IsDBNull(2) ? "" : r.GetString(2),
-                Content = r.IsDBNull(3) ? "" : r.GetString(3),
-                Summary = r.IsDBNull(4) ? "" : r.GetString(4),
-                Link = r.IsDBNull(5) ? "" : r.GetString(5),
-                FeedTitle = r.GetString(6)
-            });
-        }
-    }
+
+    // FTS5 优先(百万级从秒级降到毫秒级);索引缺失/查询失败/短词(trigram 需 ≥3 字符)时回退 LIKE
+    EnsureFtsIndexed(dbPath);
+    var hits = FtsSuitable(keyword)
+        ? (TryGrepFts(conn, keyword, limit, feedReal) ?? TryGrepLike(conn, keyword, limit, feedReal))
+        : TryGrepLike(conn, keyword, limit, feedReal);
+
     // Description 可能是 HTML，转纯文本便于阅读
     for (int i = 0; i < hits.Count; i++)
         hits[i] = new GrepHit { ItemId = hits[i].ItemId, Title = hits[i].Title, Description = StripHtml(hits[i].Description), Content = hits[i].Content, Summary = hits[i].Summary, Link = hits[i].Link, FeedTitle = hits[i].FeedTitle };
     return hits;
+}
+
+// trigram tokenizer 只支持 ≥3 字符的查询;按最长连续字母数字段判断是否可用 FTS。
+// (短词如"熊猫"走 LIKE 全表扫,百万级约 2s;可接受,后续可加 2-gram 辅助列消除)
+static bool FtsSuitable(string keyword)
+{
+    int best = 0, cur = 0;
+    foreach (char c in keyword)
+    {
+        if (char.IsLetterOrDigit(c)) cur++;
+        else { if (cur > best) best = cur; cur = 0; }
+    }
+    if (cur > best) best = cur;
+    return best >= 3;
+}
+
+// FTS5 检索:关键词整体作为短语查询(引号包裹,内部引号翻倍),
+// 语义与 LIKE '%kw%' 一致(任意位置子串);失败返回 null 由调用方回退 LIKE
+static List<GrepHit>? TryGrepFts(SqliteConnection conn, string keyword, int limit, int? feedReal)
+{
+    try
+    {
+        string phrase = "\"" + keyword.Replace("\"", "\"\"") + "\"";
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.Id, i.Title, i.Description, i.Content, i.Summary, i.Link, f.Title AS FeedTitle
+            FROM ItemsFts fts
+            JOIN Items i ON i.Id = fts.rowid
+            JOIN Feeds f ON i.FeedId = f.Id
+            WHERE ItemsFts MATCH @m
+              AND i.Status = 'active'
+              " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
+            LIMIT @limit
+        ";
+        // 注意:不能加 ORDER BY i.Id —— fts5 默认按 rowid(=Items.Id)升序返回,
+        // 加 ORDER BY 会破坏 LIMIT 的流式提前终止,导致全量命中 JOIN(百万级冷缓存 90s+)。
+        cmd.Parameters.AddWithValue("@m", phrase);
+        cmd.Parameters.AddWithValue("@limit", Math.Max(1, limit));
+        if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
+        var hits = new List<GrepHit>();
+        using (var r = cmd.ExecuteReader())
+        {
+            while (r.Read())
+            {
+                hits.Add(new GrepHit
+                {
+                    ItemId = r.GetInt32(0),
+                    Title = r.GetString(1),
+                    Description = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Content = r.IsDBNull(3) ? "" : r.GetString(3),
+                    Summary = r.IsDBNull(4) ? "" : r.GetString(4),
+                    Link = r.IsDBNull(5) ? "" : r.GetString(5),
+                    FeedTitle = r.GetString(6)
+                });
+            }
+        }
+        return hits;
+    }
+    catch { return null; }   // MATCH 语法异常/旧 SQLite 无 trigram → 回退 LIKE
+}
+
+// LIKE 全表扫描回退(与旧行为完全一致;短词 <3 字符时 trigram 无法用索引,也走这里)
+static List<GrepHit>? TryGrepLike(SqliteConnection conn, string keyword, int limit, int? feedReal)
+{
+    try
+    {
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.Id, i.Title, i.Description, i.Content, i.Summary, i.Link, f.Title AS FeedTitle
+            FROM Items i
+            JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Status = 'active'
+              " + (feedReal.HasValue ? "AND i.FeedId = @fid" : "") + @"
+              AND (i.Title LIKE @kw ESCAPE '\' OR i.Content LIKE @kw ESCAPE '\' OR i.Description LIKE @kw ESCAPE '\' OR i.Summary LIKE @kw ESCAPE '\')
+            ORDER BY i.Id
+            LIMIT @limit
+        ";
+        // 转义 LIKE 通配符（% _ \），让关键词按字面匹配而非被当作通配符
+        string escaped = keyword.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        cmd.Parameters.AddWithValue("@kw", "%" + escaped + "%");
+        cmd.Parameters.AddWithValue("@limit", Math.Max(1, limit));
+        if (feedReal.HasValue) cmd.Parameters.AddWithValue("@fid", feedReal.Value);
+        var hits = new List<GrepHit>();
+        using (var r = cmd.ExecuteReader())
+        {
+            while (r.Read())
+            {
+                hits.Add(new GrepHit
+                {
+                    ItemId = r.GetInt32(0),
+                    Title = r.GetString(1),
+                    Description = r.IsDBNull(2) ? "" : r.GetString(2),
+                    Content = r.IsDBNull(3) ? "" : r.GetString(3),
+                    Summary = r.IsDBNull(4) ? "" : r.GetString(4),
+                    Link = r.IsDBNull(5) ? "" : r.GetString(5),
+                    FeedTitle = r.GetString(6)
+                });
+            }
+        }
+        return hits;
+    }
+    catch { return null; }
 }
 
 // 语义搜索核心逻辑（CLI 与 TUI 共用）；失败返回 null
@@ -5609,6 +5790,8 @@ static void DeleteArticleByGuid(string guid, string dbPath)
     var cmd = conn.CreateCommand();
     cmd.CommandText = "DELETE FROM Vectors WHERE ItemId IN (SELECT Id FROM Items WHERE Guid = @g)";
     cmd.Parameters.AddWithValue("@g", guid);
+    cmd.ExecuteNonQuery();
+    cmd.CommandText = "DELETE FROM ItemsFts WHERE rowid IN (SELECT Id FROM Items WHERE Guid = @g)";
     cmd.ExecuteNonQuery();
     cmd.CommandText = "DELETE FROM Items WHERE Guid = @g";
     cmd.Parameters.AddWithValue("@g", guid);
