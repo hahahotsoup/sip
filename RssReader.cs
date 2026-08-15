@@ -3634,6 +3634,20 @@ static void CheckMainDbIntegrity(string dbPath)
 {
     try
     {
+        // 加密迁移中断恢复:rss.db 缺失但明文备份存在 → 恢复明文(数据优先;重新 simon level 3 即可再加密)
+        string plainBak = dbPath + ".plaintext.bak";
+        if (!File.Exists(dbPath) && File.Exists(plainBak))
+        {
+            try
+            {
+                File.Move(plainBak, dbPath);
+                Console.Error.WriteLine(Lang.T("检测到加密迁移未完成,已从备份恢复数据;可重新执行 simon level 3 加密"));
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted")); } catch { }
+                string enc = dbPath + ".enc";
+                if (File.Exists(enc)) { try { File.Delete(enc); } catch { } }
+            }
+            catch { /* 恢复失败不阻断(备份仍在,可手动处理) */ }
+        }
         if (!File.Exists(dbPath)) return;  // 新建库走正常建表流程
         string cleanMarker = Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".clean-exit");
         if (File.Exists(cleanMarker))
@@ -6442,9 +6456,20 @@ static string? SimonEncryptDb(string dbPath)
                 c.ExecuteNonQuery();
             }
             SqliteConnection.ClearAllPools();
-            File.Copy(dbPath, dbPath + ".plaintext.bak", overwrite: true);
-            File.Delete(dbPath);
-            File.Move(encPath, dbPath);
+            // 替换阶段:两次原子 Move(原库→备份, 加密库→就位)。
+            // 任一时刻崩溃:rss.db 缺失但 .plaintext.bak 与 .enc 均在,数据不丢,可恢复
+            string bakPath = dbPath + ".plaintext.bak";
+            File.Move(dbPath, bakPath);
+            try
+            {
+                File.Move(encPath, dbPath);
+            }
+            catch
+            {
+                // 就位失败 → 回滚,恢复明文库(数据优先于加密)
+                try { File.Move(bakPath, dbPath); } catch { }
+                throw;
+            }
             // 加密标记:OpenDb 据此执行 PRAGMA key(SQLCipher 4 文件头是标准头,无法靠头识别)
             try { File.WriteAllText(Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted"), DateTime.Now.ToString("O")); } catch { }
             return null;
