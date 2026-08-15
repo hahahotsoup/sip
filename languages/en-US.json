@@ -588,5 +588,6 @@
   "严格": "strict",
   "极致": "max",
   "🔒 孟思琳(simon) 则永远在岗：数据库自愈、SSRF 防护、终端注入拦截、非交互调用管控——默认开启且无法关闭，只能调节挡位。永远作为此软件的最后一道安全防线。": "🔒 Simon (孟思琳) stands guard always: DB self-heal, SSRF protection, terminal-injection stripping, non-interactive call control — on by default, cannot be disabled, level only. Forever the last line of defense.",
-  "苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？\n\n🔒 孟思琳(simon) 守护着这一切——默认开启、无法关闭，永远作为此软件的最后一道安全防线。": "Sumenia will record: which articles are opened/finished/skipped, plus AI calls and searches. Data stays local only, sip never uploads. Enable?\n\n🔒 Simon guards all of this — always on, cannot be disabled, forever the last line of defense."
+  "苏暖泉将开始记录：哪些文章被打开/读完/跳过、以及 AI 调用与搜索情况。数据仅保存在本机，sip 绝不会自动上传。开启吗？\n\n🔒 孟思琳(simon) 守护着这一切——默认开启、无法关闭，永远作为此软件的最后一道安全防线。": "Sumenia will record: which articles are opened/finished/skipped, plus AI calls and searches. Data stays local only, sip never uploads. Enable?\n\n🔒 Simon guards all of this — always on, cannot be disabled, forever the last line of defense.",
+  "🔒 孟思琳正保护着你的软件哦": "🔒 Simon (孟思琳) is guarding your software."
 }

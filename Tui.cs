@@ -856,7 +856,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                 Lang.T("构建时间：{0}", build),
                 "",
                 Lang.T("作者：hahahotsoup"),
-                Lang.T("博客：https://blog.hotsouprealm.top/"));
+                Lang.T("博客：https://blog.hotsouprealm.top/"),
+                "",
+                Lang.T("🔒 孟思琳正保护着你的软件哦"));
             var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 0, Y = Pos.Bottom(txt) };
             dlg.Add(txt, ok);
             ok.Accepted += (s, e) => dlg.RequestStop();

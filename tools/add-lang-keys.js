@@ -3,7 +3,9 @@
 // newkeys.json: { "key": "value", ... }(顶层对象)
 const fs = require('fs');
 const file = process.argv[2];
-const add = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+let addRaw = fs.readFileSync(process.argv[3], 'utf8');
+if (addRaw.charCodeAt(0) === 0xFEFF) addRaw = addRaw.slice(1);   // 兼容 BOM 输入
+const add = JSON.parse(addRaw);
 let raw = fs.readFileSync(file, 'utf8');
 const hasBom = raw.charCodeAt(0) === 0xFEFF;
 if (hasBom) raw = raw.slice(1);
