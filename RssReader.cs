@@ -6385,14 +6385,18 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
 // ── 数据加密(挡位 3:SQLCipher 加密 rss.db;敏感 JSON 文件 AES 加密)────────────────
 // 密钥只存系统凭据库(与 API Key 同机制),绝不落盘到项目文件
 
+// 密钥名可用环境变量覆盖:自动化测试用隔离密钥名,绝不读写/覆盖真实用户的系统凭据
+static string SimonKeyName() => Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME") ?? "simon_db_key";
+
 static string SimonDbKey()
 {
-    string? k = CredGet("simon_db_key");
+    string keyName = SimonKeyName();
+    string? k = CredGet(keyName);
     if (!string.IsNullOrEmpty(k)) return k;
     var bytes = new byte[32];
     System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
     k = Convert.ToBase64String(bytes);
-    CredSet("simon_db_key", k);
+    CredSet(keyName, k);
     return k;
 }
 

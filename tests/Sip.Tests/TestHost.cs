@@ -11,6 +11,12 @@ namespace Sip.Tests;
 /// </summary>
 public sealed class SipInstance : IDisposable
 {
+    // 测试用隔离密钥名:子进程继承此环境变量,绝不读写/覆盖真实用户的系统凭据库
+    static SipInstance()
+    {
+        Environment.SetEnvironmentVariable("SIP_SIMON_KEY_NAME", "simon_db_key_test");
+    }
+
     public string Root { get; }
     public string DataDir => Path.Combine(Root, "readwithhotsoup");
     public string DbPath => Path.Combine(DataDir, "rss.db");
