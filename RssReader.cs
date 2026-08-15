@@ -6213,7 +6213,27 @@ static List<SimonEvent> SimonLoadEvents()
     return new();
 }
 
-static int CurrentSimonLevel() => Math.Clamp(LoadSettings().SimonLevel, 1, 3);
+// 挡位存储:权威值在系统凭据库(文件编辑无法降挡——孟思琳不能被改 JSON 绕过);
+// sip_settings.json 仅作缓存/兼容(凭据库缺失时回退)。升降挡只经程序接口。
+static string SimonLevelKey() => Environment.GetEnvironmentVariable("SIP_SIMON_KEY_NAME") ?? "simon_db_key";
+
+static int SimonLevelGet()
+{
+    string? k = CredGet(SimonLevelKey() + "_level");
+    if (!string.IsNullOrEmpty(k) && int.TryParse(k, out int lvl)) return Math.Clamp(lvl, 1, 3);
+    return Math.Clamp(LoadSettings().SimonLevel, 1, 3);   // 兼容旧配置/凭据库缺失
+}
+
+static void SimonLevelSet(int lvl)
+{
+    int v = Math.Clamp(lvl, 1, 3);
+    CredSet(SimonLevelKey() + "_level", v.ToString());
+    var s = LoadSettings();
+    s.SimonLevel = v;   // 文件缓存同步(供凭据库缺失场景兜底显示)
+    SaveSettings(s);
+}
+
+static int CurrentSimonLevel() => SimonLevelGet();
 
 // 挡位 2 的写命令 = 一切非只读命令(用户语义:2 级起不允许写入数据库)
 // 挡位 3 = 所有 CLI 调用(唯一例外 simon status,见 SimonCheckBlock)
@@ -6258,8 +6278,7 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
             else Console.WriteLine(Lang.T("Usage: sip simon level <1|2|3>  (1=基础 2=严格 3=极致;无法关闭)"));
             return;
         }
-        var s = LoadSettings();
-        int cur = Math.Clamp(s.SimonLevel, 1, 3);
+        int cur = SimonLevelGet();
         if (lvl < cur && !fromTui)
         {
             // 降挡只能从 TUI 进行(真人坐在键盘前的强交互环境);
@@ -6269,8 +6288,7 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
             else Console.WriteLine(Lang.T("降挡只能在 TUI 界面里进行(安全考虑)——孟思琳不允许被脚本或 CLI 调弱"));
             return;
         }
-        s.SimonLevel = lvl;
-        SaveSettings(s);
+        SimonLevelSet(lvl);
         SimonRecord("level_change", $"{cur} → {lvl}", lvl);
         // 升到挡位 3 → 加密 rss.db(明文库迁移为 SQLCipher;密钥存系统凭据库)
         if (lvl >= 3 && cur < 3)

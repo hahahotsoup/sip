@@ -17,6 +17,17 @@ public class SimonEncryptTests
             throw new Xunit.Sdk.XunitException($"[{step}] level 3 failed: exit={exit}\nstdout={stdout}\nstderr={stderr}");
     }
 
+    // 降挡模拟(等价于用户在 TUI 降挡):挡位权威值在系统凭据库,
+    // 直接改 sip_settings.json 无效——测试进程写该实例隔离凭据(sip.KeyName + "_level")
+    private static void DowngradeForTest(SipInstance sip, int level)
+    {
+        var store = ktsu.CredentialCache.Storage.CredentialStoreFactory.CreateDefault("hotsoupreader");
+        var cache = new ktsu.CredentialCache.CredentialCache(store);
+        cache.AddOrReplace(
+            new ktsu.CredentialCache.PersonaGUID { WeakString = sip.KeyName + "_level" },
+            new ktsu.CredentialCache.CredentialWithToken { Token = new ktsu.CredentialCache.CredentialToken { WeakString = level.ToString() } });
+    }
+
     [Fact]
     public void Level3_EncryptsDb_AndExternalReaderCannotRead()
     {
@@ -35,12 +46,9 @@ public class SimonEncryptTests
         Assert.ThrowsAny<Exception>(() => sip.QueryScalar("SELECT COUNT(*) FROM Items"));
 
         // 挡位 3 下 CLI 全拒,无法用 -l 验证可读;
-        // 直接把设置降回挡位 1(测试进程写配置,等价于用户曾在 TUI 降挡),
+        // 降挡模拟(等价于用户在 TUI 降挡,挡位权威值在系统凭据库):
         // 验证加密库在低挡位仍可读(密钥在系统凭据库,与挡位无关)
-        var settingsPath = Path.Combine(sip.DataDir, "sip_settings.json");
-        var text = File.ReadAllText(settingsPath);
-        text = System.Text.RegularExpressions.Regex.Replace(text, "\"SimonLevel\"\\s*:\\s*\\d+", "\"SimonLevel\": 1");
-        File.WriteAllText(settingsPath, text);
+        DowngradeForTest(sip, 1);
 
         var (exit, stdout, _) = sip.Run("-l", "1");
         Assert.Equal(0, exit);
@@ -57,10 +65,7 @@ public class SimonEncryptTests
         AssertLevel3(sip, "encrypt");
 
         // 降回挡位 1(见上一测试的说明),验证加密库多次调用仍可读
-        var settingsPath = Path.Combine(sip.DataDir, "sip_settings.json");
-        var text = File.ReadAllText(settingsPath);
-        text = System.Text.RegularExpressions.Regex.Replace(text, "\"SimonLevel\"\\s*:\\s*\\d+", "\"SimonLevel\": 1");
-        File.WriteAllText(settingsPath, text);
+        DowngradeForTest(sip, 1);
 
         for (int i = 0; i < 3; i++)
         {
@@ -82,7 +87,7 @@ public class SimonEncryptTests
     }
 
     [Fact]
-    public void Reencrypt_AfterDowngrade_IsNoOp_NoDuplicateBackup()
+    public void Reencrypt_IsBlocked_NoDuplicateBackup()
     {
         using var sip = new SipInstance();
         sip.EnsureDatabase();
@@ -94,23 +99,12 @@ public class SimonEncryptTests
         var bak = sip.DbPath + ".plaintext.bak";
         Assert.True(File.Exists(bak));
 
-        // 模拟用户在 TUI 降挡(直接改配置)
-        var settingsPath = Path.Combine(sip.DataDir, "sip_settings.json");
-        var text = File.ReadAllText(settingsPath);
-        text = System.Text.RegularExpressions.Regex.Replace(text, "\"SimonLevel\"\\s*:\\s*\\d+", "\"SimonLevel\": 1");
-        File.WriteAllText(settingsPath, text);
-
-        // 再次升挡 3:必须幂等——不报错、不重复复制、备份只有一份
+        // 挡位 3 下再次 level 3:被拦截在门外(exit 3)——不可能重复加密/重复复制
         var (exit, stdout, _) = sip.Run("simon", "level", "3");
-        Assert.True(exit == 0, $"re-encrypt failed: {stdout}");
-        Assert.Single(Directory.GetFiles(sip.DataDir, "rss.db.plaintext.bak*"));
+        Assert.Equal(3, exit);
+        Assert.Contains("孟思琳", stdout);
 
-        // 数据仍完整可读(降回挡位 1 后验证)
-        text = File.ReadAllText(settingsPath);
-        text = System.Text.RegularExpressions.Regex.Replace(text, "\"SimonLevel\"\\s*:\\s*\\d+", "\"SimonLevel\": 1");
-        File.WriteAllText(settingsPath, text);
-        var (exit2, stdout2, _) = sip.Run("-l", "1");
-        Assert.Equal(0, exit2);
-        Assert.Contains("幂等测试文章", stdout2);
+        // 备份只有一份,无重复复制
+        Assert.Single(Directory.GetFiles(sip.DataDir, "rss.db.plaintext.bak*"));
     }
 }

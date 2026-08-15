@@ -11,11 +11,9 @@ namespace Sip.Tests;
 /// </summary>
 public sealed class SipInstance : IDisposable
 {
-    // 测试用隔离密钥名:子进程继承此环境变量,绝不读写/覆盖真实用户的系统凭据库
-    static SipInstance()
-    {
-        Environment.SetEnvironmentVariable("SIP_SIMON_KEY_NAME", "simon_db_key_test");
-    }
+    // 每实例唯一凭据 key 名:子进程经 ProcessStartInfo.Environment 继承,
+    // 测试之间绝不共享系统凭据(挡位/密钥完全隔离,不污染彼此与真实用户)
+    public string KeyName { get; } = "simon_db_key_test_" + Guid.NewGuid().ToString("N")[..10];
 
     public string Root { get; }
     public string DataDir => Path.Combine(Root, "readwithhotsoup");
@@ -48,6 +46,7 @@ public sealed class SipInstance : IDisposable
             StandardErrorEncoding = System.Text.Encoding.UTF8,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
+        psi.Environment["SIP_SIMON_KEY_NAME"] = KeyName;   // 每实例隔离凭据命名空间
         using var p = Process.Start(psi)!;
         string so = p.StandardOutput.ReadToEnd();
         string se = p.StandardError.ReadToEnd();
