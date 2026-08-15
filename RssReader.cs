@@ -302,11 +302,10 @@ static bool ArticleContentShort(string dbPath, int itemId)
     catch { return true; }
 }
 
-// 读取某文全文缓存；未缓存返回 null
+// 读取某文全文缓存；未缓存返回 null(兼容明文/加密)
 static string? ReadFulltextCache(long itemId)
 {
-    string p = FulltextPath(itemId);
-    return File.Exists(p) ? File.ReadAllText(p) : null;
+    return SimonReadText(FulltextPath(itemId));
 }
 
 // —— SSRF 防护：地址分类 0=允许 1=硬拦截（回环/链路本地） 2=私网段（默认拦截，AllowPrivateNet=true 放行）——
@@ -414,7 +413,7 @@ static (string? Text, int ExitCode, string? Error) DoFetchCore(string dbPath, in
     if (urlErr != null) return (null, 2, urlErr);
     string text = FetchAndExtract(link) ?? "";
     if (string.IsNullOrWhiteSpace(text)) return (null, 2, Lang.T("Fetch failed"));
-    File.WriteAllText(FulltextPath(itemId), text);
+    SimonWriteText(FulltextPath(itemId), text);
     TrimFulltextCache();
     // 该源若已索引 → 用全文做 sidecar 向量（存 fulltext/vecs.json，不污染主 Vectors 表）
     EmbedFulltextSidecar(dbPath, itemId, feedId, text);
@@ -1502,8 +1501,9 @@ static Dictionary<string, DedupRule> LoadDedup()
 {
     try
     {
-        if (File.Exists(DedupPath()))
-            return JsonSerializer.Deserialize<Dictionary<string, DedupRule>>(File.ReadAllText(DedupPath())) ?? new();
+        string? text = SimonReadText(DedupPath());
+        if (text != null)
+            return JsonSerializer.Deserialize<Dictionary<string, DedupRule>>(text) ?? new();
     }
     catch { }
     return new Dictionary<string, DedupRule>();
@@ -1513,7 +1513,7 @@ static void SaveDedup(Dictionary<string, DedupRule> map)
 {
     try
     {
-        File.WriteAllText(DedupPath(), JsonSerializer.Serialize(map,
+        SimonWriteText(DedupPath(), JsonSerializer.Serialize(map,
             new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
     }
     catch { }
@@ -1558,11 +1558,14 @@ static List<DedupCandidate> FindNearDuplicates(string dbPath, int windowHours)
     {
         conn.Open();
         var c = conn.CreateCommand();
+        // 窗口文章数上限:极端场景(48h 内数万篇)不整窗载入,只取最近 N 篇做去重
         c.CommandText = @"
             SELECT i.Id, i.FeedId, i.Title, f.Title, i.Link,
                    COALESCE(NULLIF(i.Content,''), i.Description,'')
             FROM Items i JOIN Feeds f ON i.FeedId = f.Id
-            WHERE i.Status = 'active' AND i.PublishDate >= @cut";
+            WHERE i.Status = 'active' AND i.PublishDate >= @cut
+            ORDER BY i.PublishDate DESC
+            LIMIT 20000";
         c.Parameters.AddWithValue("@cut", cutoff);
         using var r = c.ExecuteReader();
         while (r.Read())
@@ -1628,10 +1631,13 @@ static List<DedupCluster> FindDuplicateClusters(string dbPath, int windowHours)
     {
         conn.Open();
         var c = conn.CreateCommand();
+        // 窗口文章数上限:极端场景(48h 内数万篇)不整窗载入,只取最近 N 篇做去重
         c.CommandText = @"
             SELECT i.Id, i.FeedId, i.Title, f.Title, COALESCE(NULLIF(i.Content,''), i.Description,'')
             FROM Items i JOIN Feeds f ON i.FeedId = f.Id
-            WHERE i.Status = 'active' AND i.PublishDate >= @cut";
+            WHERE i.Status = 'active' AND i.PublishDate >= @cut
+            ORDER BY i.PublishDate DESC
+            LIMIT 20000";
         c.Parameters.AddWithValue("@cut", cutoff);
         using var r = c.ExecuteReader();
         while (r.Read())
@@ -6207,7 +6213,9 @@ static bool SimonIsReadOnly(string cmd, string sub)
     => cmd is "-l" or "--list" or "--show" or "--content" or "--versions" or "--history"
           or "--diff" or "--grep" or "--search" or "--today" or "--feed-info" or "--export-opml"
           or "--help" or "-h" or "--version" or "--insights" or "--insights-interval" or "simon"
-       || (cmd == "telemetry" && sub is "status" or "show");
+       || (cmd == "telemetry" && sub is "status" or "show")
+       || (cmd == "--dedup" && sub is "list" or "scan")
+       || (cmd == "--policy" && sub == "list");
 
 // 统一拦截入口:返回被拦截的原因;null=放行
 static string? SimonCheckBlock(string cmd, string[] args)
@@ -6253,7 +6261,11 @@ static void SimonCli(string[] args, string dbPath, bool fromTui = false)
         if (lvl >= 3 && cur < 3)
         {
             string? err = SimonEncryptDb(dbPath);
-            if (err == null) Console.WriteLine(Lang.T("数据文件已加密(SQLCipher),原库备份为 {0}", ".plaintext.bak"));
+            if (err == null)
+            {
+                SimonEncryptSensitiveFiles();   // 迁移 fulltext 缓存 + dedup.json 为 AES 加密
+                Console.WriteLine(Lang.T("数据文件已加密(SQLCipher),原库备份为 {0}", ".plaintext.bak"));
+            }
             else { SetExit(); Console.WriteLine(Lang.T("加密失败: {0}(数据仍为明文,请重试)", err)); }
         }
         return;
@@ -6440,6 +6452,87 @@ static string? SimonEncryptDb(string dbPath)
         return null;
     }
     catch (Exception ex) { return ex.Message; }
+}
+
+// ── 敏感文件 AES-GCM 加密(挡位 3;密钥复用 simon_db_key,不额外产生密钥)────────────────
+// 文件格式: "SIPC1"(5) + nonce(12) + tag(16) + ciphertext
+// 读取兼容旧明文文件;解密失败返回 null(调用方容错)
+
+static byte[] SimonKeyBytes() => Convert.FromBase64String(SimonDbKey());
+
+static bool SimonIsEncrypted(byte[] data) => data.Length > 33 && data.AsSpan(0, 5).SequenceEqual("SIPC1"u8);
+
+static byte[] SimonEncryptBytes(byte[] plain)
+{
+    using var aes = new System.Security.Cryptography.AesGcm(SimonKeyBytes(), 16);
+    var nonce = new byte[12];
+    System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
+    var ct = new byte[plain.Length];
+    var tag = new byte[16];
+    aes.Encrypt(nonce, plain, ct, tag);
+    var outB = new byte[5 + 12 + 16 + ct.Length];
+    "SIPC1"u8.CopyTo(outB);
+    nonce.CopyTo(outB, 5);
+    tag.CopyTo(outB, 17);
+    ct.CopyTo(outB, 33);
+    return outB;
+}
+
+static byte[]? SimonDecryptBytes(byte[] data)
+{
+    try
+    {
+        if (!SimonIsEncrypted(data)) return data;   // 明文(旧数据/未加密态)
+        using var aes = new System.Security.Cryptography.AesGcm(SimonKeyBytes(), 16);
+        var plain = new byte[data.Length - 33];
+        aes.Decrypt(data.AsSpan(5, 12), data.AsSpan(33), data.AsSpan(17, 16), plain);
+        return plain;
+    }
+    catch { return null; }
+}
+
+// 挡位 3(存在 .db-encrypted 标记)时加密写文本文件;否则明文写(兼容)
+static void SimonWriteText(string path, string content)
+{
+    bool enc = File.Exists(Path.Combine(Path.GetDirectoryName(path) ?? "", ".db-encrypted"));
+    if (enc) File.WriteAllBytes(path, SimonEncryptBytes(System.Text.Encoding.UTF8.GetBytes(content)));
+    else File.WriteAllText(path, content);
+}
+
+// 读文本文件(兼容明文/密文);不存在或解密失败返回 null
+static string? SimonReadText(string path)
+{
+    try
+    {
+        if (!File.Exists(path)) return null;
+        var plain = SimonDecryptBytes(File.ReadAllBytes(path));
+        return plain == null ? null : System.Text.Encoding.UTF8.GetString(plain);
+    }
+    catch { return null; }
+}
+
+// 挡位 3 开启时,把现存明文敏感文件迁移为加密(fulltext 缓存 + dedup.json)
+static void SimonEncryptSensitiveFiles()
+{
+    try
+    {
+        string dedup = Path.Combine(dataDir, "dedup.json");
+        if (File.Exists(dedup))
+        {
+            var data = File.ReadAllBytes(dedup);
+            if (!SimonIsEncrypted(data)) File.WriteAllBytes(dedup, SimonEncryptBytes(data));
+        }
+        string dir = Path.Combine(dataDir, "fulltext");
+        if (Directory.Exists(dir))
+        {
+            foreach (var f in Directory.GetFiles(dir, "*.md"))
+            {
+                var data = File.ReadAllBytes(f);
+                if (!SimonIsEncrypted(data)) File.WriteAllBytes(f, SimonEncryptBytes(data));
+            }
+        }
+    }
+    catch { /* 迁移失败不阻断;后续写入仍走加密 */ }
 }
 
 // 解析报告间隔：off / 0 → null；Nd → N 天；否则 null（无效）
