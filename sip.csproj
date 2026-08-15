@@ -13,6 +13,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 排除测试工程,避免 SDK 默认 Glob 把 tests/**/*.cs 编进主程序 -->
+    <Compile Remove="tests\**\*.cs" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
     <!-- 语言文件默认外置（发布时复制到 exe 旁 languages/，可编辑定制） -->
     <None Include="languages\**\*.json" />
     <!-- 同时内嵌为程序集资源，单文件即自带官方翻译：数据目录缺失时自动恢复 -->

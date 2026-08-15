@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- 与主工程同版本,用于在测试里构造 fixture 数据库 -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0-preview.3.25171.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 只依赖构建产物,不引用程序集(主程序是顶层语句,无法单元引用) -->
+    <ProjectReference Include="..\..\sip.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- 把 sip 构建输出(含 runtimes/ 原生库)复制到测试输出目录的 sip/ 下 -->
+  <Target Name="CopySipOutput" AfterTargets="Build">
+    <ItemGroup>
+      <SipFiles Include="$(MSBuildThisFileDirectory)..\..\bin\$(Configuration)\net10.0\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SipFiles)"
+          DestinationFiles="@(SipFiles->'$(OutputPath)sip\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

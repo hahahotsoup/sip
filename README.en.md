@@ -44,7 +44,7 @@ Take it slow, no rush. It's a cure for information overload.
 
 sip revolves around five verbs, each backed by real features with concrete value:
 
-- **Collect** — add a few RSS / RSSHub sources, or import from OPML in one go. All-local, no sign-up, no cloud — you pick the sources.
+- **Collect** — add a few RSS sources, or import from OPML in one go. All-local, no sign-up, no cloud — you pick the sources.
 - **Preserve** — fetch the full text when a summary is too short (`--fulltext`); versions are kept automatically; reading progress remembers where you stopped, so you can pick it back up.
 - **Track** — the author quietly flips a conclusion or a number? `sip --diff` shows you the before and after in one screen; silently-edited facts can't hide.
 - **Filter** — five or six sources repost the same piece? It clusters them so you don't re-read; each day a small bowl of Today's Hot Soup, not greedy; Source Policy helps you lower the frequency of or archive sources you don't read.
