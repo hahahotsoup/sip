@@ -1,4 +1,4 @@
-﻿// ===== TUI 应用层:从 RssReader.cs 拆出的 TUI 专属代码(纯搬移,逻辑未改)=====
+// ===== TUI 应用层:从 RssReader.cs 拆出的 TUI 专属代码(纯搬移,逻辑未改)=====
 // 与 RssReader.cs 同属 partial class Program(顶层语句入口文件生成的类),
 // 因此可自由调用 RssReader.cs 中的顶层函数(同类 private static 成员),
 // 反之亦然。partial 类无法访问入口文件的 Main 局部变量(dataDir 等),
@@ -160,6 +160,11 @@ static void ShowTodayPage(string dbPath)
 #pragma warning restore CS0618
 
 #pragma warning disable CS0618  // 使用尚未迁移的静态 Application API
+
+// TUI 侧栏单源展开的最大加载条数(百万级适配:超大源不全量载入,防卡 UI/爆内存;
+// 折叠状态的源计数始终显示真实总数,展开仅显示前 N 条)
+const int TuiArticleLoadLimit = 20000;
+
 static async Task<int> RunTui(string dbPath, bool appReady = false, bool showStartScreen = true, long preselectItemId = 0)
 {
     if (!appReady) Application.Init();
@@ -171,7 +176,7 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
 
         // —— 左侧：订阅源 + 文章 侧栏（文章标题自动换行显示）——
         // 侧栏为自绘 View：来源可展开/折叠，标题过长时自动换行（CJK 宽度感知）
-        var tree = new SidebarView(feedId => LoadArticleNodes(feedId, dbPath))
+        var tree = new SidebarView(feedId => LoadArticleNodes(feedId, dbPath, TuiArticleLoadLimit))
         {
             X = 0,
             Y = 0,
@@ -2269,7 +2274,7 @@ static Markdown CreateMarkdownView()
 // 把一篇文章渲染成 Markdown 字符串（TUI 正文区与 CLI 预览共用）
 // showFetchHint=true（仅 TUI）：正文过短且未抓取全文时，提示输入 fetch
 
-static IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
+static IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath, int limit = 0)
 {
     var nodes = new List<TuiNode>();
     using var conn = new SqliteConnection($"Data Source={dbPath}");
@@ -2289,8 +2294,10 @@ static IEnumerable<TuiNode> LoadArticleNodes(int feedId, string dbPath)
         )
         WHERE Guid = '' OR rn = 1
         ORDER BY Id
+        " + (limit > 0 ? "LIMIT @limit" : "") + @"
     ";
     cmd.Parameters.AddWithValue("@fid", feedId);
+    if (limit > 0) cmd.Parameters.AddWithValue("@limit", limit);
     var signals = LoadSignals();
     using var r = cmd.ExecuteReader();
     while (r.Read())
@@ -2538,11 +2545,14 @@ class SidebarView : View
         _roots.Clear();
         _roots.AddRange(feeds);
         _articles.Clear();
-        foreach (var f in _roots)
-            _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
-        // 保留用户已展开的源（默认折叠）；已被删除的源从展开集合里清掉
+        // 懒加载(百万级适配):启动/刷新时不再对每个源全量加载文章
+        // (100 源 × 1 万篇 = 百万 TuiNode,启动即卡死/爆内存);
+        // 只加载用户已展开的源,其余在 Toggle 展开时才加载
         var valid = new HashSet<int>(_roots.Select(f => f.FeedId));
         _expanded.RemoveWhere(id => !valid.Contains(id));
+        foreach (var f in _roots)
+            if (_expanded.Contains(f.FeedId))
+                _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
         _sel = 0;
         _scrollTop = 0;
         RebuildRows();
@@ -2552,7 +2562,12 @@ class SidebarView : View
 
     public void ExpandAll()
     {
-        foreach (var f in _roots) _expanded.Add(f.FeedId);
+        foreach (var f in _roots)
+        {
+            _expanded.Add(f.FeedId);
+            if (!_articles.ContainsKey(f.FeedId))   // 懒加载
+                _articles[f.FeedId] = _childLoader(f.FeedId).ToList();
+        }
         RebuildRows();
         SetNeedsDraw();
     }
@@ -2560,7 +2575,13 @@ class SidebarView : View
     public void Toggle(TuiNode n)
     {
         if (n == null || !n.IsFeed) return;
-        if (!_expanded.Remove(n.FeedId)) _expanded.Add(n.FeedId);
+        bool nowExpanded = !_expanded.Remove(n.FeedId);
+        if (nowExpanded)
+        {
+            _expanded.Add(n.FeedId);
+            if (!_articles.ContainsKey(n.FeedId))   // 懒加载:展开时才拉取该源文章
+                _articles[n.FeedId] = _childLoader(n.FeedId).ToList();
+        }
         RebuildRows();
         int idx = _rows.FindIndex(r => ReferenceEquals(r.Node, n));
         if (idx >= 0) _sel = idx;
