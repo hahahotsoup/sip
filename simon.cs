@@ -101,7 +101,9 @@ static bool SimonIsReadOnly(string cmd, string sub)
           or "--help" or "-h" or "--version" or "--insights" or "--insights-interval" or "simon"
        || (cmd == "telemetry" && sub is "status" or "show")
        || (cmd == "--dedup" && sub is "list" or "scan")
-       || (cmd == "--policy" && sub == "list");
+       || (cmd == "--policy" && sub == "list")
+       // Phase1 ingest:只读子命令(list/show/retrieve/groups/ask)在挡位 2 放行;其余写子命令默认拦截
+       || (cmd == "ingest" && sub is "list" or "show" or "retrieve" or "groups" or "ask");
 
 // 统一拦截入口:返回被拦截的原因;null=放行。
 // 用户语义:挡位 2 = CLI 写操作一律拒绝;挡位 3 = CLI 所有调用一律拒绝。

@@ -1,4 +1,4 @@
-﻿// ===== 引用外部包 =====
+// ===== 引用外部包 =====
 // using 相当于导入工具包，每个包提供不同的工具
 // System.* 是 C# 自带的（网络、文件、文字处理）
 // CodeHollow.FeedReader 是第三方包，专门解析 RSS/Atom
@@ -2644,6 +2644,10 @@ static async Task RunCli(string[] args, string dbPath)
         case "--onboarding":
             OnboardingCli(args.Skip(1).ToArray(), dbPath);
             return;
+        case "ingest":
+            // Phase1「广开言路」:非 RSS 信息的第二扇门(证据包) — 见 Ingest.cs
+            IngestCli(args.Skip(1).ToArray(), dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
@@ -2754,6 +2758,18 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  --dedup scan|hide <hiddenId> <canonicalId>|list|undo <key>  cross-source duplicate detection & hide (--json)"));
     Console.WriteLine(Lang.T("  --policy list|set <feedId> <action> [args]|remove <feedId>  source rules you confirm (tag / lower frequency / archive / keep / unsubscribe)"));
     Console.WriteLine(Lang.T("  --onboarding [list|<category>]|add <category> <index|all>  recommended source templates (edit templates.json)"));
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("Ingest (collect — non-RSS sources):"));
+    Console.WriteLine(Lang.T("  ingest --stdin [--origin <url>] [--producer <name>] [--ttl <days>] [--yes]  store text from stdin as evidence"));
+    Console.WriteLine(Lang.T("  ingest --url <url> [--ttl <days>] [--yes]  store a web page as evidence (SSRF-guarded)"));
+    Console.WriteLine(Lang.T("  ingest --evidence <file | --stdin>  import a sip-evidence-v1 evidence package"));
+    Console.WriteLine(Lang.T("  ingest list [--stale] [--group N]  browse evidence; ingest show <id>  view one"));
+    Console.WriteLine(Lang.T("  ingest confirm <id>  mark as verified by you; ingest rm <id> [--yes]  forget"));
+    Console.WriteLine(Lang.T("  ingest refresh [id | --stale | --all]  re-fetch & track changes (stale watch targets by default)"));
+    Console.WriteLine(Lang.T("  ingest group add <label> [--seed <query>]  define a topic (you decide); ingest groups  browse"));
+    Console.WriteLine(Lang.T("  ingest groups  list topics"));
+    Console.WriteLine(Lang.T("  ingest retrieve <query> [--top N] [--group N]  search evidence with full context (for agents)"));
+    Console.WriteLine(Lang.T("  ingest ask <question>  answer from your evidence only (quote, never paraphrase)"));
     Console.WriteLine(Lang.T("  -h, --help       show this help"));
     Console.WriteLine(Lang.T("  --version        show version"));
     Console.WriteLine();
@@ -3523,6 +3539,72 @@ static void InitDatabase(string dbPath)
         -- 全文检索索引(FTS5 + trigram,中文子串可搜):
         -- 数据在 Items,此表只存索引,rowid = Items.Id,由代码增量维护(见 SyncFtsInsert / 删除路径)
         CREATE VIRTUAL TABLE IF NOT EXISTS ItemsFts USING fts5(Title, Content, Description, Summary, tokenize='trigram');
+
+        -- ══════════ Phase1 ingest:证据包独立表(零改动现有表;规划 v1.1) ══════════
+        -- Evidence = 证据包(全体系核心数据结构,schema: sip-evidence-v1);
+        -- 旧版本/失效版本只改 Status 标记(superseded/invalid),永不删除——「版本即事实」
+        CREATE TABLE IF NOT EXISTS Evidence (
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            Schema      TEXT NOT NULL DEFAULT 'sip-evidence-v1',
+            SourceType  TEXT NOT NULL,          -- Phase1 取值: 'evidence'(stdin/证据包) | 'watch'(URL直存=监控目标初始快照); 预留 rss/md
+            SourceKey   TEXT NOT NULL,          -- 'watch:<规范化url>' 或 'evidence:<生产者>'(如 evidence:argo)
+            SourceName  TEXT,                   -- 来源名(展示/簇统计)
+            SourceUrl   TEXT,                   -- 原文地址:可溯源、可回源头核验
+            Title       TEXT,                   -- 标题(展示用)
+            Excerpt     TEXT,                   -- 原文片段:ask 引用只从这里摘,防转述失真
+            Content     TEXT,                   -- 幂等清洗后全文
+            Hash        TEXT,                   -- 内容哈希(版本指纹):变了才建新版
+            Version     INTEGER DEFAULT 1,      -- 同一 SourceKey 的第几版
+            Status      TEXT DEFAULT 'active',  -- active | superseded | invalid(旧版标记不删除)
+            StatusNote  TEXT,                   -- invalid 原因(404/抓取失败…),只记事实
+            PrevId      INTEGER,                -- 上一版本 Id(版本链)
+            Grade       TEXT,                   -- ⚪润色/🟡调整/🔴反转(距离区间事实标签,非价值判断)
+            Reversed    INTEGER DEFAULT 0,      -- 观点反转检测命中(距离+立场词双验证)
+            CapturedAt  TEXT,                   -- valid_at:原文声称/抓取时间
+            ObservedAt  TEXT,                   -- observed_at:本地记录时间(双时态)
+            Verified    INTEGER DEFAULT 0,      -- 只有你核实过才算 1
+            ConfirmedAt TEXT,                   -- 核实时间戳(修正也留痕)
+            Freshness   TEXT DEFAULT 'fresh',   -- fresh | stale
+            TtlDays     INTEGER DEFAULT 7,      -- 保鲜 TTL(按源类型默认,可 --ttl 覆盖)
+            Consensus   REAL  DEFAULT 0,        -- 共识分:公式确定(0.5×Verified + 0.5×同主题异源覆盖)
+            ProducerMeta TEXT,                  -- 外部可信度只作参考(如 {argo_selection:0.8});永不进共识
+            GroupId     INTEGER,                -- 主题分组(你定义的主题)
+            DynamicPage INTEGER DEFAULT 0       -- 动态页面标注(幂等清洗不稳时标记)
+        );
+        CREATE INDEX IF NOT EXISTS idx_evidence_status    ON Evidence (Status, Freshness);
+        CREATE INDEX IF NOT EXISTS idx_evidence_url       ON Evidence (SourceUrl);
+        CREATE INDEX IF NOT EXISTS idx_evidence_group     ON Evidence (GroupId);
+        CREATE INDEX IF NOT EXISTS idx_evidence_sourcekey ON Evidence (SourceKey);
+
+        -- Groups = 你定义的主题(簇心向量与 embedding 模型绑定;算法只归组,不替你建组)
+        CREATE TABLE IF NOT EXISTS Groups (
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            Label       TEXT NOT NULL,          -- 主题词:你定义的
+            Centroid    BLOB,                   -- 簇心向量(seed 时生成)
+            ModelId     INTEGER,                -- 关联 embedding 模型 Id
+            CreatedAt   TEXT,
+            UpdatedAt   TEXT
+        );
+
+        -- WatchTargets = 网页监控目标(Phase1 仅预置:URL直存=初始快照;Phase2 watch 接管监控)
+        CREATE TABLE IF NOT EXISTS WatchTargets (
+            Id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            Url             TEXT NOT NULL UNIQUE,  -- watch:<url> 归一化地址
+            FirstEvidenceId INTEGER,               -- 初始快照(Phase1 直存那条)
+            LastCheckedAt   TEXT,                  -- Phase2 监控用
+            LastHash        TEXT,                  -- Phase2 监控用
+            CreatedAt       TEXT
+        );
+
+        -- EvidenceVectors = 证据向量索引(复用 embedding 服务,与 Items 的 Vectors 表隔离)
+        CREATE TABLE IF NOT EXISTS EvidenceVectors (
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            EvidenceId  INTEGER NOT NULL,
+            ModelId     INTEGER NOT NULL,
+            Vector      BLOB    NOT NULL,
+            CreatedAt   TEXT,
+            UNIQUE (EvidenceId, ModelId)
+        );
     ";
     cmd.ExecuteNonQuery();
 
@@ -5046,7 +5128,8 @@ static int ExitCodeFor(string code) => code switch
 {
     "NETWORK_ERROR" or "MODEL_UNAVAILABLE" => 2,
     "API_KEY_MISSING" or "API_KEY_INVALID" or "NO_INDEX"
-        or "FEED_NOT_FOUND" or "ITEM_NOT_FOUND" or "EMPTY_QUERY" => 3,
+        or "FEED_NOT_FOUND" or "ITEM_NOT_FOUND" or "EMPTY_QUERY"
+        or "EVIDENCE_NOT_FOUND" or "EMPTY_STDIN" => 3,
     _ => 1,
 };
 
@@ -6608,6 +6691,14 @@ class SipSettings
     public string LastInsightsAt { get; set; } = "";
     public int? FloodThresholdPerDay { get; set; }   // 今日高频源阈值（单日新增）；null=自动 max(20,中位数×5)
     public double DedupThreshold { get; set; } = 0.8; // 跨源去重段落重合度阈值
+    // 改动分级阈值(你定;语义距离 = 1 − cos(旧版,新版)):
+    //   距离 < ChangeGradePolish → ⚪润色(重写但意思没变)  < ChangeGradeReverse → 🟡调整  ≥ → 🔴反转
+    public double ChangeGradePolish { get; set; } = 0.08;
+    public double ChangeGradeReverse { get; set; } = 0.45;
+    // 语义去重阈值(cos;存前检测,命中自动跳过/询问,不替你删)
+    public double DedupSemanticThreshold { get; set; } = 0.92;
+    // 主题归组阈值(cos;只归组不建组,主题由你定义)
+    public double GroupMatchThreshold { get; set; } = 0.75;
     // 孟思琳(simon)安全守护挡位:1=基础 2=严格 3=极致。
     // 默认开启、无法关闭(无 0),只能调节挡位——降挡必须交互终端
     public int SimonLevel { get; set; } = 1;

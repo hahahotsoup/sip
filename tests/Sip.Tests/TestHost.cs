@@ -33,6 +33,28 @@ public sealed class SipInstance : IDisposable
 
     public (int ExitCode, string Stdout, string Stderr) Run(params string[] args)
     {
+        using var p = Process.Start(CreatePsi(args))!;
+        string so = p.StandardOutput.ReadToEnd();
+        string se = p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(60_000)) { try { p.Kill(); } catch { } }
+        return (p.ExitCode, so, se);
+    }
+
+    /// <summary>带 stdin 输入调用(ingest --stdin / --evidence --stdin 测试用)。
+    /// 先写 stdin 再读 stdout,避免大输入时管道缓冲死锁。</summary>
+    public (int ExitCode, string Stdout, string Stderr) RunWithInput(string input, params string[] args)
+    {
+        using var p = Process.Start(CreatePsi(args))!;
+        p.StandardInput.Write(input);
+        p.StandardInput.Close();
+        string so = p.StandardOutput.ReadToEnd();
+        string se = p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(60_000)) { try { p.Kill(); } catch { } }
+        return (p.ExitCode, so, se);
+    }
+
+    private ProcessStartInfo CreatePsi(string[] args)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = Path.Combine(Root, OperatingSystem.IsWindows() ? "sip.exe" : "sip"),
@@ -47,11 +69,7 @@ public sealed class SipInstance : IDisposable
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         psi.Environment["SIP_SIMON_KEY_NAME"] = KeyName;   // 每实例隔离凭据命名空间
-        using var p = Process.Start(psi)!;
-        string so = p.StandardOutput.ReadToEnd();
-        string se = p.StandardError.ReadToEnd();
-        if (!p.WaitForExit(60_000)) { try { p.Kill(); } catch { } }
-        return (p.ExitCode, so, se);
+        return psi;
     }
 
     /// <summary>直接对隔离库执行 SQL(构造 fixture / 断言 DB 状态)。

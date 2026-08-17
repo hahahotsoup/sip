@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>sip</AssemblyName>
     <RootNamespace>Sip</RootNamespace>
-    <Version>1.1.45</Version>
+    <Version>1.2.0</Version>
     <DebugSymbols>false</DebugSymbols>
     <DebugType>none</DebugType>
   </PropertyGroup>
@@ -53,9 +53,12 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
     <PackageReference Include="SQLitePCLRaw.provider.e_sqlcipher" Version="2.1.11" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlcipher" Version="2.1.11" />
-    <!-- 显式升级 bundle 到 2.1.11(2.1.10 有已知高危漏洞 GHSA-2m69-gcr7-jv3q) -->
+    <!-- bundle 保持 2.1.11(2.1.13 会把 provider.e_sqlite3 拉高,与 SQLCipher provider 2.1.11 上限冲突 NU1605) -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
-    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.11" />
+    <!-- 混版修复:core + 原生库 lib.e_sqlite3 升 2.1.13(2.1.x 修复末版,消 GHSA-2m69-gcr7-jv3q);
+         provider/lib.e_sqlcipher 保持 2.1.11(SQLCipher 上限)。2.1.x 线 API 兼容,挡位 3 加密由测试验证 -->
+    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.13" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.13" />
     <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 

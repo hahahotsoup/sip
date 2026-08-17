@@ -1,11 +1,14 @@
 ---
 name: sip-rss
-description: 调用 sip（RSS 阅读器）CLI 进行订阅管理、全文搜索与语义搜索。用于执行 AI 任务时检索 RSS 文章、管理订阅源。当用户要求搜索/检索 RSS 内容、查看订阅源、下载或管理文章时使用。
+description: 调用 sip（本地个人信息库）CLI 进行订阅管理、全文/语义搜索、证据收集（ingest）与证据问答（retrieve/ask）。当用户要求搜索/检索内容、管理订阅源、沉淀证据、追问变化或让 AI 从可信库回答时使用。
 ---
 
-# sip — RSS 阅读器 CLI 使用指南
+# sip — 个人信息库 CLI 使用指南
 
-`sip` 是一个本地 RSS 阅读器，所有数据存于 SQLite（`rss.db`）。AI 通过命令行调用它来完成两类任务。
+> 📘 **完整契约与安全纪律见同目录《高级用户手册》**：[高级用户手册.md](./高级用户手册.md)（Agent 必读：命令契约 / simon 挡位 / 故障排查 / 安全纪律）。
+> 👤 用户侧白话版：`docs/用户快速手册.md`。
+
+`sip` 是本地优先的个人信息库（RSS + 证据包），所有数据存于 SQLite（`rss.db`）。AI 通过命令行调用它来完成检索、管理、沉淀与问答。
 
 ## ⚠️ 先初始化，别默认模型已就绪
 
@@ -84,6 +87,17 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
 | `sip simon status [--json] \| level <1\|2\|3> \| export-key <file> \| import-key <file>` | 孟思琳(simon)安全守护（**默认开启、无法关闭**，只有挡位 1/2/3）：`status` 查当前挡位与加密状态（`--json` 结构化）；`level` 调挡位（**降挡只能在 TUI 命令栏**，CLI 降挡报 `SIMON_LOCKED`，AI 不要代跑）；`export-key`/`import-key` 换机迁移加密密钥 |
+| `sip ingest --stdin [--origin <url>] [--producer <名>] [--yes] [--json]` | **收集证据**：把管道输入（如 Argo/搜索结果原文）存进本地证据库；`--origin` 记来源 URL、`--producer` 记生产者（如 argo）。**查完即存**的钥匙 |
+| `sip ingest --url <url> [--yes]` | **URL 直存**：抓网页存为证据（SSRF 防护，回环/内网/云元数据一律拒绝） |
+| `sip ingest --evidence <file>` | 导入 sip-evidence-v1 证据包（schema 校验；缺 schema/content 报错退出 1） |
+| `sip ingest list [--stale] [--group N] [--json]` / `show <id>` | 浏览证据；`--stale` 只看过期、`--group N` 按主题 |
+| `sip ingest refresh [id\|--stale\|--all] [--json]` | **追踪变化**：重查原文→哈希比对→没变/分级变化(⚪润色/🟡调整/🔴反转)/失效(标 invalid 不覆盖)；默认只刷过期的 watch 目标 |
+| `sip ingest confirm <id>` / `rm <id> [--yes]` | 你核实过（Verified=1+重算共识）/ 遗忘删除 |
+| `sip ingest group add <标签> [--seed <查询>]\|rename\|rm\|groups` | **主题分组**（你定义主题；存证据自动归组；需要先 `--init` 配 AI） |
+| `sip ingest retrieve <查询> [--top N] [--group N] [--json]` | **RAG 就绪**：检索证据，命中带原文片段/来源URL/版本/新鲜度/分级/反转/**hasDiff(被改过)**——给 Agent 引用 |
+| `sip ingest ask "<问题>" [--json] [--ignoresafeannouncement]` | **只摘录不转述**的问答：答案只能由库里证据的原文片段逐字摘录；库里没有 → 直接说"不知道"；需要 LLM（`--init` 配置） |
+
+> ⚠️ **ingest 纪律**：只存"会再用/会变且你在意/你确认过的"（三问判据）；去重命中(cos≥0.92)时非交互自动跳过并返回 `duplicateOf`（不替你删），确需强存加 `--force`；挡位 2 下 ingest 写子命令被拦（只读的 list/show/retrieve/groups/ask 可用）。
 
 ## ⚠️ 安全守护：孟思琳(simon)——命令可能被拦，先查挡位
 
