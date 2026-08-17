@@ -4,6 +4,8 @@
 
 > ——"Savor it, sip it slow."
 
+> ⏸️ **Due to recent DeepSeek price increases and other factors, development activity will slow down considerably.**
+
 > 📖 This development phase is wrapping up for now. If you'd like to know how this software came to be, read: [《读不进去书的人，做了一个读书的软件》](https://blog.hotsouprealm.top/读不进去书的人，做了一个读书的软件/)
 
 Welcome~
