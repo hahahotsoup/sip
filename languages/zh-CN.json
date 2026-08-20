@@ -667,5 +667,17 @@
   "LLM request failed": "LLM 请求失败",
   "(empty answer — LLM returned nothing)": "（空回答——LLM 未返回内容）",
   "你核实过": "你核实过",
-  "未核实": "未核实"
+  "未核实": "未核实",
+  "Usage: sip ingest tree <id> [--depth N] [--json]": "用法：sip ingest tree <id> [--depth N] [--json]",
+  "Usage: sip ingest tag <list|add|rm> [--json]": "用法：sip ingest tag <list|add|rm> [--json]",
+  "Usage: sip ingest tag add <evidenceId> <tagName> [--json]": "用法：sip ingest tag add <evidenceId> <tagName> [--json]",
+  "Usage: sip ingest tag rm <evidenceId> <tagName> [--json]": "用法：sip ingest tag rm <evidenceId> <tagName> [--json]",
+  "No evidence found with id {0}": "找不到编号为 {0} 的证据",
+  "No tags found": "没有标签",
+  "Tag '{0}' added to evidence {1}": "标签「{0}」已添加到证据 {1}",
+  "Tag '{0}' removed from evidence {1}": "标签「{0}」已从证据 {1} 移除",
+  "Tag '{0}' was not linked to evidence {1}": "标签「{0}」未关联到证据 {1}",
+  "Tag not found": "找不到该标签",
+  "Invalid evidence id or tag name": "无效的证据编号或标签名",
+  "Failed to create tag": "创建标签失败"
 }

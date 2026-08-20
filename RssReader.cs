@@ -3569,12 +3569,26 @@ static void InitDatabase(string dbPath)
             Consensus   REAL  DEFAULT 0,        -- 共识分:公式确定(0.5×Verified + 0.5×同主题异源覆盖)
             ProducerMeta TEXT,                  -- 外部可信度只作参考(如 {argo_selection:0.8});永不进共识
             GroupId     INTEGER,                -- 主题分组(你定义的主题)
-            DynamicPage INTEGER DEFAULT 0       -- 动态页面标注(幂等清洗不稳时标记)
+            DynamicPage INTEGER DEFAULT 0,      -- 动态页面标注(幂等清洗不稳时标记)
+            FragmentId  TEXT,                   -- 树状评论:子证据的父证据ID(如 reply:123456)
+            Platform    TEXT,                   -- 平台标识(bilibili/twitter/reddit等)
+            ContentId   TEXT,                   -- 内容ID(平台内的唯一标识)
+            Author      TEXT,                   -- 作者
+            CanonicalUrl TEXT,                  -- 规范化URL(同一内容不同URL指向同一证据)
+            Context     TEXT,                   -- 上下文(引用的父评论内容摘要)
+            Snapshot    TEXT,                   -- 快照(原始HTML/JSON)
+            Note        TEXT,                   -- 个人备注
+            WatchEnabled INTEGER DEFAULT 0,     -- 是否启用监控
+            WatchInterval INTEGER DEFAULT 5,    -- 监控间隔(分钟)
+            WatchLastCheckedAt TEXT,            -- 最后检查时间
+            WatchLastHash TEXT                  -- 最后内容哈希(用于变化检测)
         );
         CREATE INDEX IF NOT EXISTS idx_evidence_status    ON Evidence (Status, Freshness);
         CREATE INDEX IF NOT EXISTS idx_evidence_url       ON Evidence (SourceUrl);
         CREATE INDEX IF NOT EXISTS idx_evidence_group     ON Evidence (GroupId);
         CREATE INDEX IF NOT EXISTS idx_evidence_sourcekey ON Evidence (SourceKey);
+        CREATE INDEX IF NOT EXISTS idx_evidence_fragment  ON Evidence (FragmentId);
+        CREATE INDEX IF NOT EXISTS idx_evidence_platform  ON Evidence (Platform);
 
         -- Groups = 你定义的主题(簇心向量与 embedding 模型绑定;算法只归组,不替你建组)
         CREATE TABLE IF NOT EXISTS Groups (
@@ -3605,6 +3619,26 @@ static void InitDatabase(string dbPath)
             CreatedAt   TEXT,
             UNIQUE (EvidenceId, ModelId)
         );
+
+        -- Tags = 标签(多对多关联)
+        CREATE TABLE IF NOT EXISTS Tags (
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            Name        TEXT NOT NULL UNIQUE,      -- 标签名
+            Color       TEXT,                      -- 标签颜色(可选)
+            CreatedAt   TEXT,
+            UpdatedAt   TEXT
+        );
+
+        -- EvidenceTags = 证据-标签关联表(多对多)
+        CREATE TABLE IF NOT EXISTS EvidenceTags (
+            EvidenceId  INTEGER NOT NULL,
+            TagId       INTEGER NOT NULL,
+            CreatedAt   TEXT,
+            PRIMARY KEY (EvidenceId, TagId),
+            FOREIGN KEY (EvidenceId) REFERENCES Evidence(Id) ON DELETE CASCADE,
+            FOREIGN KEY (TagId) REFERENCES Tags(Id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_evidencetags_tag ON EvidenceTags (TagId);
     ";
     cmd.ExecuteNonQuery();
 
@@ -3639,6 +3673,9 @@ static void InitDatabase(string dbPath)
     catch (SqliteException) { /* 列已存在则忽略 */ }
     try { cmd.CommandText = "ALTER TABLE Feeds ADD COLUMN LastCheckedAt TEXT"; cmd.ExecuteNonQuery(); }
     catch (SqliteException) { /* 列已存在则忽略 */ }
+
+    // Phase2 迁移：树状评论+多标签（见 simon.cs）
+    MigratePhase2(dbPath);
 }
 
 // 正常退出标记:下次启动跳过全库 quick_check(大库省 30s+);

@@ -459,5 +459,50 @@ static void SimonEncryptSensitiveFiles()
     catch { /* 迁移失败不阻断;后续写入仍走加密 */ }
 }
 
+// ══════════ 数据库迁移:Phase2 树状评论+多标签 ══════════
+// 迁移代码集中管理,便于追踪版本
+static void MigratePhase2(string dbPath)
+{
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+
+        // 给 Evidence 补新字段
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN FragmentId TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN Platform TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN ContentId TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN Author TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN CanonicalUrl TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN Context TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN Snapshot TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN Note TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN WatchEnabled INTEGER DEFAULT 0"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN WatchInterval INTEGER DEFAULT 5"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN WatchLastCheckedAt TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN WatchLastHash TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+
+        // 创建索引
+        try { cmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_evidence_fragment ON Evidence (FragmentId)"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 索引已存在则忽略 */ }
+        try { cmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_evidence_platform ON Evidence (Platform)"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 索引已存在则忽略 */ }
+    }
+    catch { /* 迁移失败不阻断 */ }
+}
+
 
 }

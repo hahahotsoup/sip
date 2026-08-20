@@ -71,6 +71,12 @@ public partial class Program
             case "ask":
                 IngestAsk(args, dbPath, json);
                 return;
+            case "tag":
+                IngestTag(args, dbPath, json);
+                return;
+            case "tree":
+                IngestTree(args, dbPath, json);
+                return;
             default:
                 IngestUsage(json);
                 return;
@@ -93,7 +99,10 @@ public partial class Program
     static (long Id, string Status, string? Error) IngestStore(
         string dbPath, string sourceType, string sourceKey, string? sourceName, string? sourceUrl,
         string? title, string? excerpt, string content, string? producerMeta, int ttlDays, string? capturedAt,
-        bool skipPolishVersion = false)
+        bool skipPolishVersion = false,
+        string? fragmentId = null, string? platform = null, string? contentId = null,
+        string? author = null, string? canonicalUrl = null, string? context = null,
+        string? snapshot = null, string? note = null, List<string>? tags = null)
     {
         try
         {
@@ -172,9 +181,11 @@ public partial class Program
             ins.Transaction = tx2;
             ins.CommandText = @"
                 INSERT INTO Evidence (Schema, SourceType, SourceKey, SourceName, SourceUrl, Title, Excerpt, Content, Hash,
-                                      Version, Status, PrevId, Grade, Reversed, CapturedAt, ObservedAt, Freshness, TtlDays, ProducerMeta)
+                                      Version, Status, PrevId, Grade, Reversed, CapturedAt, ObservedAt, Freshness, TtlDays, ProducerMeta,
+                                      FragmentId, Platform, ContentId, Author, CanonicalUrl, Context, Snapshot, Note)
                 VALUES ('sip-evidence-v1', @st, @k, @sn, @su, @t, @e, @c, @h,
-                        @v, 'active', @prev, @g, @rev, @cap, @now, 'fresh', @ttl, @pm)";
+                        @v, 'active', @prev, @g, @rev, @cap, @now, 'fresh', @ttl, @pm,
+                        @fid, @plat, @cid, @auth, @canurl, @ctx, @snap, @note)";
             ins.Parameters.AddWithValue("@st", sourceType);
             ins.Parameters.AddWithValue("@k", sourceKey);
             ins.Parameters.AddWithValue("@sn", (object?)sourceName ?? DBNull.Value);
@@ -191,6 +202,14 @@ public partial class Program
             ins.Parameters.AddWithValue("@now", now);
             ins.Parameters.AddWithValue("@ttl", ttlDays);
             ins.Parameters.AddWithValue("@pm", (object?)producerMeta ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@fid", (object?)fragmentId ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@plat", (object?)platform ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@cid", (object?)contentId ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@auth", (object?)author ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@canurl", (object?)canonicalUrl ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@ctx", (object?)context ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@snap", (object?)snapshot ?? DBNull.Value);
+            ins.Parameters.AddWithValue("@note", (object?)note ?? DBNull.Value);
             ins.ExecuteNonQuery();
             var lid = conn.CreateCommand();
             lid.Transaction = tx2;
@@ -1047,6 +1066,7 @@ public partial class Program
     {
         bool staleOnly = args.Contains("--stale", StringComparer.OrdinalIgnoreCase);
         int? group = ArgInt(args, "--group");
+        string? tag = ArgValue(args, "--tag");
 
         var rows = new List<(long Id, string Title, string? Source, string SourceType, string? SourceUrl,
                               int Version, string? Grade, int Reversed, int Verified, double Consensus, int? GroupId,
@@ -1058,6 +1078,11 @@ public partial class Program
             // 保鲜看 ObservedAt(本地记录时间);CapturedAt 仅展示
             q.CommandText = "SELECT Id, Title, SourceName, SourceType, SourceUrl, Version, Grade, Reversed, Verified, Consensus, GroupId, Freshness, TtlDays, ObservedAt, CapturedAt, Excerpt FROM Evidence WHERE Status = 'active'";
             if (group.HasValue) { q.CommandText += " AND GroupId = @g"; q.Parameters.AddWithValue("@g", group.Value); }
+            if (!string.IsNullOrWhiteSpace(tag))
+            {
+                q.CommandText += " AND Id IN (SELECT EvidenceId FROM EvidenceTags WHERE TagId = (SELECT Id FROM Tags WHERE Name = @tag))";
+                q.Parameters.AddWithValue("@tag", tag);
+            }
             q.CommandText += " ORDER BY Id DESC";
             using var r = q.ExecuteReader();
             while (r.Read())
@@ -1318,4 +1343,228 @@ public partial class Program
 
     static string? StrProp(JsonElement e, string name)
         => e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+
+    // ══════════ 树状评论:tree 命令 ══════════
+    static void IngestTree(string[] args, string dbPath, bool json)
+    {
+        var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+        if (pos.Length < 2 || !int.TryParse(pos[1], out int rootId))
+        { IngestUsage(json, Lang.T("Usage: sip ingest tree <id> [--depth N] [--json]")); return; }
+
+        int maxDepth = ArgInt(args, "--depth") ?? 10;
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        // 递归 CTE 查询树状评论
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            WITH RECURSIVE tree AS (
+                SELECT Id, Title, Content, FragmentId, 0 as Depth
+                FROM Evidence
+                WHERE Id = @rootId AND Status = 'active'
+                UNION ALL
+                SELECT e.Id, e.Title, e.Content, e.FragmentId, t.Depth + 1
+                FROM Evidence e
+                INNER JOIN tree t ON e.FragmentId = CAST(t.Id AS TEXT)
+                WHERE e.Status = 'active' AND t.Depth < @maxDepth
+            )
+            SELECT Id, Title, Content, Depth FROM tree
+            ORDER BY Depth, Id";
+        cmd.Parameters.AddWithValue("@rootId", rootId);
+        cmd.Parameters.AddWithValue("@maxDepth", maxDepth);
+
+        var items = new List<(long Id, string? Title, string? Content, int Depth)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                items.Add((
+                    reader.GetInt64(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetInt32(3)
+                ));
+            }
+        }
+
+        if (json)
+        {
+            JsonOut(new { success = true, data = new { rootId, count = items.Count, items } });
+        }
+        else
+        {
+            if (items.Count == 0)
+            {
+                Console.WriteLine(Lang.T("No evidence found with id {0}", rootId));
+                return;
+            }
+            foreach (var item in items)
+            {
+                string indent = new string(' ', item.Depth * 2);
+                string preview = (item.Content ?? "").Length > 80 ? (item.Content ?? "")[..80] + "..." : (item.Content ?? "");
+                Console.WriteLine($"{indent}[{item.Id}] {item.Title ?? "(no title)"}");
+                Console.WriteLine($"{indent}    {preview}");
+            }
+        }
+    }
+
+    // ══════════ 多标签系统:tag 命令 ══════════
+    static void IngestTag(string[] args, string dbPath, bool json)
+    {
+        var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+        string sub = pos.Length > 1 ? pos[1].ToLowerInvariant() : "";
+
+        switch (sub)
+        {
+            case "list":
+                IngestTagList(args, dbPath, json);
+                return;
+            case "add":
+                if (pos.Length < 4) { IngestUsage(json, Lang.T("Usage: sip ingest tag add <evidenceId> <tagName> [--json]")); return; }
+                IngestTagAdd(args, dbPath, json);
+                return;
+            case "rm":
+                if (pos.Length < 4) { IngestUsage(json, Lang.T("Usage: sip ingest tag rm <evidenceId> <tagName> [--json]")); return; }
+                IngestTagRm(args, dbPath, json);
+                return;
+            default:
+                IngestUsage(json, Lang.T("Usage: sip ingest tag <list|add|rm> [--json]"));
+                return;
+        }
+    }
+
+    // tag list:列出所有标签
+    static void IngestTagList(string[] args, string dbPath, bool json)
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, Name, Color FROM Tags ORDER BY Name";
+
+        var tags = new List<(long Id, string Name, string? Color)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                tags.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)
+                ));
+            }
+        }
+
+        if (json)
+        {
+            JsonOut(new { success = true, data = new { count = tags.Count, tags } });
+        }
+        else
+        {
+            if (tags.Count == 0)
+            {
+                Console.WriteLine(Lang.T("No tags found"));
+                return;
+            }
+            foreach (var tag in tags)
+                Console.WriteLine($"  [{tag.Id}] {tag.Name} {tag.Color ?? ""}");
+        }
+    }
+
+    // tag add:添加标签到证据
+    static void IngestTagAdd(string[] args, string dbPath, bool json)
+    {
+        var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+        if (!long.TryParse(pos[2], out long evidenceId) || string.IsNullOrWhiteSpace(pos[3]))
+        {
+            if (json) JsonOut(new { success = false, error = new { code = "INVALID_ARGS", message = Lang.T("Invalid evidence id or tag name") } });
+            else Console.WriteLine(Lang.T("Invalid evidence id or tag name"));
+            return;
+        }
+
+        string tagName = pos[3].Trim();
+        string now = DateTime.Now.ToString("O");
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        // 创建标签（如果不存在）
+        var createTag = conn.CreateCommand();
+        createTag.CommandText = "INSERT INTO Tags (Name, CreatedAt) VALUES (@name, @now) ON CONFLICT(Name) DO NOTHING";
+        createTag.Parameters.AddWithValue("@name", tagName);
+        createTag.Parameters.AddWithValue("@now", now);
+        createTag.ExecuteNonQuery();
+
+        // 获取标签 ID
+        var getTagId = conn.CreateCommand();
+        getTagId.CommandText = "SELECT Id FROM Tags WHERE Name = @name";
+        getTagId.Parameters.AddWithValue("@name", tagName);
+        var tagIdObj = getTagId.ExecuteScalar();
+        if (tagIdObj == null || tagIdObj is DBNull)
+        {
+            if (json) JsonOut(new { success = false, error = new { code = "TAG_CREATE_FAILED", message = Lang.T("Failed to create tag") } });
+            else Console.WriteLine(Lang.T("Failed to create tag"));
+            return;
+        }
+        long tagId = Convert.ToInt64(tagIdObj);
+
+        // 关联标签到证据
+        var linkTag = conn.CreateCommand();
+        linkTag.CommandText = "INSERT INTO EvidenceTags (EvidenceId, TagId, CreatedAt) VALUES (@eid, @tid, @now) ON CONFLICT(EvidenceId, TagId) DO NOTHING";
+        linkTag.Parameters.AddWithValue("@eid", evidenceId);
+        linkTag.Parameters.AddWithValue("@tid", tagId);
+        linkTag.Parameters.AddWithValue("@now", now);
+        linkTag.ExecuteNonQuery();
+
+        if (json) JsonOut(new { success = true, data = new { evidenceId, tagName } });
+        else Console.WriteLine(Lang.T("Tag '{0}' added to evidence {1}", tagName, evidenceId));
+    }
+
+    // tag rm:从证据移除标签
+    static void IngestTagRm(string[] args, string dbPath, bool json)
+    {
+        var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+        if (!long.TryParse(pos[2], out long evidenceId) || string.IsNullOrWhiteSpace(pos[3]))
+        {
+            if (json) JsonOut(new { success = false, error = new { code = "INVALID_ARGS", message = Lang.T("Invalid evidence id or tag name") } });
+            else Console.WriteLine(Lang.T("Invalid evidence id or tag name"));
+            return;
+        }
+
+        string tagName = pos[3].Trim();
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        // 获取标签 ID
+        var getTagId = conn.CreateCommand();
+        getTagId.CommandText = "SELECT Id FROM Tags WHERE Name = @name";
+        getTagId.Parameters.AddWithValue("@name", tagName);
+        var tagIdObj = getTagId.ExecuteScalar();
+        if (tagIdObj == null || tagIdObj is DBNull)
+        {
+            if (json) JsonOut(new { success = false, error = new { code = "TAG_NOT_FOUND", message = Lang.T("Tag not found") } });
+            else Console.WriteLine(Lang.T("Tag not found"));
+            return;
+        }
+        long tagId = Convert.ToInt64(tagIdObj);
+
+        // 移除关联
+        var unlinkTag = conn.CreateCommand();
+        unlinkTag.CommandText = "DELETE FROM EvidenceTags WHERE EvidenceId = @eid AND TagId = @tid";
+        unlinkTag.Parameters.AddWithValue("@eid", evidenceId);
+        unlinkTag.Parameters.AddWithValue("@tid", tagId);
+        int affected = unlinkTag.ExecuteNonQuery();
+
+        if (json) JsonOut(new { success = true, data = new { evidenceId, tagName, removed = affected > 0 } });
+        else
+        {
+            if (affected > 0) Console.WriteLine(Lang.T("Tag '{0}' removed from evidence {1}", tagName, evidenceId));
+            else Console.WriteLine(Lang.T("Tag '{0}' was not linked to evidence {1}", tagName, evidenceId));
+        }
+    }
+
+    // ══════════ list 支持标签筛选 ══════════
+    // 在 IngestList 函数中添加 --tag 参数支持
+    // 需要修改 IngestList 函数
 }

@@ -670,5 +670,17 @@
   "LLM request failed": "LLM request failed",
   "(empty answer — LLM returned nothing)": "(empty answer — LLM returned nothing)",
   "你核实过": "你核实过",
-  "未核实": "未核实"
+  "未核实": "未核实",
+  "Usage: sip ingest tree <id> [--depth N] [--json]": "Usage: sip ingest tree <id> [--depth N] [--json]",
+  "Usage: sip ingest tag <list|add|rm> [--json]": "Usage: sip ingest tag <list|add|rm> [--json]",
+  "Usage: sip ingest tag add <evidenceId> <tagName> [--json]": "Usage: sip ingest tag add <evidenceId> <tagName> [--json]",
+  "Usage: sip ingest tag rm <evidenceId> <tagName> [--json]": "Usage: sip ingest tag rm <evidenceId> <tagName> [--json]",
+  "No evidence found with id {0}": "No evidence found with id {0}",
+  "No tags found": "No tags found",
+  "Tag '{0}' added to evidence {1}": "Tag '{0}' added to evidence {1}",
+  "Tag '{0}' removed from evidence {1}": "Tag '{0}' removed from evidence {1}",
+  "Tag '{0}' was not linked to evidence {1}": "Tag '{0}' was not linked to evidence {1}",
+  "Tag not found": "Tag not found",
+  "Invalid evidence id or tag name": "Invalid evidence id or tag name",
+  "Failed to create tag": "Failed to create tag"
 }
