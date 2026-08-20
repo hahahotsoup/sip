@@ -122,8 +122,13 @@ sip 天生保守，因为它觉得信息首先是你的：
 
 ## 最近在折腾什么
 
-- 🧹 **v1.2.2「数据体检+网页监控」**：`sip ingest stats` 一行总览（证据总数 / 版本数 / 改动数 / 反转数 / 主题数 / 标签数 / 今日新增），`sip ingest cleanup --stale` 清理过期证据——ViewCount ≥ 3 或 7 天内看过的内容自动保留，`--dry-run` 预览删除、`--json` 输出机器可读报告；`sip ingest watch` 网页监控——标记证据后**手动刷新**检查变化（不支持自动抓取，需自行配合 cron/任务计划）；`sip --diff --semantic` 语义 diff——显示语义距离和改动分级（⚪润色/🟡调整/🔴反转）
-- 🌳 **v1.2.1「树状评论+多标签」**：第三扇门落地——`sip ingest tree` 查看树状评论（FragmentId 字段+递归 CTE 查询），`sip ingest tag` 管理多标签（Tags+EvidenceTags 多对多关联），`sip ingest list --tag AI` 按标签筛选——证据组织更灵活，树状结构一目了然
+- 🧹🌳 **v1.2.2「数据体检+树状评论+多标签」**：
+  - `sip ingest stats` 一行总览（证据总数 / 版本数 / 改动数 / 反转数 / 主题数 / 标签数 / 今日新增）
+  - `sip ingest cleanup --stale` 清理过期证据——ViewCount ≥ 3 或 7 天内看过的内容自动保留
+  - `sip ingest tree` 树状评论（FragmentId + 递归 CTE）
+  - `sip ingest tag` 多标签管理（Tags + EvidenceTags 多对多关联）
+  - `sip ingest watch` 网页监控——标记证据后**手动刷新**检查变化（不支持自动抓取）
+  - `sip --diff --semantic` 语义 diff——显示语义距离和改动分级（⚪润色/🟡调整/🔴反转）
 - 🚪 **v1.2.0「广开言路」**：第二扇门落地——`sip ingest` 把非 RSS 信息（外面查到的证据、普通网页、证据包）收进本地证据库：存（stdin/url/evidence）、组织（语义去重+主题分组）、追踪（refresh 保鲜+改动分级⚪🟡🔴+反转检测）、使用（`ingest retrieve` 证据随行检索 / `ingest ask` 只摘录不转述）——查完即存，存了可追，追了可信
 - ⚡ **百万级适配**：100 万篇文章的库实测——`--grep` 全文搜索 2.2 秒 → 0.5 秒（FTS5 索引，中文子串可搜），TUI 秒开（侧栏懒加载），`--today` 7.5 秒 → 3 秒，大源更新一次事务提交
 - 🧪 **自动化测试基线**：97 个进程级黑盒用例（CLI 契约 / SSRF 矩阵 / 去重不变量 / 终端注入 / simon 守护与加密往返 / stats+cleanup+tags+tree+watch+semantic-diff）+ GitHub Actions CI——每次改动自动回归
@@ -131,7 +136,7 @@ sip 天生保守，因为它觉得信息首先是你的：
 
 ## 更细的东西
 
-完整的文档站在 [sip.hotsouprealm.top](https://sip.hotsouprealm.top/)，测试报告在仓库里（v1.1.4，综合 8.4 分，[链接](./sip-完整测试报告-2026-08-12-最终版.md)），想从源码构建就看 [Wiki](https://sip.hotsouprealm.top/上手/快速开始.html)。
+完整的文档站在 [sip.hotsouprealm.top](https://sip.hotsouprealm.top/)，想从源码构建就看 [Wiki](https://sip.hotsouprealm.top/上手/快速开始.html)。
 
 📖 **用户快速手册**：[docs/用户快速手册.md](./docs/用户快速手册.md)——sip 能做什么（完整命令 + TUI 按键）、怎么用、快速故障排查、获取帮助。
 🤖 **高级用户手册（Agent/AI）**：[.opencode/skills/sip-rss/高级用户手册.md](./.opencode/skills/sip-rss/高级用户手册.md)——Agent 调用契约、simon 挡位纪律、安全条款。

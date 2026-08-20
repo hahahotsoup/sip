@@ -132,13 +132,20 @@ In one sentence: it doesn't collect, track, or secretly upload your stuff.
 
 ## Recently
 
+- 🧹🌳 **v1.2.2 "Data Health + Tree Comments + Multi-tag"**:
+  - `sip ingest stats` one-line summary (total evidence, versions, modified, reversed, topics, tags, new today)
+  - `sip ingest cleanup --stale` clean stale evidence (keeps items with ViewCount ≥ 3 or recently viewed)
+  - `sip ingest tree` tree-structured comments (FragmentId + recursive CTE)
+  - `sip ingest tag` multi-tag management (Tags + EvidenceTags many-to-many)
+  - `sip ingest watch` web monitoring — mark evidence for **manual refresh** (no auto-fetch)
+  - `sip --diff --semantic` semantic diff — shows semantic distance and change grade (⚪polish/🟡adjust/🔴reverse)
 - ⚡ **Million-scale adaptation**: on a 1M-article library — `--grep` full-text search 2.2s → 0.5s (FTS5, Chinese substring searchable), the TUI opens instantly (lazy sidebar), `--today` 7.5s → 3s, whole-feed updates in one transaction.
-- 🧪 **Automated test baseline**: 38 process-level black-box cases (CLI contract / SSRF matrix / dedup invariants / terminal injection / Simon guard & encryption round-trips) + GitHub Actions CI — automatic regression on every change.
+- 🧪 **Automated test baseline**: 97 process-level black-box cases + GitHub Actions CI — automatic regression on every change.
 - 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — level 3 encrypts everything; keys are auto-generated in the OS credential store; you never have to remember any key.
 
 ## More
 
-Full docs at [sip.hotsouprealm.top](https://sip.hotsouprealm.top/); the test report is in the repo (v1.1.4, overall 8.4/10, [link](./sip-完整测试报告-2026-08-12-最终版.md)); to build from source, see the [Wiki](https://sip.hotsouprealm.top/上手/快速开始.html).
+Full docs at [sip.hotsouprealm.top](https://sip.hotsouprealm.top/); to build from source, see the [Wiki](https://sip.hotsouprealm.top/上手/快速开始.html).
 
 Also, shameless plug.
 

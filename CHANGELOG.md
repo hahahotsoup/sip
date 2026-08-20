@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.1] - 2026-08-20
+## [1.2.2] - 2026-08-20
 
 ### Added
 
@@ -15,26 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `sip ingest tag add <evidenceId> <tagName>` - Add tag to evidence
   - `sip ingest tag rm <evidenceId> <tagName>` - Remove tag from evidence
   - `sip ingest list --tag <tagName>` - Filter evidence by tag
-
-### Changed
-
-- Evidence table now includes additional fields for tree comments and multi-tag support:
-  - FragmentId (tree comments parent reference)
-  - Platform, ContentId, Author, CanonicalUrl
-  - Context, Snapshot, Note
-  - WatchEnabled, WatchInterval, WatchLastCheckedAt, WatchLastHash
-
-### Database Migration
-
-- Added Phase2 migration in simon.cs for new Evidence fields
-- Created Tags table for tag management
-- Created EvidenceTags table for many-to-many associations
-- Added indexes for FragmentId and Platform fields
-
-## [1.2.2] - 2026-08-20
-
-### Added
-
 - **Ingest Stats**: `sip ingest stats` command to display one-line summary of evidence library (total evidence, versions, modified, reversed, topics, tags, new today)
 - **Stale Cleanup**: `sip ingest cleanup --stale` command to clean up stale evidence
   - `--min-views N` - Minimum view count to keep (default: 3)
@@ -43,19 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--yes` - Skip confirmation prompt
   - Respects ViewCount and LastViewedAt fields
 - **Watch Commands**: `sip ingest watch` subcommands for web monitoring
-  - `sip ingest watch add <id> [--interval <min>]` - Enable monitoring (minimum 5 min interval)
-  - `sip ingest watch rm <id>` - Disable monitoring
+  - `sip ingest watch add <id> [--interval <min>]` - Mark evidence for monitoring (minimum 5 min interval)
+  - `sip ingest watch rm <id>` - Unmark monitoring
   - `sip ingest watch list` - List all watch targets
-  - `sip ingest watch refresh [id] [--all]` - Manually refresh monitored content
+  - `sip ingest watch refresh [id] [--all]` - Manually refresh monitored content (no auto-fetch)
 - **Semantic Diff**: `sip --diff --semantic` option to show semantic distance and change grade
   - Displays semantic distance (0-1, lower = more similar)
   - Shows change grade: ⚪ polish (minor wording), 🟡 adjust (content change), 🔴 reverse (stance change)
   - Detects stance reversal signals
 
+### Changed
+
+- Evidence table now includes additional fields for tree comments, multi-tag, and watch support:
+  - FragmentId (tree comments parent reference)
+  - Platform, ContentId, Author, CanonicalUrl
+  - Context, Snapshot, Note
+  - WatchEnabled, WatchInterval, WatchLastCheckedAt, WatchLastHash
+  - ViewCount, LastViewedAt
+
 ### Database Migration
 
-- Added ViewCount and LastViewedAt fields to Evidence table
-- Watch columns (WatchEnabled, WatchInterval, WatchLastCheckedAt, WatchLastHash) now functional
+- Added Phase2 migration in simon.cs for new Evidence fields
+- Created Tags table for tag management
+- Created EvidenceTags table for many-to-many associations
+- Added indexes for FragmentId and Platform fields
 
 ### Tests
 
