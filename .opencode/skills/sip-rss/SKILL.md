@@ -8,7 +8,21 @@ description: 调用 sip（本地个人信息库）CLI 进行订阅管理、全�
 > 📘 **完整契约与安全纪律见同目录《高级用户手册》**：[高级用户手册.md](./高级用户手册.md)（Agent 必读：命令契约 / simon 挡位 / 故障排查 / 安全纪律）。
 > 👤 用户侧白话版：`docs/用户快速手册.md`。
 
-`sip` 是本地优先的个人信息库（RSS + 证据包），所有数据存于 SQLite（`rss.db`）。AI 通过命令行调用它来完成检索、管理、沉淀与问答。
+## ⚡ 思维链：Agent 执行前必读
+
+**每次操作前，按这个顺序想一遍：**
+
+1. **用户要什么？** → 明确目标（搜索？管理？收集？问答？）
+2. **我该用什么命令？** → 查下面的命令速查表
+3. **需要先检查什么？** → AI 配置？向量索引？simon 挡位？
+4. **执行后怎么判断成败？** → 看退出码（0=成功）+ 输出文本/JSON
+5. **失败了怎么办？** → 查常见问题，不要盲目重试
+
+**禁止：**
+- ❌ 不检查就假设 AI 已配置
+- ❌ 不看退出码就假设成功
+- ❌ 命令被拒后反复重试（先查 simon 挡位）
+- ❌ 用裸 `sip --show <id>`（会进 TUI，必须加 `--json`）
 
 ## ⚠️ 先初始化，别默认模型已就绪
 
@@ -50,6 +64,7 @@ sip --search "关键词" --json --ignoresafeannouncement
 
 | 命令 | 说明 |
 |------|------|
+| **订阅管理** | |
 | `sip -l` | 列出所有订阅源（编号、标题、文章统计、健康标记）；`--json` 结构化输出 |
 | `sip -l <编号>` | 列出某源的文章（`--json` 结构化）。编号格式 `[列表序号/真实ID]`，`--show/--versions/--summary` 等命令用**右边**的真实 ID；行尾可能有 `[摘要]`/`[无正文]` 质量标记 |
 | `sip -d <url>` | 下载/添加新 RSS 源（URL 可省略协议前缀） |
@@ -60,6 +75,7 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip -a <编号>` | 归档（加时间戳） |
 | `sip -una <编号>` | 去归档 |
 | `sip -r <编号>` | 删除源及其全部文章与向量（加 `--yes` 跳过确认，供脚本/AI 非交互删除） |
+| **AI 功能** | |
 | `sip --config` | 查看 AI 配置 |
 | `sip --index` | 对文章做 Embedding 向量化（需先 `--init`） |
 | `sip --reindex` | 更换 Embedding 模型后重新向量化 |
@@ -67,8 +83,8 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --grep <关键词> [--limit N] [--max-snippets N] [--json] [--full]` | 全文搜索（标题/正文/摘要关键字匹配，不依赖 AI）；默认输出「编号+标题+出现次数+±50 字符片段」，有上限不刷屏；`--json` 结构化、`--full` 输出整篇摘要 |
 | `sip --show <编号> --json` | 原文 JSON 直出：标题/来源/链接/时间/作者 + 原始正文（未渲染）打到标准输出（**AI 读全文用这个**）；已抓取全文时额外带 `fulltext` 字段（读全文优先用该字段，比 DB 里的 RSS 摘要完整）。⚠️ 裸 `sip --show <编号>` 是全屏阅读界面（给人读的，会占用终端），**AI 一律加 `--json`** |
 | `sip --versions <编号>` | 列出文章的全部历史版本（含状态与时间）；用 `--show <版本编号> --json` 查看某版原文 |
-| `sip --diff <编号> [vA vB] [--json]` | 对比同一文章两个版本的正文（默认最近两版）；`--json` 给结构化 diff（`{from,to,changes:[{type,before,after}]}`） |
-| `sip --export <编号 | feed:N | all> [out.md|目录] --yes` | 把文章导出为 Markdown；`--yes` 跳过全部导出的确认 |
+| `sip --diff <编号> [vA vB] [--semantic] [--json]` | 对比同一文章两个版本的正文（默认最近两版）；`--json` 给结构化 diff；`--semantic` 显示语义距离和改动分级 |
+| `sip --export <编号 \| feed:N \| all> [out.md\|目录] --yes` | 把文章导出为 Markdown；`--yes` 跳过全部导出的确认 |
 | `sip --fulltext <编号> --yes --json` | 抓取文章**全文**到本地缓存并输出（RSS 摘要过短时用）；`--yes` 跳过同意/确认。⚠️ 全文抓取涉及抓取源站页面，需显式同意；不改数据库、不参与版本比对。⚠️ **安全边界**：只抓 http/https；回环/链路本地/私网段默认拒绝（SSRF 防护），确需内网源时让用户在 `ai_config.json` 设 `"allowPrivateNet": true` |
 | `sip --purge-fulltext [编号]` | 清除全文缓存 |
 | `sip --feed-info <编号> [--json]` | 来源身份与健康：类型/作者/官网/更新时间/最近文章/状态（正常/⚠ 长期未更新/✗ 失败 N 次） |
@@ -87,15 +103,22 @@ sip --search "关键词" --json --ignoresafeannouncement
 | `sip --summary feed:<编号>` | 为某源全部文章生成摘要 |
 | `sip --summary-all` | 为所有未生成摘要的文章生成摘要 |
 | `sip simon status [--json] \| level <1\|2\|3> \| export-key <file> \| import-key <file>` | 孟思琳(simon)安全守护（**默认开启、无法关闭**，只有挡位 1/2/3）：`status` 查当前挡位与加密状态（`--json` 结构化）；`level` 调挡位（**降挡只能在 TUI 命令栏**，CLI 降挡报 `SIMON_LOCKED`，AI 不要代跑）；`export-key`/`import-key` 换机迁移加密密钥 |
+| **证据收集（ingest）** | |
 | `sip ingest --stdin [--origin <url>] [--producer <名>] [--yes] [--json]` | **收集证据**：把管道输入（如 Argo/搜索结果原文）存进本地证据库；`--origin` 记来源 URL、`--producer` 记生产者（如 argo）。**查完即存**的钥匙 |
 | `sip ingest --url <url> [--yes]` | **URL 直存**：抓网页存为证据（SSRF 防护，回环/内网/云元数据一律拒绝） |
 | `sip ingest --evidence <file>` | 导入 sip-evidence-v1 证据包（schema 校验；缺 schema/content 报错退出 1） |
-| `sip ingest list [--stale] [--group N] [--json]` / `show <id>` | 浏览证据；`--stale` 只看过期、`--group N` 按主题 |
+| `sip ingest list [--stale] [--group N] [--tag <标签>] [--json]` / `show <id>` | 浏览证据；`--stale` 只看过期、`--group N` 按主题、`--tag` 按标签 |
 | `sip ingest refresh [id\|--stale\|--all] [--json]` | **追踪变化**：重查原文→哈希比对→没变/分级变化(⚪润色/🟡调整/🔴反转)/失效(标 invalid 不覆盖)；默认只刷过期的 watch 目标 |
 | `sip ingest confirm <id>` / `rm <id> [--yes]` | 你核实过（Verified=1+重算共识）/ 遗忘删除 |
 | `sip ingest group add <标签> [--seed <查询>]\|rename\|rm\|groups` | **主题分组**（你定义主题；存证据自动归组；需要先 `--init` 配 AI） |
 | `sip ingest retrieve <查询> [--top N] [--group N] [--json]` | **RAG 就绪**：检索证据，命中带原文片段/来源URL/版本/新鲜度/分级/反转/**hasDiff(被改过)**——给 Agent 引用 |
 | `sip ingest ask "<问题>" [--json] [--ignoresafeannouncement]` | **只摘录不转述**的问答：答案只能由库里证据的原文片段逐字摘录；库里没有 → 直接说"不知道"；需要 LLM（`--init` 配置） |
+| **数据体检（v1.2.2）** | |
+| `sip ingest stats [--json]` | 一行总览：证据数/版本数/改动数/反转数/主题数/标签数/今日新增 |
+| `sip ingest cleanup --stale [--min-views N] [--recent-days N] [--dry-run] [--yes] [--json]` | 清理过期证据（保留 ViewCount ≥ 3 或最近查看过的） |
+| `sip ingest tag list\|add <id> <name>\|rm <id> <name> [--json]` | 标签管理 |
+| `sip ingest tree <id> [--depth N] [--json]` | 树状评论 |
+| `sip ingest watch add <id> [--interval <min>]\|rm <id>\|list\|refresh [id] [--all] [--json]` | 网页监控（**手动刷新，不支持自动抓取**） |
 
 > ⚠️ **ingest 纪律**：只存"会再用/会变且你在意/你确认过的"（三问判据）；去重命中(cos≥0.92)时非交互自动跳过并返回 `duplicateOf`（不替你删），确需强存加 `--force`；挡位 2 下 ingest 写子命令被拦（只读的 list/show/retrieve/groups/ask 可用）。
 
@@ -148,7 +171,7 @@ sip --summary 12 --ignoresafeannouncement # 生成摘要
 
 #### 原则
 
-1. **先用全文搜索确认命中**：`--grep` 是精确关键字匹配（标题/正文/摘要），不依赖 AI、无阈值问题，最适合先跑。**默认就是安全的片段模式**：每篇只出「编号+标题+出现次数+±50 字符片段」（上限 20 篇 × 10 段），不会把大源正文灌进上下文；命中太多可加 `--limit N`，需要结构化结果用 `--json`，要某篇完整正文用 `--show <编号> --json`。
+1. **先用全文搜索确认命中**：`--grep` 是精确关键字匹配（标题/正文/摘要），不依赖 AI、无阈值问题，最适合先跑。**默认就是安全的片段模式**：每篇只出「编号+标题+出现次数+±50 字符片段」（上限 20 篇 × 10 段），不会把大源正文灌进上下文；命中太多可加 `--limit N`，需要结构化结果用 `--json`，要某篇完整正文用 `sip --show <编号> --json`。
    > ⚠️ **别轻易跨全源 `--search`**：跨源 `--search` 是向量全量扫描，数据量大时会明显变慢。先 `--grep` 确认精确命中；确需语义扩展再用 `--search`，并配合 `--feed 编号` 限源、`--threshold` 调阈值；避免在大库上高频跑无谓的跨源搜索。
 2. **再用语义搜索扩展**：`--search` 按语义相似度找「意思相近但字面不同」的文章，能补全文搜索漏掉的。
 3. **多次换关键词**：不要只搜一次。围绕主题拆出 3~6 个不同的关键词/短语/同义词/英文原文，逐个检索，合并去重。
@@ -216,6 +239,7 @@ sip --show 87 --json --ignoresafeannouncement   # 读 87 号（可能是某个�
 - **「模型维度变化」**：换了模型，需 `sip --reindex`。
 - **语义搜索结果少**：阈值调低 + 换更多关键词。
 - **`--grep` 永远可用**：全文搜索不需要 AI，是语义搜索出问题时的可靠兜底。
+- **命令被拒**：先查 `sip simon status` 看挡位，不要盲目重试。
 
 ## 数据积累行为（长期使用才会出现，注意别被误导）
 
