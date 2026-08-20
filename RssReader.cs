@@ -3581,7 +3581,9 @@ static void InitDatabase(string dbPath)
             WatchEnabled INTEGER DEFAULT 0,     -- 是否启用监控
             WatchInterval INTEGER DEFAULT 5,    -- 监控间隔(分钟)
             WatchLastCheckedAt TEXT,            -- 最后检查时间
-            WatchLastHash TEXT                  -- 最后内容哈希(用于变化检测)
+            WatchLastHash TEXT,                 -- 最后内容哈希(用于变化检测)
+            ViewCount    INTEGER DEFAULT 0,     -- 被检索/查看次数
+            LastViewedAt TEXT                   -- 最后查看时间
         );
         CREATE INDEX IF NOT EXISTS idx_evidence_status    ON Evidence (Status, Freshness);
         CREATE INDEX IF NOT EXISTS idx_evidence_url       ON Evidence (SourceUrl);
@@ -4091,6 +4093,7 @@ static void DiffCli(string[] args, string dbPath)
         SetExit(); Console.WriteLine(Lang.T("Usage: sip --diff <article-id> [vA vB] [--json]")); return;
     }
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    bool semantic = args.Any(a => a.Equals("--semantic", StringComparison.OrdinalIgnoreCase));
     var vers = args.Where(a => a.StartsWith("v", StringComparison.OrdinalIgnoreCase) && a.Length > 1 && int.TryParse(a[1..], out _))
                    .Select(a => int.Parse(a[1..])).ToList();
 
@@ -4148,6 +4151,16 @@ static void DiffCli(string[] args, string dbPath)
 
     var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(rowA.Text, rowB.Text);
 
+    // 语义分析
+    double? semanticDist = null;
+    string? grade = null;
+    bool reversed = false;
+    if (semantic)
+    {
+        semanticDist = SemanticDistance(dbPath, rowA.Text, rowB.Text);
+        (grade, reversed) = ComputeChangeGrade(dbPath, rowA.Text, rowB.Text);
+    }
+
     if (json)
     {
         // 把 DiffPlex 的 Deleted/Inserted 相邻配对成 replace；其余为 insert/delete
@@ -4166,12 +4179,38 @@ static void DiffCli(string[] args, string dbPath)
             else if (lines[i].Type == ChangeType.Inserted)
                 changes.Add(new { type = "insert", before = "", after = lines[i].Text });
         }
-        JsonOut(new { article = itemId, from = va, to = vb, changes });
+        var result = new
+        {
+            article = itemId,
+            from = va,
+            to = vb,
+            changes,
+            semantic = semantic ? new
+            {
+                distance = semanticDist,
+                grade,
+                reversed,
+                summary = GetSemanticDiffSummary(semanticDist, grade, reversed)
+            } : null
+        };
+        JsonOut(result);
         return;
     }
 
     Console.WriteLine(Lang.T("v{0} → v{1}", va, vb));
-    Console.WriteLine();
+    if (semantic && semanticDist.HasValue)
+    {
+        string gradeDisplay = grade switch
+        {
+            "polish" => "⚪ 润色",
+            "adjust" => "🟡 调整",
+            "reverse" => "🔴 反转",
+            _ => grade ?? "-"
+        };
+        Console.WriteLine(Lang.T("语义距离：{0:F2} | 分级：{1}", semanticDist.Value, gradeDisplay));
+        if (reversed) Console.WriteLine(Lang.T("⚠️  检测到立场反转"));
+        Console.WriteLine();
+    }
     foreach (var line in diff.Lines)
     {
         switch (line.Type)
@@ -4181,6 +4220,21 @@ static void DiffCli(string[] args, string dbPath)
             case ChangeType.Modified: Console.WriteLine($"~ {StripControlChars(line.Text)}"); break;
         }
     }
+}
+
+static string GetSemanticDiffSummary(double? dist, string? grade, bool reversed)
+{
+    if (!dist.HasValue) return "no semantic data";
+    string gradeLabel = grade switch
+    {
+        "polish" => "polish (minor wording)",
+        "adjust" => "adjust (content change)",
+        "reverse" => "reverse (stance change)",
+        _ => grade ?? "unknown"
+    };
+    string result = $"distance={dist.Value:F2}, grade={gradeLabel}";
+    if (reversed) result += ", REVERSED";
+    return result;
 }
 
 // 从请求的 v 后缀选两个版本；不足则默认取最后两个（按版本号）

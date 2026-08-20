@@ -77,6 +77,15 @@ public partial class Program
             case "tree":
                 IngestTree(args, dbPath, json);
                 return;
+            case "stats":
+                IngestStats(dbPath, json);
+                return;
+            case "cleanup":
+                IngestCleanup(args, dbPath, json, yes);
+                return;
+            case "watch":
+                IngestWatch(args, dbPath, json);
+                return;
             default:
                 IngestUsage(json);
                 return;
@@ -260,13 +269,32 @@ public partial class Program
         try
         {
             var cfg = LoadConfig(dbPath);
-            var va = GetEmbeddingAsync(a, cfg).GetAwaiter().GetResult();
-            var vb = GetEmbeddingAsync(b, cfg).GetAwaiter().GetResult();
+            // 快速降级:5秒超时,避免干等
+            var va = GetEmbeddingWithTimeoutAsync(a, cfg, TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
+            var vb = GetEmbeddingWithTimeoutAsync(b, cfg, TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
             if (va != null && vb != null && va.Length > 0 && va.Length == vb.Length)
                 return Math.Clamp(1.0 - CosineSimilarity(va, vb), 0.0, 1.0);
         }
         catch { /* 嵌入失败 → 字符降级 */ }
         return 1.0 - CharSimilarity(a, b);
+    }
+
+    // 带超时的嵌入调用(快速降级用)
+    static async Task<float[]?> GetEmbeddingWithTimeoutAsync(string text, AiConfig cfg, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        using var client = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        string? key = CredGet("embedding_api_key");
+        if (!string.IsNullOrEmpty(key))
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+
+        var body = new { model = cfg.Embedding.Model, input = text };
+        var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+        var resp = await client.PostAsync($"{cfg.Embedding.ApiEndpoint}/embeddings", content, cts.Token);
+        resp.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var data = doc.RootElement.GetProperty("data")[0].GetProperty("embedding");
+        return data.EnumerateArray().Select(x => x.GetSingle()).ToArray();
     }
 
     // 字符级相似度(无 AI 降级;确定性规则)
@@ -1567,4 +1595,531 @@ public partial class Program
     // ══════════ list 支持标签筛选 ══════════
     // 在 IngestList 函数中添加 --tag 参数支持
     // 需要修改 IngestList 函数
+
+    // ══════════ stats:一行看库状态 ══════════
+    static void IngestStats(string dbPath, bool json)
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+
+        // 总证据数（active）
+        cmd.CommandText = "SELECT COUNT(*) FROM Evidence WHERE Status = 'active'";
+        long totalEvidence = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 版本总数
+        cmd.CommandText = "SELECT COUNT(*) FROM Evidence";
+        long totalVersions = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 被改过数（Grade IS NOT NULL）
+        cmd.CommandText = "SELECT COUNT(*) FROM Evidence WHERE Status = 'active' AND Grade IS NOT NULL";
+        long modifiedCount = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 反转数
+        cmd.CommandText = "SELECT COUNT(*) FROM Evidence WHERE Status = 'active' AND Reversed = 1";
+        long reversedCount = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 主题数
+        cmd.CommandText = "SELECT COUNT(*) FROM Groups";
+        long topicCount = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 今日新增
+        string today = DateTime.Now.ToString("yyyy-MM-dd");
+        cmd.CommandText = "SELECT COUNT(*) FROM Evidence WHERE Status = 'active' AND ObservedAt >= @today";
+        cmd.Parameters.AddWithValue("@today", today);
+        long todayNew = Convert.ToInt64(cmd.ExecuteScalar());
+
+        // 标签数
+        cmd.CommandText = "SELECT COUNT(*) FROM Tags";
+        long tagCount = Convert.ToInt64(cmd.ExecuteScalar());
+
+        if (json)
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    totalEvidence,
+                    totalVersions,
+                    modifiedCount,
+                    reversedCount,
+                    topicCount,
+                    todayNew,
+                    tagCount
+                }
+            });
+        }
+        else
+        {
+            Console.WriteLine(Lang.T("Evidence: {0} 条 · 版本 {1} 个 · 被改过 {2} 篇 · 反转 {3} 篇 · 主题 {4} 个 · 标签 {5} 个 · 今日新增 {6} 条",
+                totalEvidence, totalVersions, modifiedCount, reversedCount, topicCount, tagCount, todayNew));
+        }
+    }
+
+    // ══════════ cleanup:遗忘机制 ══════════
+    static void IngestCleanup(string[] args, string dbPath, bool json, bool yes)
+    {
+        bool dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
+        int minViewCount = ArgInt(args, "--min-views") ?? 3;
+        int recentDays = ArgInt(args, "--recent-days") ?? 7;
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+
+        // 查找过期证据
+        string cutoff = DateTime.Now.AddDays(-recentDays).ToString("O");
+        cmd.CommandText = @"
+            SELECT Id, Title, SourceName, ObservedAt, TtlDays, ViewCount, LastViewedAt
+            FROM Evidence
+            WHERE Status = 'active'
+            AND (
+                Freshness = 'stale'
+                OR datetime(ObservedAt, '+' || TtlDays || ' days') < datetime('now')
+            )
+            ORDER BY Id";
+        var staleItems = new List<(long Id, string? Title, string? Source, string? ObservedAt, int TtlDays, int ViewCount, string? LastViewedAt)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                staleItems.Add((
+                    reader.GetInt64(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? 7 : reader.GetInt32(4),
+                    reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6)
+                ));
+            }
+        }
+
+        if (staleItems.Count == 0)
+        {
+            if (json) JsonOut(new { success = true, data = new { message = "No stale evidence", toDelete = 0, toKeep = 0 } });
+            else Console.WriteLine(Lang.T("没有过期证据"));
+            return;
+        }
+
+        // 分类：可删除 vs 需保留
+        var toDelete = new List<(long Id, string? Title, string? Source)>();
+        var toKeep = new List<(long Id, string? Title, string? Source, string Reason)>();
+
+        foreach (var item in staleItems)
+        {
+            // 保留条件：被多次查看 或 近期被查看
+            if (item.ViewCount >= minViewCount)
+            {
+                toKeep.Add((item.Id, item.Title, item.Source, Lang.T("被查看 {0} 次", item.ViewCount)));
+            }
+            else if (!string.IsNullOrEmpty(item.LastViewedAt) && DateTime.Parse(item.LastViewedAt) >= DateTime.Parse(cutoff))
+            {
+                toKeep.Add((item.Id, item.Title, item.Source, Lang.T("近期被查看")));
+            }
+            else
+            {
+                toDelete.Add((item.Id, item.Title, item.Source));
+            }
+        }
+
+        if (json)
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    toDelete = toDelete.Select(x => new { id = x.Id, title = x.Title, source = x.Source }).ToArray(),
+                    toKeep = toKeep.Select(x => new { id = x.Id, title = x.Title, source = x.Source, reason = x.Reason }).ToArray(),
+                    dryRun
+                }
+            });
+            return;
+        }
+
+        // 显示结果
+        if (toDelete.Count > 0)
+        {
+            Console.WriteLine(Lang.T("待清理（{0} 条）：", toDelete.Count));
+            foreach (var item in toDelete)
+                Console.WriteLine($"  [{item.Id}] {item.Title ?? "(no title)"} ({item.Source ?? "-"})");
+        }
+
+        if (toKeep.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine(Lang.T("保留（{0} 条）：", toKeep.Count));
+            foreach (var item in toKeep)
+                Console.WriteLine($"  [{item.Id}] {item.Title ?? "(no title)"} — {item.Reason}");
+        }
+
+        if (toDelete.Count == 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine(Lang.T("没有需要清理的证据"));
+            return;
+        }
+
+        if (dryRun)
+        {
+            Console.WriteLine();
+            Console.WriteLine(Lang.T("（dry-run 模式，未实际删除）"));
+            return;
+        }
+
+        // 确认删除
+        if (!yes)
+        {
+            Console.Write(Lang.T("确认清理 {0} 条？(y/n): ", toDelete.Count));
+            var key = Console.ReadKey(true);
+            if (key.KeyChar != 'y' && key.KeyChar != 'Y')
+            {
+                Console.WriteLine(Lang.T("已取消"));
+                return;
+            }
+        }
+
+        // 执行删除
+        int deleted = 0;
+        foreach (var item in toDelete)
+        {
+            cmd.CommandText = "DELETE FROM Evidence WHERE Id = @id";
+            cmd.Parameters.Clear();
+            cmd.Parameters.AddWithValue("@id", item.Id);
+            cmd.ExecuteNonQuery();
+            deleted++;
+        }
+
+        Console.WriteLine(Lang.T("已清理 {0} 条过期证据", deleted));
+    }
+
+    // ── watch 子命令 ──
+    // sip ingest watch add <id> [--interval <分钟>]  启用监控
+    // sip ingest watch rm <id>                       停止监控
+    // sip ingest watch list [--json]                 列出监控目标
+    // sip ingest watch refresh [id] [--all]          手动刷新监控
+    static void IngestWatch(string[] args, string dbPath, bool json)
+    {
+        var pos = args.Where(a => !a.StartsWith("--")).ToArray();
+        string sub = pos.Length > 1 ? pos[1].ToLowerInvariant() : "";
+
+        switch (sub)
+        {
+            case "add":
+                WatchAdd(args, pos, dbPath, json);
+                return;
+            case "rm":
+                WatchRm(args, pos, dbPath, json);
+                return;
+            case "list":
+                WatchList(args, dbPath, json);
+                return;
+            case "refresh":
+                WatchRefresh(args, pos, dbPath, json);
+                return;
+            default:
+                WatchUsage(json);
+                return;
+        }
+    }
+
+    static void WatchUsage(bool json, string? custom = null)
+    {
+        string msg = custom ?? Lang.T("Usage: sip ingest watch <add <id> [--interval <min>]|rm <id>|list|refresh [--all]> [--json]");
+        SetExit();
+        if (json) JsonOut(new { success = false, error = new { code = "USAGE", message = msg } });
+        else Console.WriteLine(msg);
+    }
+
+    static void WatchAdd(string[] args, string[] pos, string dbPath, bool json)
+    {
+        if (pos.Length < 3 || !long.TryParse(pos[2], out long id))
+        { WatchUsage(json, Lang.T("Usage: sip ingest watch add <id> [--interval <min>]")); return; }
+
+        int interval = ArgInt(args, "--interval") ?? 5;
+        if (interval < 5) interval = 5; // 硬编码最小5分钟
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        // 检查证据是否存在
+        var checkCmd = conn.CreateCommand();
+        checkCmd.CommandText = "SELECT Id, SourceUrl, SourceType FROM Evidence WHERE Id = @id AND Status = 'active'";
+        checkCmd.Parameters.AddWithValue("@id", id);
+        using (var r = checkCmd.ExecuteReader())
+        {
+            if (!r.Read())
+            { ReportError("NOT_FOUND", Lang.T("Evidence #{0} not found or inactive", id), json: json); return; }
+
+            string? sourceUrl = r.IsDBNull(1) ? null : r.GetString(1);
+            string sourceType = r.GetString(2);
+
+            if (string.IsNullOrWhiteSpace(sourceUrl))
+            { ReportError("NO_URL", Lang.T("Evidence #{0} has no source URL, cannot monitor", id), json: json); return; }
+
+            if (sourceType != "watch")
+            { ReportError("WRONG_TYPE", Lang.T("Evidence #{0} is type '{1}', only 'watch' type can be monitored", id, sourceType), json: json); return; }
+        }
+
+        // 启用监控
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE Evidence
+            SET WatchEnabled = 1,
+                WatchInterval = @interval,
+                WatchLastCheckedAt = NULL,
+                WatchLastHash = NULL
+            WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@interval", interval);
+        cmd.ExecuteNonQuery();
+
+        if (json) JsonOut(new { success = true, data = new { id, interval, message = $"Monitoring enabled for evidence #{id}" } });
+        else Console.WriteLine(Lang.T("已启用监控：证据 #{0}，间隔 {1} 分钟", id, interval));
+    }
+
+    static void WatchRm(string[] args, string[] pos, string dbPath, bool json)
+    {
+        if (pos.Length < 3 || !long.TryParse(pos[2], out long id))
+        { WatchUsage(json, Lang.T("Usage: sip ingest watch rm <id>")); return; }
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE Evidence
+            SET WatchEnabled = 0,
+                WatchLastCheckedAt = NULL,
+                WatchLastHash = NULL
+            WHERE Id = @id AND WatchEnabled = 1";
+        cmd.Parameters.AddWithValue("@id", id);
+        int affected = cmd.ExecuteNonQuery();
+
+        if (affected == 0)
+        { ReportError("NOT_FOUND", Lang.T("Evidence #{0} not found or not being monitored", id), json: json); return; }
+
+        if (json) JsonOut(new { success = true, data = new { id, message = $"Monitoring disabled for evidence #{id}" } });
+        else Console.WriteLine(Lang.T("已停止监控：证据 #{0}", id));
+    }
+
+    static void WatchList(string[] args, string dbPath, bool json)
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT Id, Title, SourceUrl, SourceName, WatchInterval, WatchLastCheckedAt, WatchLastHash
+            FROM Evidence
+            WHERE Status = 'active' AND WatchEnabled = 1
+            ORDER BY Id";
+        var items = new List<(long Id, string? Title, string? Url, string? Source, int Interval, string? LastChecked, string? LastHash)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                items.Add((
+                    reader.GetInt64(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? 5 : reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6)
+                ));
+            }
+        }
+
+        if (items.Count == 0)
+        {
+            if (json) JsonOut(new { success = true, data = new { items = Array.Empty<object>(), count = 0 } });
+            else Console.WriteLine(Lang.T("没有监控目标"));
+            return;
+        }
+
+        if (json)
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    items = items.Select(x => new
+                    {
+                        id = x.Id,
+                        title = x.Title,
+                        url = x.Url,
+                        source = x.Source,
+                        interval = x.Interval,
+                        lastChecked = x.LastChecked,
+                        lastHash = x.LastHash
+                    }).ToArray(),
+                    count = items.Count
+                }
+            });
+            return;
+        }
+
+        Console.WriteLine(Lang.T("监控目标（{0} 条）：", items.Count));
+        foreach (var item in items)
+        {
+            string lastChecked = item.LastChecked ?? Lang.T("从未检查");
+            string hashPreview = string.IsNullOrEmpty(item.LastHash) ? "-" : item.LastHash[..Math.Min(8, item.LastHash.Length)] + "...";
+            Console.WriteLine($"  [{item.Id}] {(item.Title ?? "(no title)")}");
+            Console.WriteLine($"      {Lang.T("间隔：{0} 分钟", item.Interval)} | {Lang.T("上次检查：{0}", lastChecked)} | {Lang.T("哈希：{0}", hashPreview)}");
+        }
+    }
+
+    static void WatchRefresh(string[] args, string[] pos, string dbPath, bool json)
+    {
+        bool all = args.Contains("--all", StringComparer.OrdinalIgnoreCase);
+        long? id = pos.Length > 2 && long.TryParse(pos[2], out long i) ? i : null;
+
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+
+        // 获取监控目标
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT Id, SourceUrl, SourceKey, Title, SourceName, ObservedAt, TtlDays, WatchInterval, WatchLastCheckedAt, WatchLastHash
+            FROM Evidence
+            WHERE Status = 'active' AND WatchEnabled = 1 AND SourceUrl IS NOT NULL";
+        if (id.HasValue) { cmd.CommandText += " AND Id = @id"; cmd.Parameters.AddWithValue("@id", id.Value); }
+        cmd.CommandText += " ORDER BY Id";
+
+        var targets = new List<(long Id, string Url, string SourceKey, string? Title, string? Source, string? ObservedAt, int TtlDays, int Interval, string? LastChecked, string? LastHash)>();
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                targets.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? 7 : reader.GetInt32(6),
+                    reader.IsDBNull(7) ? 5 : reader.GetInt32(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9)
+                ));
+            }
+        }
+
+        // 过滤：只刷到期的（除非 --all 或 指定 id）
+        if (!all && !id.HasValue)
+        {
+            var now = DateTime.UtcNow;
+            targets = targets.Where(t =>
+            {
+                if (string.IsNullOrEmpty(t.LastChecked)) return true;
+                if (!DateTime.TryParse(t.LastChecked, out var lastCheck)) return true;
+                return (now - lastCheck).TotalMinutes >= t.Interval;
+            }).ToList();
+        }
+
+        if (targets.Count == 0)
+        {
+            if (json) JsonOut(new { success = true, data = new { refreshed = 0, message = "No watch targets due for refresh" } });
+            else Console.WriteLine(Lang.T("没有需要刷新的监控目标"));
+            return;
+        }
+
+        var results = new List<(long Id, string Result, string? Grade, bool Reversed, int Version, string? Error)>();
+        foreach (var t in targets)
+        {
+            string? urlErr = ValidateFetchUrl(t.Url, LoadConfig(dbPath).AllowPrivateNet);
+            if (urlErr != null) { results.Add((t.Id, "blocked", null, false, 0, urlErr)); continue; }
+
+            string? text = FetchAndExtract(t.Url);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                MarkEvidenceInvalid(dbPath, t.Id, Lang.T("Fetch failed: {0}", t.Url));
+                results.Add((t.Id, "invalid", null, false, 0, Lang.T("Fetch failed: {0}", t.Url)));
+                continue;
+            }
+
+            // 检查内容是否变化
+            string newHash = EvidenceHash(text);
+            bool changed = t.LastHash != newHash;
+
+            // 更新最后检查时间和哈希
+            var updateCmd = conn.CreateCommand();
+            updateCmd.CommandText = @"
+                UPDATE Evidence
+                SET WatchLastCheckedAt = @now, WatchLastHash = @hash
+                WHERE Id = @id";
+            updateCmd.Parameters.AddWithValue("@now", DateTime.UtcNow.ToString("O"));
+            updateCmd.Parameters.AddWithValue("@hash", newHash);
+            updateCmd.Parameters.AddWithValue("@id", t.Id);
+            updateCmd.ExecuteNonQuery();
+
+            if (!changed)
+            {
+                results.Add((t.Id, "unchanged", null, false, 0, null));
+                continue;
+            }
+
+            // 内容变化，存储新版本
+            var (nid, status, err) = IngestStore(dbPath, "watch", t.SourceKey, t.Source, t.Url, t.Title,
+                FirstChars(text, 300), text, null, t.TtlDays, null, skipPolishVersion: true);
+            if (err != null) { results.Add((t.Id, "error", null, false, 0, err)); continue; }
+
+            string? grade = null; bool reversed = false; int version = 0;
+            if (status == "updated")
+            {
+                EmbedEvidence(dbPath, nid, text);
+                AssignGroupFromVector(dbPath, nid);
+                using (var qCmd = conn.CreateCommand())
+                {
+                    qCmd.CommandText = "SELECT Version, Grade, Reversed FROM Evidence WHERE Id = @id";
+                    qCmd.Parameters.AddWithValue("@id", nid);
+                    using var qR = qCmd.ExecuteReader();
+                    if (qR.Read()) { version = qR.GetInt32(0); grade = qR.IsDBNull(1) ? null : qR.GetString(1); reversed = qR.GetInt32(2) == 1; }
+                }
+            }
+            results.Add((t.Id, status, grade, reversed, version, null));
+        }
+
+        // 输出结果
+        if (json)
+        {
+            JsonOut(new
+            {
+                success = true,
+                data = new
+                {
+                    refreshed = results.Count,
+                    results = results.Select(r => new
+                    {
+                        id = r.Id,
+                        result = r.Result,
+                        grade = r.Grade,
+                        reversed = r.Reversed,
+                        version = r.Version,
+                        error = r.Error
+                    }).ToArray()
+                }
+            });
+            return;
+        }
+
+        int refreshed = results.Count(r => r.Result is "updated" or "created");
+        int unchanged = results.Count(r => r.Result == "unchanged");
+        int failed = results.Count(r => r.Result is "error" or "invalid" or "blocked");
+
+        Console.WriteLine(Lang.T("刷新完成：{0} 条更新，{1} 条未变，{2} 条失败", refreshed, unchanged, failed));
+        foreach (var r in results.Where(r => r.Result is "updated" or "created"))
+        {
+            string gradeInfo = r.Grade != null ? $" [{r.Grade}]" : "";
+            string reversedInfo = r.Reversed ? " (反转!)" : "";
+            Console.WriteLine($"  [{r.Id}] {Lang.T("已更新")}{gradeInfo}{reversedInfo} (v{r.Version})");
+        }
+        foreach (var r in results.Where(r => r.Result is "error" or "invalid" or "blocked"))
+            Console.WriteLine($"  [{r.Id}] {Lang.T("失败")}: {r.Error}");
+    }
 }

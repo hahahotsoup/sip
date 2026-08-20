@@ -51,7 +51,7 @@ sip revolves around five verbs, each backed by real features with concrete value
 - **Collect** — add a few RSS sources, or import from OPML in one go. All-local, no sign-up, no cloud — you pick the sources.
 - **Preserve** — fetch the full text when a summary is too short (`--fulltext`); versions are kept automatically; reading progress remembers where you stopped, so you can pick it back up.
 - **Track** — the author quietly flips a conclusion or a number? `sip --diff` shows you the before and after in one screen; silently-edited facts can't hide.
-- **Filter** — five or six sources repost the same piece? It clusters them so you don't re-read; each day a small bowl of Today's Hot Soup, not greedy; Source Policy helps you lower the frequency of or archive sources you don't read.
+- **Filter** — five or six sources repost the same piece? It clusters them so you don't re-read; each day a small bowl of sip today, not greedy; Source Policy helps you lower the frequency of or archive sources you don't read.
 - **Use** — full-text search (`--grep`) needs no AI; semantic search (`--search`) finds "similar in meaning"; export Markdown; let an agent answer only from sources you trust.
 
 At the end of the day you get three things: **information overload tamed, silently-edited facts exposed, and AI that no longer cites sources you don't trust.**
@@ -70,7 +70,7 @@ What sip wants to do is what they generally don't and won't: **make information 
 
 - The author edits a post or flips a conclusion? `--diff` leaves you the trace of change, instead of you forever seeing the old version.
 - Want AI to look things up but worry it cites junk? AI only searches the sources you subscribed to.
-- Information overload keeping you scrolling? A small bowl of Today's Hot Soup each day, then close it.
+- Information overload keeping you scrolling? A small bowl of sip today each day, then close it.
 
 That's why sip is a single local file: when an author edits a post it quietly keeps a version, five sources reposting the same piece get clustered, and a report lays the facts out for you. Under the hood, just two things — **deterministic rules**, and **local storage of facts**. The judgment is yours; AI is just a quiet assistant helping you understand, never deciding the value for you.
 
@@ -92,7 +92,7 @@ Which is also why telemetry is off by default and AI just quietly watches — it
 
 ## A few little things inside
 
-🍵 **Today's Hot Soup**: a small bowl of worthwhile reads each day — five, or however many you set. Not greedy, no rush.
+🍵 **sip today**: a small bowl of worthwhile reads each day — five, or however many you set. Not greedy, no rush.
 
 💧 **Sumenia**: a cute girl who's absent by default; only after you invite her does she quietly note your reading habits, locally. Don't invite her and she doesn't exist.
 

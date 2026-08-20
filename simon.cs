@@ -494,6 +494,10 @@ static void MigratePhase2(string dbPath)
         catch (SqliteException) { /* 列已存在则忽略 */ }
         try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN WatchLastHash TEXT"; cmd.ExecuteNonQuery(); }
         catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN ViewCount INTEGER DEFAULT 0"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
+        try { cmd.CommandText = "ALTER TABLE Evidence ADD COLUMN LastViewedAt TEXT"; cmd.ExecuteNonQuery(); }
+        catch (SqliteException) { /* 列已存在则忽略 */ }
 
         // 创建索引
         try { cmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_evidence_fragment ON Evidence (FragmentId)"; cmd.ExecuteNonQuery(); }
