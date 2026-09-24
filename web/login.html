@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>sip · 登录</title>
+<style>
+/* ── 栖页 · 登录 ─────────────────────────────────
+   设计稿：左表单 / 斜线分割 / 右艺术图缓动 / 右下一言
+   ───────────────────────────────────────────── */
+:root {
+  --ink: #1C1917;
+  --ink-2: #44403C;
+  --muted: #78716C;
+  --faint: #A8A29E;
+  --paper: #F7F3EB;
+  --paper-2: #EFE8DA;
+  --card: #FFFCF6;
+  --line: rgba(28, 25, 23, 0.12);
+  --accent: #A16207;
+  --accent-2: #B45309;
+  --serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", Georgia, serif;
+  --sans: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--paper);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.stage {
+  position: relative;
+  height: 100vh;
+  min-height: 560px;
+  overflow: hidden;
+}
+
+/* ── 左侧表单：整块 clip-path，无竖缝 ── */
+.panel-left {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  width: min(420px, 46vw);
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 48px 72px 48px 56px;
+  background: var(--paper);
+  /* 斜线整体左移：顶宽底窄，斜边一气呵成，不另叠伪元素 */
+  clip-path: polygon(0 0, 100% 0, calc(100% - 64px) 100%, 0 100%);
+}
+
+.brand {
+  margin-bottom: 40px;
+}
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(161, 98, 7, 0.12);
+}
+.brand-name {
+  font-family: var(--serif);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+}
+.brand-slogan {
+  font-family: var(--serif);
+  font-size: 14px;
+  color: var(--muted);
+  letter-spacing: 0.28em;
+  margin-left: 22px;
+}
+.brand-rule {
+  width: 48px;
+  height: 1px;
+  background: var(--accent);
+  margin: 0 0 22px 22px;
+}
+
+.form {
+  max-width: 340px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  animation: rise 0.7s 0.1s var(--ease) both;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.field label {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: var(--muted);
+}
+.field input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 14.5px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.field input::placeholder { color: var(--faint); }
+.field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(161, 98, 7, 0.12);
+}
+
+/* 服务端插进来的说明（进程重启过 / 这把钥匙属于别的浏览器）。
+   由 Web.cs 的 LoadLoginHtml(notice) 替换 <!--SIP_LOGIN_NOTICE--> 生成。 */
+.notice {
+  padding: 10px 13px;
+  border: 1px solid rgba(161, 98, 7, 0.25);
+  border-radius: 10px;
+  background: rgba(161, 98, 7, 0.10);
+  color: #78350F;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.row-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.row-meta a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.row-meta a:hover { text-decoration: underline; }
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.check input { accent-color: var(--accent); }
+
+.btn-login {
+  margin-top: 6px;
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent-2), #78350F);
+  color: #FEF3C7;
+  font-size: 14px;
+  letter-spacing: 0.28em;
+  cursor: pointer;
+  transition: transform 0.2s var(--ease), filter 0.2s, box-shadow 0.2s;
+  box-shadow: 0 8px 24px rgba(120, 53, 15, 0.18);
+}
+.btn-login:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
+}
+.btn-login:active { transform: translateY(0); }
+.btn-login:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.foot-note {
+  margin-top: 28px;
+  max-width: 340px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--faint);
+}
+
+/* ── 右侧艺术区：铺满整屏，左栏斜线叠在上面 ── */
+.panel-right {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #1C1917;
+}
+
+.art {
+  position: absolute;
+  inset: -8%;
+  background-image: url("./login-bg.png");
+  background-size: cover;
+  background-position: center;
+  transform-origin: 60% 40%;
+  animation: kenburns 28s ease-in-out infinite alternate;
+  will-change: transform;
+}
+.art-veil {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(28, 25, 23, 0.28) 0%, transparent 28%),
+    linear-gradient(0deg, rgba(28, 25, 23, 0.55) 0%, transparent 42%),
+    linear-gradient(180deg, rgba(28, 25, 23, 0.15) 0%, transparent 30%);
+  pointer-events: none;
+}
+
+@keyframes kenburns {
+  0%   { transform: scale(1.05) translate(0%, 0%); }
+  100% { transform: scale(1.18) translate(-2.5%, -1.8%); }
+}
+
+/* 右下一言 */
+.quote {
+  position: absolute;
+  right: 40px;
+  bottom: 36px;
+  left: 18%;
+  z-index: 2;
+  text-align: right;
+  color: #F5F5F4;
+  animation: rise 1s 0.4s var(--ease) both;
+}
+.quote-text {
+  font-family: var(--serif);
+  font-size: clamp(15px, 1.6vw, 18px);
+  line-height: 1.85;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+  margin-bottom: 10px;
+  min-height: 2.8em;
+}
+.quote-meta {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: rgba(245, 245, 244, 0.72);
+  letter-spacing: 0.08em;
+}
+.quote-dash {
+  width: 28px;
+  height: 1px;
+  background: rgba(245, 245, 244, 0.45);
+}
+.quote-src {
+  opacity: 0.55;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.quote-src:hover { opacity: 0.9; text-decoration: underline; }
+.quote.is-swap .quote-text,
+.quote.is-swap .quote-author {
+  animation: fadeup 0.55s var(--ease);
+}
+@keyframes fadeup {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* 顶部角落点缀 */
+.corner {
+  position: absolute;
+  top: 28px;
+  right: 32px;
+  z-index: 2;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: rgba(245, 245, 244, 0.55);
+  text-transform: uppercase;
+}
+
+/* toast */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%) translateY(10px);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 10px 18px;
+  border-radius: 99px;
+  font-size: 12.5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s, transform 0.25s var(--ease);
+  z-index: 50;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ── 响应式 ── */
+@media (max-width: 900px) {
+  body { overflow: auto; }
+  .stage {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    height: auto;
+  }
+  .panel-left {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    order: 2;
+    padding: 36px 28px 48px;
+    clip-path: none;
+  }
+  .panel-right {
+    position: relative;
+    order: 1;
+    min-height: 220px;
+  }
+  .quote { left: 24px; right: 24px; bottom: 20px; text-align: left; }
+  .quote-meta { justify-content: flex-start; }
+  .form { max-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art { animation: none; transform: scale(1.08); }
+  .form, .quote { animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="stage">
+  <!-- 左：登录 -->
+  <section class="panel-left">
+    <div class="brand">
+      <div class="brand-mark">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">sip</span>
+        <span class="brand-slogan">品，你细品</span>
+      </div>
+      <div class="brand-rule" aria-hidden="true"></div>
+    </div>
+
+    <form class="form" id="loginForm" autocomplete="on">
+      <!--SIP_LOGIN_NOTICE-->
+      <div class="field">
+        <label for="pass">密码</label>
+        <input id="pass" name="password" type="password" placeholder="Web 登录密码" autocomplete="current-password" required autofocus />
+      </div>
+      <button class="btn-login" type="submit">登 录</button>
+    </form>
+
+    <p class="foot-note">
+      本地优先 · 数据在你自己电脑上<br />
+      登录一次，<strong>本浏览器</strong>在本次运行期间保持登录；重启 sip 后需要重新登录。
+    </p>
+  </section>
+
+  <!-- 右：艺术图 + 一言 -->
+  <section class="panel-right" aria-hidden="true">
+    <div class="art"></div>
+    <div class="art-veil"></div>
+    <div class="corner">local · quiet · yours</div>
+    <div class="quote" id="quote">
+      <div class="quote-text" id="quoteText">慢慢来，不着急。</div>
+      <div class="quote-meta">
+        <span class="quote-dash"></span>
+        <span class="quote-author" id="quoteAuthor">sip</span>
+        <button class="quote-src" id="quoteMore" type="button" title="换一句">换一句</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* 本地句子池。原来这里调的是外网一言（v1.hitokoto.cn）：每次打开登录页、
+   以及之后每 20 秒一次，都会把「这台机器正在打开 sip 登录页」告诉第三方 ——
+   与本项目「不收集、不上传」的立场直接冲突，登录页尤其不该有出网请求。
+   句子全部取自 sip 自己的文案（品牌语/标语），想换随意增删这里即可。 */
+const QUOTES = [
+  { text: "慢慢来，不着急。", from: "sip" },
+  { text: "品，你细品。", from: "sip" },
+  { text: "本地优先的个人信息库。", from: "sip" },
+  { text: "local · quiet · yours", from: "sip" },
+];
+
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove("show"), 1800);
+}
+
+function loadQuote() {
+  const box = $("quote");
+  const q = QUOTES[Math.floor(Math.random() * QUOTES.length)];
+  $("quoteText").textContent = q.text;
+  $("quoteAuthor").textContent = q.from ? "—— " + q.from : "—— sip";
+  box.classList.remove("is-swap");
+  void box.offsetWidth; /* reflow 重启动画 */
+  box.classList.add("is-swap");
+}
+
+$("quoteMore").addEventListener("click", loadQuote);
+/* 这里原来有一行 `$("forgot").addEventListener(...)`，但页面里**没有 id="forgot" 的元素**
+   —— 对 null 调 addEventListener 会抛 TypeError，而这行在**注册下面登录表单之前**，
+   于是整个登录页点不动：设了密码之后根本登不进去。
+   密码重置本来就只能走 `sip webpass`（需要真实终端），所以这条死链直接删掉，
+   而不是补一个点不动的按钮。 */
+
+$("loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const password = $("pass").value;
+  if (!password) { toast("请输入密码"); return; }
+  const btn = e.target.querySelector(".btn-login");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.success) {
+      setTimeout(() => location.replace("/"), 80);
+      return;
+    }
+    toast(data.error?.message || "密码错误");
+  } catch {
+    toast("网络错误");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* 首屏拉一句，之后每 20s 轻换（可点「一言」立刻换） */
+loadQuote();
+setInterval(loadQuote, 20000);
+</script>
+</body>
+</html>

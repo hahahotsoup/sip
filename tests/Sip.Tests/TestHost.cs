@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using ktsu.CredentialCache;
+using ktsu.CredentialCache.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace Sip.Tests;
@@ -22,10 +24,48 @@ public sealed class SipInstance : IDisposable
     private static readonly object TemplateLock = new();
     private static string? _template;
 
-    public SipInstance()
+    public SipInstance(bool openAgentGate = true)
     {
         Root = Path.Combine(TempRoot(), "sip-" + Guid.NewGuid().ToString("N")[..8]);
         CopyDirectory(EnsureTemplate(), Root);
+        if (openAgentGate) OpenAgentGate();
+    }
+
+    /// <summary>测试宿主本身就是「非交互调用」，而 Agent 门默认关闭 —— 不打开的话所有用例都会被拦。
+    /// 这里写的就是 `sip --agentok` 自己写的那条凭据（<c>hotsoupreader</c> 服务下的 agent_ok_*），
+    /// 只是借 SIP_SIMON_KEY_NAME 落在本实例独享的作用域里，用完即删（见 DeleteTestCredentials）。
+    /// **产品本身没有任何旁路**：2026-09-12 删掉了原来的 agent_mode.json 兜底文件 ——
+    /// 那个文件在「凭据库还没有值」（也就是全新安装的默认状态）时就会被采信，
+    /// 等于任何程序写个 JSON 就能把这道门打开，与「只有 --agentok 能开」矛盾。
+    /// 想验证这道门本身，用 <c>new SipInstance(openAgentGate: false)</c> 建实例；
+    /// 也可以事后调 <see cref="OpenAgentGate"/> 做「关门 → 开门」的反向对照。</summary>
+    public void OpenAgentGate()
+    {
+        string gateKey = "agent_ok_" + KeyName;
+        try
+        {
+            Directory.CreateDirectory(DataDir);
+            var store = CredentialStoreFactory.CreateDefault("hotsoupreader");
+            var cache = new ktsu.CredentialCache.CredentialCache(store);
+            cache.AddOrReplace(new PersonaGUID { WeakString = gateKey },
+                new CredentialWithToken { Token = new CredentialToken { WeakString = "on" } });
+
+            // **写完回读确认**（2026-09-12 补）。凭据库写失败时如果只是 catch 掉，
+            // 症状是**几十个用例各自报 AGENT_BLOCKED**，真正的原因（门没打开）被埋在噪音里 ——
+            // 实测就撞上过一次偶发。宁可在建实例时当场炸掉，把这件事说清楚。
+            if (!cache.TryGet(new PersonaGUID { WeakString = gateKey }, out var back)
+                || back is not CredentialWithToken ct || ct.Token.WeakString != "on")
+                throw new InvalidOperationException(
+                    $"打不开 Agent 门：凭据库写入后回读不到 {gateKey}。多半是系统凭据库写不进去了" +
+                    "（本机历史上出现过 ERROR_NOT_ENOUGH_MEMORY，症状是安全设置集体静默失效，见 CHANGELOG）。");
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            // 把"写不进去"和"这个平台根本没有凭据库"都变成同一条明确信息
+            throw new InvalidOperationException(
+                $"打不开 Agent 门：写系统凭据库失败 —— {ex.GetType().Name}: {ex.Message}。" +
+                "测试套件要求系统凭据库可写（产品已无文件兜底，见 simon.cs 的注释）。", ex);
+        }
     }
 
     /// <summary>任何 CLI 命令都会触发 InitDatabase,跑一次 --help 即建好空库。</summary>
@@ -74,7 +114,7 @@ public sealed class SipInstance : IDisposable
 
     /// <summary>直接对隔离库执行 SQL(构造 fixture / 断言 DB 状态)。
     /// Pooling=False:连接用完即真正关闭,不占文件句柄——否则池连接会让
-    /// sip 子进程无法替换 rss.db(加密迁移时 File.Move 报"被其他进程占用")</summary>
+    /// sip 子进程无法替换 rss.db(例如完整性自愈时 File.Move 报"被其他进程占用")</summary>
     public void Exec(string sql, params (string Name, object Value)[] parameters)
     {
         using var conn = new SqliteConnection($"Data Source={DbPath};Pooling=False");
@@ -99,7 +139,70 @@ public sealed class SipInstance : IDisposable
 
     public void Dispose()
     {
+        DeleteTestCredentials();
         try { Directory.Delete(Root, recursive: true); } catch { }
+    }
+
+    /// <summary>清掉本实例可能写进系统凭据库的条目。
+    /// <para>历史教训（2026-09-12 实测）：旧版加密路径每跑一个测试实例就往凭据库写一把随机密钥，
+    /// 且**从不清理**。500+ 个实例之后把用户的 Windows 凭据库顶到阈值，
+    /// `CredWrite` / `cmdkey` 开始报 `ERROR_NOT_ENOUGH_MEMORY` —— 于是
+    /// **改挡位、存 AI Key、建 Web 会话密钥集体静默失效**（都只表现为"改不动"，不报错）。
+    /// 清理时实测：756 条 sip 条目里 746 条是测试垃圾，删掉后写入立刻恢复。</para>
+    /// 名字隔离不够，必须清理。</summary>
+    private void DeleteTestCredentials()
+    {
+        // 这三条就是本实例可能写进凭据库的全部条目:SimonDbKey(旧)、SimonLevelKey、Agent 门开关
+        foreach (var key in new[] { KeyName, KeyName + "_level", "agent_ok_" + KeyName })
+        {
+            // "删一遍就算"不够：cmdkey 失败在这里是被吞掉的，而后果非常重 ——
+            // 历史教训是**泄漏**（746 条测试垃圾把凭据库顶满，挡位/密钥/Web 会话集体静默失效）。
+            // 所以删完回查一次，还在就再删一遍；仍然在也不抛（Dispose 抛异常会污染测试结论）。
+            for (int pass = 0; pass < 2 && CredentialExists(key); pass++)
+                RunCmdKey("/delete:hotsoupreader:" + key);
+        }
+    }
+
+    /// <summary>用 cmdkey 独立回查（不经过 ktsu，避免"用可能坏掉的同一套机制验证自己"）。</summary>
+    private static bool CredentialExists(string key)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmdkey",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add("/list:hotsoupreader:" + key);
+            using var p = Process.Start(psi)!;
+            string outp = p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(5_000);
+            return outp.Contains("hotsoupreader:" + key, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }   // 查不了就当没有，不因为清理失败而影响测试结论
+    }
+
+    private static void RunCmdKey(string arg)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "cmdkey",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(arg);
+            using var p = Process.Start(psi)!;
+            p.StandardOutput.ReadToEnd();
+            p.StandardError.ReadToEnd();
+            p.WaitForExit(5_000);
+        }
+        catch { /* 清理失败不影响测试结论 */ }
     }
 
     // ── fixture 辅助 ────────────────────────────────────────────
@@ -130,6 +233,7 @@ public sealed class SipInstance : IDisposable
         lock (TemplateLock)
         {
             if (_template != null) return _template;
+            SweepStaleInstances(TempRoot());
             var root = Path.Combine(TempRoot(), "template");
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
             CopyDirectory(SipOutputDir(), root);
@@ -139,6 +243,30 @@ public sealed class SipInstance : IDisposable
             _template = root;
             return root;
         }
+    }
+
+    /// <summary>清掉上次残留的实例目录。
+    /// <para>为什么必须清：进程**被强杀**时 Dispose 不会执行，每个死在半路的实例都留下一份拷贝的残骸
+    /// （实测攒到过 **527 个目录 / 1.7 GB**）。而模板本来就是每个测试进程重新拷一份，所以旧模板也纯属占地方。</para>
+    /// <para>只删**超过 6 小时没动过**的：并行跑的另一个测试进程（例如同时跑 Debug 与 Release）
+    /// 刚建的目录 mtime 是新的，不会被误删。</para></summary>
+    private static void SweepStaleInstances(string tmpRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(tmpRoot)) return;
+            var cutoff = DateTime.UtcNow.AddHours(-6);
+            foreach (var dir in Directory.GetDirectories(tmpRoot))
+            {
+                try
+                {
+                    if (Directory.GetLastWriteTimeUtc(dir) > cutoff) continue;
+                    Directory.Delete(dir, recursive: true);
+                }
+                catch { /* 单个删不掉（被占用等）不影响测试 */ }
+            }
+        }
+        catch { /* 清理失败不影响测试结论 */ }
     }
 
     private static void CopyDirectory(string src, string dst)

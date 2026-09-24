@@ -86,4 +86,16 @@ public class CliFilterTests
         Assert.Contains("甲源熊猫一", stdout);
         Assert.Contains("甲源熊猫二", stdout);
     }
+
+    [Fact]
+    public void ListAll_WithLimit_DoesNotUseTheLimitValueAsFeedNumber()
+    {
+        using var sip = NewWithFixtures();
+        // `-l --limit 1` 曾经把 "1" 当成源编号 → 静默列出 1 号源的文章,而不是源清单。
+        // --limit 的值是 flag 的参数,不能被当成位置参数。
+        var (exit, stdout, _) = sip.Run("-l", "--limit", "1");
+        Assert.Equal(0, exit);
+        Assert.Contains("FeedA", stdout);
+        Assert.Contains("FeedB", stdout);
+    }
 }

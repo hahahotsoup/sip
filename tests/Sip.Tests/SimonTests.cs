@@ -105,4 +105,24 @@ public class SimonTests
         Assert.NotEqual(0, sip.Run("simon", "level", "9").ExitCode);
         Assert.NotEqual(0, sip.Run("simon", "level", "off").ExitCode);   // 不存在 off = 无法关闭
     }
+
+    [Fact]
+    public void AgentGate_IsNotOpenedByAFile()
+    {
+        // 2026-09-12:原先有个 agent_mode.json 兜底,「凭据库没有值」时会被采信 ——
+        // 而「没有值」正是全新安装的默认状态,等于任何程序写一个 JSON 就能把这道门打开,
+        // 与「只有 --agentok 能开」直接矛盾。现在凭据库是唯一权威:同一个文件必须完全不生效。
+        using var sip = new SipInstance(openAgentGate: false);
+        sip.EnsureDatabase();
+        File.WriteAllText(Path.Combine(sip.DataDir, "agent_mode.json"), "{ \"Ok\": true }");
+
+        var (blocked, stdout, _) = sip.Run("-l", "--json");
+        Assert.Equal(3, blocked);
+        Assert.Contains("AGENT_BLOCKED", stdout);
+
+        // 反向对照:改走凭据库(测试宿主开门的同一条路)后必须放行 ——
+        // 否则上面那条断言可能只是被别的原因拦住了,证明不了「文件无效」。
+        sip.OpenAgentGate();
+        Assert.Equal(0, sip.Run("-l", "--json").ExitCode);
+    }
 }

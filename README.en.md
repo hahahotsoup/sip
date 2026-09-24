@@ -60,7 +60,7 @@ At the end of the day you get three things: **information overload tamed, silent
 
 Honestly, I designed for that from the start: sip isn't just for humans — it's for agents too.
 
-We built **agent-invocation capability** — any agent can call sip through the CLI (with a skill), with capability nearly identical to the TUI (except `init`, which touches your API key). People and AI are first-class citizens.
+We built **agent-invocation capability** — an agent can call sip through the CLI (with a skill), with capability nearly identical to the TUI (except `init`, which touches your API key). People and AI are first-class citizens — but **the door is closed until you open it**: programs are blocked by default, and `sip --agentok` (real terminal + Web password) is how you say "yes, agents may call sip". See the security section below.
 
 ## What's different from other RSS readers
 
@@ -126,7 +126,15 @@ sip is conservative by nature, because it believes information is yours first:
 - The database has integrity checks and WAL — it self-heals after crashes, no data loss.
 - `--init` must be run manually in a real terminal — API keys never enter scripts or logs.
 - Sensitive records (search terms) stay local; clear with `telemetry export/clear` anytime.
-- **Simon (孟思琳) security guardian**: DB self-heal, SSRF/terminal-injection protection — on by default, cannot be disabled, level only (`sip simon status`). Level 2 rejects all CLI writes; level 3 rejects all CLI calls (only `simon status` remains; everything goes through the TUI, and downgrades only in the TUI command bar). Level 3 also encrypts all data (SQLCipher + AES) with an auto-generated key in the OS credential store (scoped per data directory, so multiple copies don't interfere) — other software can't read your data; migrate machines with `sip simon export-key`.
+- **Simon (孟思琳) security guardian**: DB self-heal, SSRF/terminal-injection protection — on by default, cannot be disabled, level only (`sip simon status`). Level 2 rejects all CLI writes; level 3 rejects all CLI calls (except `simon status` and `simon level`).
+- **Raising the level (tightening) is allowed on any channel** — an agent that spots trouble must be able to tighten immediately; tightening needs no authorisation.
+- **Lowering the level (loosening) goes through a human channel**: a real interactive terminal plus the Web password. Pipes, scripts and `--json` are refused; 5 wrong passwords lock it for 15 minutes. With no Web password set it degrades to a typed phrase (weaker, and the UI says so).
+  - Honest strength: it stops **calls wrapped by scripts or agents**; it does **not** stop **a program already running as you that knows the password** — that needs a separate user account. **This is an application-layer gate, not a permission boundary.**
+- **Agent access is OFF by default**: programs (scripts, agents, pipes) cannot read your library; only your own terminal is unaffected. Turn it on with `sip --agentok` (real terminal + Web password), off with `sip --agentoff` (tightening, any channel), check with `sip --agentstatus` (also shown by `sip simon status`).
+  - This is **a second, independent axis**: the Simon level is a per-command policy (read/write/all, and it gates your own terminal too); the agent gate is a per-caller policy (human/program) and only blocks non-interactive calls.
+  - The switch lives **only in the OS credential store** (no fallback file — an earlier `agent_mode.json` fallback was honoured whenever the store had no value, which is the default state of a fresh install, so any program could have opened the gate by writing one JSON file). No value means OFF. If the credential store is broken, your terminal still works; you only lose "programs may call sip", and it fails loudly.
+  - ⚠️ Side effect: `sip -l | grep x` counts as a program call, because you piped sip's own output.
+- 🧼 **Article bodies are sanitised server-side before they reach the page**: tag allowlist + attribute allowlist (denylists always leak — `on*` is endless and new tags keep appearing), `script`/`iframe`/`svg`/`form`/`style` are dropped **with their content**, URLs must be absolute, and the API only ever returns the sanitised `bodyHtml`. **A feed author writing an article cannot turn it into a script running on your machine.**
 
 In one sentence: it doesn't collect, track, or secretly upload your stuff.
 
@@ -140,8 +148,8 @@ In one sentence: it doesn't collect, track, or secretly upload your stuff.
   - `sip ingest watch` web monitoring — mark evidence for **manual refresh** (no auto-fetch)
   - `sip --diff --semantic` semantic diff — shows semantic distance and change grade (⚪polish/🟡adjust/🔴reverse)
 - ⚡ **Million-scale adaptation**: on a 1M-article library — `--grep` full-text search 2.2s → 0.5s (FTS5, Chinese substring searchable), the TUI opens instantly (lazy sidebar), `--today` 7.5s → 3s, whole-feed updates in one transaction.
-- 🧪 **Automated test baseline**: 97 process-level black-box cases + GitHub Actions CI — automatic regression on every change.
-- 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — level 3 encrypts everything; keys are auto-generated in the OS credential store; you never have to remember any key.
+- 🧪 **Automated test baseline**: process-level black-box cases + GitHub Actions CI — automatic regression on every change.
+- 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — integrity self-heal plus SSRF and terminal-injection protection; the level is adjustable but cannot be turned off.
 
 ## More
 

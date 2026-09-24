@@ -1,0 +1,1989 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="paper">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>sip Web</title>
+<style>
+:root {
+  --serif: "Source Han Serif SC","Noto Serif SC","Songti SC",Georgia,serif;
+  --sans: "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --reading-size: 17px;
+  --reading-leading: 1.9;
+  --content-w: 820px;
+  --cols: 1;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --ease: cubic-bezier(.22,1,.36,1);
+}
+[data-theme=day] {
+  --bg:#F4F1EA; --elev:#fff; --soft:#EDE8DF; --ink:#1C1917; --muted:#78716C; --faint:#A8A29E;
+  --line:rgba(28,25,23,.10); --line2:rgba(28,25,23,.16); --accent:#B45309; --accent-soft:rgba(180,83,9,.12);
+  --side:#EDE8DF; --good:#15803D; --bad:#B91C1C; --mark:rgba(251,191,36,.35); --shadow:0 8px 30px rgba(28,25,23,.08);
+}
+[data-theme=paper] {
+  --bg:#F7F3EB; --elev:#FFFCF6; --soft:#EFE8DA; --ink:#292524; --muted:#78716C; --faint:#A8A29E;
+  --line:rgba(41,37,36,.10); --line2:rgba(41,37,36,.18); --accent:#A16207; --accent-soft:rgba(161,98,7,.12);
+  --side:#F0E9DB; --good:#15803D; --bad:#B91C1C; --mark:rgba(253,230,138,.5); --shadow:0 8px 30px rgba(28,25,23,.08);
+}
+[data-theme=night] {
+  --bg:#1C1917; --elev:#292524; --soft:#23201E; --ink:#E7E5E4; --muted:#A8A29E; --faint:#78716C;
+  --line:rgba(231,229,228,.08); --line2:rgba(231,229,228,.14); --accent:#F59E0B; --accent-soft:rgba(245,158,11,.14);
+  --side:#201D1B; --good:#4ADE80; --bad:#F87171; --mark:rgba(251,191,36,.22); --shadow:0 8px 30px rgba(0,0,0,.35);
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:14px/1.6 var(--sans);color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none;padding:0}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+::selection{background:var(--accent-soft)}
+[hidden]{display:none!important}
+
+/* login — 整屏铺图，左栏 clip-path 斜切，无竖缝 */
+#login{
+  position:fixed;inset:0;z-index:100;background:#1C1917;overflow:hidden;
+}
+#login .R{position:absolute;inset:0;overflow:hidden;background:#1C1917}
+#login .art{position:absolute;inset:-8%;background:linear-gradient(145deg,#3d2c1e,#1c1917 50%,#4a3424);
+  animation:kb 28s ease-in-out infinite alternate}
+#login .art::after{content:"";position:absolute;inset:0;
+  background:radial-gradient(ellipse at 30% 40%,rgba(161,98,7,.35),transparent 55%),
+             radial-gradient(ellipse at 70% 70%,rgba(120,53,15,.4),transparent 50%)}
+@keyframes kb{from{transform:scale(1.05)}to{transform:scale(1.15) translate(-2%,-1%)}}
+#login .L{
+  position:absolute;inset:0 auto 0 0;z-index:2;
+  width:min(440px,48vw);min-width:320px;
+  display:flex;flex-direction:column;justify-content:center;
+  padding:48px 80px 48px 56px;
+  background:var(--bg);
+  /* 斜线：顶宽底窄，整块裁切，不叠伪元素 */
+  clip-path:polygon(0 0, 100% 0, calc(100% - 72px) 100%, 0 100%);
+}
+#login .brand{margin-bottom:36px}
+#login .brand b{font-family:var(--serif);font-size:28px;letter-spacing:.2em}
+#login .brand span{display:block;margin-top:8px;color:var(--muted);letter-spacing:.28em;font-family:var(--serif);font-size:13px}
+#login form{max-width:340px;width:100%;display:flex;flex-direction:column;gap:14px}
+#login label{font-size:12px;letter-spacing:.16em;color:var(--muted)}
+#login input{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--elev);outline:none}
+#login input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+#login .go{padding:12px;border-radius:10px;background:linear-gradient(135deg,#B45309,#78350F);color:#FEF3C7;letter-spacing:.3em}
+#login .quote{position:absolute;right:36px;bottom:32px;left:22%;z-index:1;text-align:right;color:#F5F5F4;font-family:var(--serif);font-size:15px;line-height:1.8;text-shadow:0 2px 12px rgba(0,0,0,.4)}
+#login .quote small{display:block;margin-top:8px;opacity:.65;font-size:12px;font-family:var(--sans)}
+
+/* app shell */
+.app{display:grid;grid-template-columns:260px minmax(0,1fr);height:100vh;overflow:hidden}
+/* 折叠：整列去掉，侧栏彻底不占位（避免 0 宽竖排字） */
+.app.side-collapsed{grid-template-columns:minmax(0,1fr)}
+.app.side-collapsed > .side{display:none !important;visibility:hidden;width:0;overflow:hidden}
+.side{display:flex;flex-direction:column;background:var(--side);border-right:1px solid var(--line);min-height:0;overflow:hidden;width:260px}
+.side .brand{display:flex;align-items:center;gap:10px;padding:18px 16px 8px}
+.side .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.side .brand b{font-family:var(--serif);letter-spacing:.12em;font-size:15px}
+.side .brand i{font-style:normal;color:var(--muted);font-size:10px;letter-spacing:.14em;margin-left:4px}
+.nav{padding:8px 10px;display:flex;flex-direction:column;gap:2px;overflow:auto}
+.nav button{
+  display:flex;align-items:center;gap:8px;
+  padding:9px 12px;border-radius:var(--radius-sm);color:var(--muted);text-align:left;font-size:13px;
+}
+.nav button [data-i]{flex:1;min-width:0;text-align:left}
+.nav button .n{margin-left:auto;flex-shrink:0}
+.nav button:hover{background:var(--elev);color:var(--ink)}
+.nav button.on{background:var(--elev);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.nav .g{padding:12px 12px 4px;font-size:10px;letter-spacing:.16em;color:var(--faint)}
+.nav .n{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.side-foot{margin-top:auto;padding:12px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap}
+.ghost{flex:1;min-width:90px;padding:8px;border-radius:var(--radius-sm);border:1px dashed var(--line2);color:var(--muted);font-size:12px}
+.ghost:hover{color:var(--ink);border-color:var(--accent);background:var(--accent-soft)}
+
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{display:flex;align-items:center;gap:10px;padding:12px 18px}
+.top h1{margin:0;flex:1;font-size:14px;font-weight:550;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted)}
+.ib:hover{background:var(--elev);color:var(--ink)}
+.ib.on{color:var(--accent);background:var(--accent-soft)}
+.prog{height:2px;margin:0 18px;background:var(--line);border-radius:99px;overflow:hidden}
+.prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .12s linear}
+.body{flex:1;overflow:auto;padding:24px 22px 64px}
+.wrap{max-width:var(--content-w);width:100%;margin:0 auto}
+.wrap.narrow{max-width:var(--content-w)}
+
+.kicker{margin:0 0 8px;font-size:11px;letter-spacing:.18em;color:var(--accent)}
+.h2{margin:0 0 6px;font-family:var(--serif);font-size:26px;font-weight:600;letter-spacing:.06em}
+.sub{margin:0 0 18px;color:var(--muted);font-size:12.5px}
+.cards{display:flex;flex-direction:column;gap:8px}
+.card{
+  width:100%;text-align:left;padding:14px 16px;border-radius:var(--radius);
+  border:1px solid var(--line);background:var(--elev);transition:border-color .2s,transform .2s,box-shadow .2s;
+}
+.card:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:var(--shadow)}
+.card .t{font-family:var(--serif);font-size:15px;font-weight:550;margin-bottom:6px}
+.card .m{font-size:11.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.b{display:inline-flex;padding:1px 7px;border-radius:99px;border:1px solid var(--line);background:var(--soft);font-size:10.5px;color:var(--muted)}
+.b.acc{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft)}
+.b.good{color:var(--good)} .b.bad{color:var(--bad)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.stat{padding:16px;border-radius:var(--radius);border:1px solid var(--line);background:var(--elev)}
+.stat b{display:block;font-size:22px;font-family:var(--serif);letter-spacing:.04em}
+.stat span{font-size:11.5px;color:var(--muted)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.btn{padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--line);background:var(--elev);color:var(--muted);font-size:12.5px;display:inline-flex;gap:6px;align-items:center}
+.btn:hover{color:var(--ink);border-color:var(--line2)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.dan{color:var(--bad)}
+.field{display:flex;gap:8px;margin:10px 0}
+.field input,.field select,.field textarea{
+  flex:1;padding:10px 12px;border-radius:var(--radius-sm);border:1px solid var(--line);background:var(--elev);outline:none;
+}
+.field input:focus{border-color:var(--accent)}
+.empty{padding:40px 12px;text-align:center;color:var(--muted);font-size:13px}
+.article-header{margin-bottom:24px}
+.article-header .kicker{margin-bottom:10px}
+.article-header h2{margin:0 0 10px;font-family:var(--serif);font-size:clamp(22px,3vw,30px);font-weight:600;letter-spacing:.05em;line-height:1.35}
+.meta{display:flex;flex-wrap:wrap;gap:8px;color:var(--muted);font-size:12px}
+.rule{margin:18px 0 24px;height:1px;background:linear-gradient(90deg,var(--accent) 0 48px,var(--line) 48px)}
+.prose{font-family:var(--serif);font-size:var(--reading-size);line-height:var(--reading-leading)}
+.prose[data-cols="2"]{
+  column-count:2;column-gap:2.2em;column-rule:1px solid var(--line);
+}
+.prose[data-cols="3"]{
+  column-count:3;column-gap:1.8em;column-rule:1px solid var(--line);
+}
+@media (max-width:900px){
+  .prose[data-cols="2"],.prose[data-cols="3"]{column-count:1}
+}
+.prose p{margin:0 0 1.2em;text-align:justify}
+.prose img{max-width:100%;border-radius:6px}
+.prose mark{background:var(--mark);padding:0 .12em}
+/* ── 分栏翻页 ──────────────────────────────────────────────
+   多栏时不再是一条纵向长滚动，而是"一页 = 视口高的 N 栏"，横向翻页。
+   为什么必须这样：两栏放进纵向滚动后，左栏读到底要往下滚、右栏的开头又在视口上方，
+   读者只能在上下之间来回找（用户截图实测：没办法阅读）。 */
+.pager{position:relative}
+.pager.paged{overflow:hidden}
+.pager.paged .prose{column-fill:auto;transition:transform .18s ease}
+.pager.paged .prose img,.pager.paged .prose figure,.pager.paged .prose pre,
+.pager.paged .prose table,.pager.paged .prose blockquote{break-inside:avoid}
+.pager-bar{position:absolute;right:10px;bottom:10px;z-index:3;display:flex;gap:8px;align-items:center;
+  padding:6px 10px;border-radius:99px;border:1px solid var(--line);background:var(--elev);box-shadow:var(--shadow)}
+.pager-bar .n{font-size:12px;color:var(--muted);min-width:54px;text-align:center;font-variant-numeric:tabular-nums}
+.pager-bar .hint{font-size:11px;color:var(--muted)}
+@media (max-width:900px){ .pager-bar .hint{display:none} }
+.prose mark.hit{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+  animation:hitPulse 1.2s var(--ease) 2;
+  border-radius:2px;
+}
+@keyframes hitPulse{
+  0%,100%{background:var(--mark)}
+  50%{background:var(--accent-soft);box-shadow:0 0 0 6px var(--accent-soft)}
+}
+.snip-line{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:2px 8px;border-radius:99px;background:var(--soft);
+  font-size:11px;color:var(--accent);font-variant-numeric:tabular-nums;
+  margin-right:6px;
+}
+.loc-btn{
+  margin-top:8px;display:inline-flex;align-items:center;gap:6px;
+  padding:6px 10px;border-radius:8px;border:1px solid var(--accent-soft);
+  background:var(--accent-soft);color:var(--accent);font-size:12px;
+}
+.loc-btn:hover{border-color:var(--accent)}
+.prose .para-line{position:relative}
+.jump-bar{
+  position:sticky;top:0;z-index:5;margin:0 0 12px;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;border-radius:10px;
+  background:var(--accent-soft);border:1px solid var(--accent-soft);
+  color:var(--accent);font-size:12px;
+}
+.diff-del{background:rgba(185,28,28,.12);text-decoration:line-through}
+.diff-add{background:rgba(21,128,61,.14)}
+.panel{
+  position:fixed;inset:0;z-index:40;background:rgba(28,25,23,.32);backdrop-filter:blur(4px);
+  display:flex;align-items:flex-start;justify-content:center;padding:10vh 16px;
+}
+.panel-card{
+  width:min(640px,100%);max-height:75vh;display:flex;flex-direction:column;
+  background:var(--elev);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;
+}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}
+.panel-body{padding:14px 16px;overflow:auto}
+.toast{
+  position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(8px);
+  background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:99px;font-size:12.5px;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:60;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* 浮动阅读调节条：任意界面实时可调 */
+.rt-bar{
+  position:fixed;right:18px;bottom:18px;z-index:35;
+  display:flex;align-items:center;gap:6px;
+  padding:8px 10px;border-radius:99px;
+  background:var(--elev);border:1px solid var(--line);
+  box-shadow:var(--shadow);
+  max-width:calc(100vw - 36px);
+  flex-wrap:wrap;
+  justify-content:center;
+}
+.rt-bar .lbl{font-size:11px;color:var(--muted);padding:0 4px;font-variant-numeric:tabular-nums;min-width:28px;text-align:center}
+.rt-bar .ib{width:30px;height:30px}
+.rt-bar .sep{width:1px;height:16px;background:var(--line);margin:0 2px}
+.rt-bar input[type=range]{width:64px;accent-color:var(--accent)}
+.rt-bar .colbtn{
+  min-width:26px;height:26px;padding:0 6px;border-radius:6px;
+  border:1px solid var(--line);font-size:11px;color:var(--muted);
+  background:transparent;
+}
+.rt-bar .colbtn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.badge-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+.note{padding:12px 14px;border-left:2px solid var(--accent);background:var(--elev);border-radius:0 8px 8px 0;color:var(--muted);font-size:13px;margin:12px 0}
+table.dt{width:100%;border-collapse:collapse;font-size:12.5px}
+table.dt th,table.dt td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+table.dt th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.08em}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{padding:6px 10px;border-radius:99px;border:1px solid var(--line);background:var(--elev);font-size:12px;color:var(--muted)}
+.chip.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.seg{display:flex;gap:4px;padding:3px;background:var(--soft);border-radius:10px;width:fit-content}
+.seg button{padding:6px 12px;border-radius:8px;font-size:12px;color:var(--muted)}
+.seg button.on{background:var(--elev);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+@media (max-width:900px){
+  #login .L{position:relative;width:100%;min-width:0;clip-path:none;padding:28px;order:2;
+    background:linear-gradient(0deg,var(--bg) 70%,transparent)}
+  #login{display:flex;flex-direction:column;overflow:auto}
+  #login .R{position:relative;min-height:28vh;order:1}
+  #login .quote{left:16px;right:16px;text-align:left}
+  .app{grid-template-columns:1fr}
+  .side{position:fixed;inset:0 auto 0 0;width:min(260px,86vw);transform:translateX(-105%);transition:transform .3s var(--ease);z-index:30}
+  .side.open{transform:none}
+  .grid2,.grid3{grid-template-columns:1fr}
+  .rt-bar{left:12px;right:12px;bottom:12px;top:auto;transform:none;width:auto;flex-wrap:wrap}
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════ 登录壳仅用于本地预览；由 sip --start 打开时立刻隐藏 ══════════ -->
+<div id="login" hidden>
+  <section class="L">
+    <div class="brand"><b>sip</b><span>品，你细品</span></div>
+    <form id="loginForm">
+      <label for="lp">Web 登录密码</label>
+      <input id="lp" type="password" placeholder="模拟：任意密码 / 或跳过" autocomplete="current-password" />
+      <button class="go" type="submit">登 录</button>
+      <button class="btn" type="button" id="skipLogin">跳过（无密码模式）</button>
+      <p style="margin:8px 0 0;font-size:11.5px;color:var(--faint);line-height:1.6">
+        模拟界面 · 非真实后端<br/>
+        真实产品：首次 --start 会问密码与绑定；忘记可 web_auth.reset
+      </p>
+    </form>
+  </section>
+  <section class="R">
+    <div class="art"></div>
+    <div class="quote" id="hitokoto">
+      慢慢来，不着急。
+      <small>—— sip · 模拟一言</small>
+    </div>
+  </section>
+</div>
+
+<!-- ══════════ 主应用 ══════════ -->
+<div class="app" id="app" hidden>
+  <aside class="side" id="side">
+    <div class="brand"><span class="dot"></span><b>sip</b><i>WEB</i></div>
+    <nav class="nav" id="nav">
+      <div class="g" data-i="Read">阅读</div>
+      <button data-v="today" class="on">🍵 <span data-i="Today">今日哈汤</span> <span class="n" id="nToday">5</span></button>
+      <button data-v="feeds">📡 <span data-i="Feeds">订阅源</span> <span class="n" id="nFeeds">8</span></button>
+      <button data-v="likes">♥ <span data-i="Likes">收藏</span> <span class="n" id="nLikes">4</span></button>
+      <button data-v="imported">📚 <span data-i="Imports">本地导入</span> <span class="n" id="nImp" style="display:none"></span></button>
+      <div class="g" data-i="Search">检索</div>
+      <button data-v="search">🔍 <span data-i="Search">搜索</span></button>
+      <div class="g" data-i="Govern">治理</div>
+      <button data-v="diff">📜 <span data-i="Edits">改稿追踪</span></button>
+      <button data-v="dedup">🧩 <span data-i="Dedup">跨源去重</span></button>
+      <button data-v="policy">📋 <span data-i="Policies">源规则</span></button>
+      <button data-v="insights">📊 <span data-i="Insights">阅读报告</span></button>
+      <div class="g" data-i="System">系统</div>
+      <button data-v="settings">⚙ <span data-i="Reading settings">阅读设置</span></button>
+      <button data-v="about">ℹ <span data-i="About">关于</span></button>
+    </nav>
+    <div class="side-foot">
+      <button class="ghost" id="btnAdd" data-i="+ Feed">＋ 订阅</button>
+      <button class="ghost" id="btnSync" data-i="Sync">同步</button>
+      <button class="ghost" id="btnHideSide" data-i="⟨ Collapse">⟨ 收起</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <button class="ib" id="btnMenu" title="打开/收起侧栏">☰</button>
+      <h1 id="title">今日哈汤</h1>
+    </header>
+    <div class="prog"><i id="prog"></i></div>
+    <div class="body" id="content"><div class="wrap" id="view"></div></div>
+  </main>
+</div>
+
+<!-- 阅读调节：仅文章页显示 -->
+<div class="rt-bar" id="rtBar" title="阅读设置 · 文章 / 电子书" hidden>
+  <button class="ib" id="rtTheme" title="切换主题">◐</button>
+  <span class="sep"></span>
+  <button class="ib" id="rtMinus" title="缩小字号">A−</button>
+  <span class="lbl" id="rtSize">17</span>
+  <button class="ib" id="rtPlus" title="放大字号">A+</button>
+  <span class="sep"></span>
+  <span class="lbl" title="行距">行</span>
+  <input type="range" id="rtLh" min="150" max="220" step="5" value="190" />
+  <span class="sep"></span>
+  <span class="lbl" title="栏宽">宽</span>
+  <input type="range" id="rtW" min="560" max="2400" step="20" value="820" title="栏宽（拉满可铺满界面）" />
+  <span class="sep"></span>
+  <span class="lbl" title="正文分栏">栏</span>
+  <button class="colbtn on" data-cols="1" title="单栏">1</button>
+  <button class="colbtn" data-cols="2" title="双栏">2</button>
+  <button class="colbtn" data-cols="3" title="三栏">3</button>
+</div>
+
+<!-- panels -->
+<div class="panel" id="pAdd" hidden>
+  <div class="panel-card">
+    <div class="panel-head"><strong>添加订阅源</strong><button class="ib" data-close>✕</button></div>
+    <div class="panel-body">
+      <div class="field"><input id="addUrl" placeholder="https://example.com/feed.xml 或 atom" /><button class="btn pri" id="doAdd">添加</button></div>
+      <p class="sub" style="margin:0">会立刻抓取该源并入库；已存在的源会跳过。</p>
+      <div class="rule" style="margin:12px 0"></div>
+      <div class="field">
+        <input type="file" id="opmlFile" accept=".opml,.xml,text/xml,application/xml" style="flex:1" />
+        <button class="btn" id="doOpml">导入 OPML</button>
+      </div>
+      <p class="sub" style="margin:0">OPML 是订阅源清单（多数阅读器都能导出）。逐个抓取，已存在的跳过；源多时慢一些，进度显示在下面。</p>
+      <div class="row" style="margin-top:8px">
+        <a class="btn" href="/api/feeds/opml" download="sip-feeds.opml">导出 OPML</a>
+        <span class="sub" style="margin:0;align-self:center">把当前订阅源导出成 OPML，可导入别的阅读器</span>
+      </div>
+      <p class="sub" id="addMsg" hidden style="margin:10px 0 0"></p>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="pConsent" hidden>
+  <div class="panel-card">
+    <div class="panel-head"><strong>抓取全文前请确认</strong><button class="ib" data-close>✕</button></div>
+    <div class="panel-body">
+      <p class="sub" id="consentText" style="margin:0;line-height:1.8"></p>
+      <div class="row" style="margin-top:14px">
+        <button class="btn pri" id="doConsent">同意并继续</button>
+        <button class="btn" data-close>取消</button>
+      </div>
+      <p class="sub" style="margin:12px 0 0">同意只记录一次（数据目录里的 <span class="mono">fulltext_consent.txt</span>），之后命令行与网页都不再询问。</p>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="pSearch" hidden>
+  <div class="panel-card">
+    <div class="panel-head"><strong>搜索</strong><button class="ib" data-close>✕</button></div>
+    <div class="panel-body">
+      <div class="seg" style="margin-bottom:10px" id="smode">
+        <button data-mode="grep" class="on">全文</button>
+        <button data-mode="sem">语义</button>
+      </div>
+      <div class="field">
+        <input id="gq" placeholder="关键词…（全文可试 trigram）" value="trigram" />
+      </div>
+      <div class="row" style="align-items:center;margin-top:0">
+        <button class="btn pri" id="gRun">检索</button>
+        <label id="thrRow" hidden style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px">
+          阈值
+          <input type="range" id="semThr" min="50" max="95" step="5" value="70" style="width:90px" />
+          <span class="mono" id="semThrVal">0.70</span>
+          <span style="opacity:.7">仅语义</span>
+        </label>
+      </div>
+      <div id="gHits"></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="pPass" hidden>
+  <div class="panel-card" style="width:min(420px,100%)">
+    <div class="panel-head"><strong>Web 密码（模拟）</strong><button class="ib" data-close>✕</button></div>
+    <div class="panel-body">
+      <p class="sub">真实命令：<span class="mono">sip webpass</span> / 逃生口 <span class="mono">web_auth.reset</span></p>
+      <div class="field"><input type="password" placeholder="新密码" id="np1" /></div>
+      <div class="field"><input type="password" placeholder="再输一次" id="np2" /></div>
+      <div class="row">
+        <button class="btn pri" id="savePass">保存密码</button>
+        <button class="btn dan" id="clearPass">清除密码</button>
+      </div>
+      <div class="note">首次 --start：会问是否设密（跳过需输入 skip）+ 绑定 IP/端口。无密码 + 0.0.0.0 会用 OpenClaw 事故再拦一次。</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ───────── 状态容器 ─────────
+   这里原来装着写死的模拟数据。阅读路径（今日/文章/订阅源/收藏）已改为全真，
+   所以清空 —— 只要 mock 还在，接口失败时界面就会**静默显示假数据**，比空白更糟。
+   尚未接真的视图（改稿/去重/规则/报告/导入）暂时保留各自的 mock，后续逐个替换。 */
+const FEEDS = [];
+const ARTICLES = {};
+const BODIES = {};
+const DEFAULT_BODY = `<p>（这篇没有正文）</p>`;
+const LIKES = [];
+const TODAY = [];
+/* 今日哈汤的进度全部来自 /api/today 的 target/done/tracking，
+   不再写死「目标 5 篇 · 已读 0」 */
+const TODAY_META = { target: 5, done: 0, tracking: false, generatedAt: "" };
+/* ⚠️ 以下到 INSIGHTS 为止，都是**设计稿预览数据**，不是你的库。
+   默认**不渲染**（PREVIEW_MOCKS=false）：这些页面尚未接后端，而假数据冒充真数据
+   是最坏的一种 bug —— 之前「阅读报告」就是在渲染一组编造的统计数字。
+   现在默认显示"这一页还没接入"，要审阅设计稿就把开关改成 true。
+   **数据一个字都没删**：接一个后端就搬走一个，搬完剩下的继续留在这儿当设计参考。 */
+const PREVIEW_MOCKS = false;
+const IMPORTED = [
+  {
+    id:901, t:"深入理解计算机系统 · 摘录", type:"pdf", pages:12, size:"4.2 MB",
+    when:"2026-09-01", progress:3,
+    // PDF：按页栅格化（模拟）
+    pageTexts:[
+      "第 1 页 · 系统漫游\n信息 = 位 + 上下文。程序被翻译成其他程序处理的位序列。",
+      "第 2 页 · 信息的表示\n整数用补码；浮点是 IEEE 754。字节序影响网络与磁盘上的解释。",
+      "第 3 页 · 程序的机器级表示\n编译器把 C 变成汇编；理解栈帧与调用约定有助于调试。",
+      "第 4 页 · 处理器体系结构\n指令集与流水线；冒险与转发决定真实性能。",
+      "第 5 页 · 存储器层次结构\n缓存命中与否往往比算法常数更重要。",
+      "第 6 页 · 链接\n符号解析与重定位；动态库决定部署形态。",
+      "第 7 页 · 异常控制流\n信号、上下文切换，是并发的基础。",
+      "第 8 页 · 虚拟内存\n地址翻译让每个进程以为自己独占机器。",
+      "第 9 页 · 系统级 I/O\n文件描述符与重定向；一切皆文件的代价。",
+      "第 10 页 · 网络编程\n套接字、阻塞与非阻塞；C10K 的起点。",
+      "第 11 页 · 并发\n线程、锁、条件变量；共享内存很难。",
+      "第 12 页 · 小结\n把层次结构串起来，比背 API 更有用。",
+    ]
+  },
+  {
+    id:902, t:"置身事内", type:"epub", pages:null, size:"1.1 MB",
+    when:"2026-08-20", progress:2,
+    chapters:[
+      {n:1,t:"地方政府的权力与事务",html:`<p class="lead">理解中国经济，很难绕开地方政府。</p>
+<p>财税、土地、招商引资——地方不只是执行者，也是参与者。</p>
+<p>这一章从事权与财权的不匹配讲起，解释为什么「土地财政」会长成后来的样子。</p>`},
+      {n:2,t:"财税与土地",html:`<p>分税制之后，地方收入结构变化，土地出让成为关键变量。</p>
+<p>园区、城投、抵押融资，构成一条完整的资金链条。</p>`},
+      {n:3,t:"城市化与不平衡",html:`<p>人往哪里走，公共服务就跟不跟得上，是同一枚硬币的两面。</p>`},
+    ]
+  },
+  {
+    id:903, t:"会议纪要 2026-08", type:"docx", pages:null, size:"86 KB",
+    when:"2026-08-30", progress:1,
+    chapters:[
+      {n:1,t:"产品评审",html:`<p><strong>结论：</strong>Web 以 <code>sip --start</code> 为主路径，TUI 逐步淡出。</p>
+<ul><li>登录：首次询问密码与绑定</li><li>敏感配置走 CLI：webpass / aikey / simon</li><li>电子书：import 后 Web 只读优先</li></ul>`},
+      {n:2,t:"待办",html:`<p>1. PDF 分页 API<br/>2. 上传 import<br/>3. 搜索定位 offset</p>`},
+    ]
+  },
+];
+// 打开电子书阅读器
+function openEbook(id){
+  state.view="ebook";
+  state.ebookId=id;
+  const b=IMPORTED.find(x=>x.id===id);
+  state.ebookPage=b?.progress||1;
+  state.ebookChapter=1;
+  $("nav").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x.dataset.v==="imported"));
+  render();
+}
+function ebookPage(n){
+  const book=IMPORTED.find(x=>x.id===state.ebookId);
+  if(!book?.pages) return;
+  state.ebookPage=Math.min(book.pages,Math.max(1,n|0));
+  book.progress=state.ebookPage;
+  render();
+  $("content").scrollTop=0;
+}
+function ebookChapter(n){
+  const book=IMPORTED.find(x=>x.id===state.ebookId);
+  const max=book?.chapters?.length||1;
+  state.ebookChapter=Math.min(max,Math.max(1,n|0));
+  if(book) book.progress=state.ebookChapter;
+  render();
+  $("content").scrollTop=0;
+}
+function fakeImport(){
+  const f=$("fakeFile")?.files?.[0];
+  const name=f?f.name:"新书.pdf";
+  const ext=(name.split(".").pop()||"pdf").toLowerCase();
+  const id=900+IMPORTED.length+1;
+  IMPORTED.push({
+    id, t:name.replace(/\.[^.]+$/,""), type:ext==="pdf"?"pdf":"epub",
+    pages: ext==="pdf"?8:null, size: f?(Math.round(f.size/1024)+" KB"):"1.0 MB",
+    when:new Date().toISOString().slice(0,10), progress:1,
+    pageTexts: ext==="pdf"? Array.from({length:8},(_,i)=>`第 ${i+1} 页 · 模拟导入的 ${name}\n（占位页文）`):null,
+    chapters: ext==="pdf"?null:[{n:1,t:"正文",html:`<p>这是模拟导入的 <strong>${esc(name)}</strong>。</p><p>真实流程：sip --import 后进入本地导入源。</p>`}]
+  });
+  $("nImp").textContent=IMPORTED.length;
+  toast("已模拟导入 "+name);
+  render();
+}
+document.addEventListener("keydown",e=>{
+  // 分栏翻页：只在文章页、且确实分页了的时候接管方向键
+  if(state.view==="article"&&pager.on){
+    if(e.key==="ArrowRight"||e.key==="PageDown"||e.key===" "){ if(pagerGo(1)){ e.preventDefault(); return; } }
+    if(e.key==="ArrowLeft"||e.key==="PageUp"){ if(pagerGo(-1)){ e.preventDefault(); return; } }
+  }
+  if(state.view!=="ebook") return;
+  const book=IMPORTED.find(x=>x.id===state.ebookId);
+  if(!book?.pages) return;
+  if(e.key==="ArrowLeft") ebookPage(Math.max(1,(state.ebookPage||1)-1));
+  if(e.key==="ArrowRight") ebookPage(Math.min(book.pages,(state.ebookPage||1)+1));
+});
+const GREP_HITS = [
+  {
+    id:103, t:"SQLite FTS5 tips for CJK substring search", feed:"Hacker News: Newest",
+    kw:"trigram",
+    snips:[
+      {line:2, text:"…中文子串可用 trigram FTS，短词回退 LIKE…"},
+      {line:4, text:"…压到 0.5 秒：命中先靠 FTS 定位文章…"},
+    ],
+    count:3
+  },
+  {
+    id:202, t:"把 RSS 当第二大脑的三个习惯", feed:"少数派",
+    kw:"全文搜索",
+    snips:[
+      {line:2, text:"…全文搜索不依赖 AI，0.5 秒内出结果…"},
+    ],
+    count:2
+  },
+];
+const SEM_HITS = [
+  {id:101,t:"Show HN: I built a local-first RSS with version diffs",feed:"Hacker News",score:0.91},
+  {id:601,t:"读不进去书的人，做了一个读书的软件",feed:"热汤茶馆",score:0.84},
+  {id:201,t:"本周看什么：信息过载时的减法",feed:"少数派",score:0.79},
+];
+const DIFF_LIST = [
+  {
+    id:103, title:"SQLite FTS5 tips for CJK substring search", feed:"Hacker News: Newest",
+    from:2, to:3, grade:"调整", when:"2 小时前",
+    oldHtml:`<p class="lead">SQLite FTS5 的中文全文搜索实践记录（旧版）。</p>
+<p>全文搜索大约要 2 秒。</p>
+<p>## 做法</p>
+<p>先上 ES 再考虑。trigram 可以先观望。</p>
+<p>结论：能用，但慢，等有空再优化。</p>`,
+    newHtml:null, // null = 用 BODIES[id] 当最新
+    lines:[
+      {k:" ",t:"## 背景"},
+      {k:"-",t:"全文搜索大约要 2 秒。"},
+      {k:"+",t:"全文搜索从 2.2 秒降到 0.5 秒（FTS5 + trigram）。"},
+      {k:" ",t:""},
+      {k:" ",t:"## 做法"},
+      {k:"+",t:"中文子串用 trigram tokenizer；词长 < 3 回退 LIKE。"},
+      {k:"-",t:"先上 ES 再考虑。"},
+    ]
+  },
+  {
+    id:101, title:"Show HN: I built a local-first RSS with version diffs", feed:"Hacker News: Newest",
+    from:1, to:2, grade:"润色", when:"昨天",
+    oldHtml:`<p>本地优先 RSS 阅读器，把变化留在自己机器上。</p>
+<p>支持 diff、全文搜索。暂无安全说明。</p>`,
+    newHtml:null,
+    lines:[
+      {k:" ",t:"开篇"},
+      {k:"-",t:"支持 diff、全文搜索。"},
+      {k:"+",t:"支持 diff、全文搜索；SSRF 防护与孟思琳挡位见下文。"},
+      {k:"+",t:"如果你也在做本地知识库，欢迎聊聊。"},
+    ]
+  },
+  {
+    id:401, title:"How I debug DNS issues", feed:"Julia Evans",
+    from:3, to:4, grade:"反转", when:"3 天前",
+    oldHtml:`<p>调试 DNS 时，我通常先怀疑缓存。</p>
+<p>结论：90% 是 TTL 问题，清缓存即可。</p>`,
+    newHtml:null,
+    lines:[
+      {k:" ",t:"调试步骤"},
+      {k:"-",t:"结论：90% 是 TTL 问题，清缓存即可。"},
+      {k:"+",t:"更正：后来发现多半是 split-horizon 与本地 resolver 不一致；清缓存往往没用。"},
+    ]
+  },
+];
+const BODIES_401_OLD = null;
+const DEDUP = [
+  {
+    id:"c1", rep:"本地优先 RSS 的版本追踪", src:"3 源", overlap:0.88,
+    members:[
+      {key:"HN #1", feed:"Hacker News", title:"Show HN: local-first RSS with version diffs",
+        text:"I built a local-first RSS reader. Every article version is archived. You can diff author edits. No cloud required."},
+      {key:"#2 转载", feed:"某聚合站", title:"【转载】本地优先 RSS 与改稿追踪",
+        text:"I built a local-first RSS reader. Every article version is archived. You can diff author edits. 转载说明：原文来自 HN。"},
+      {key:"#3 摘要", feed:"中文周刊", title:"一周工具：可追踪改稿的 RSS",
+        text:"本地优先 RSS：留档每一版，可 diff 作者改动，无需上云。（摘要改写）"},
+    ],
+    // 代表元 vs 其它：统一 diff 行
+    lines:[
+      {k:" ",t:"I built a local-first RSS reader."},
+      {k:" ",t:"Every article version is archived."},
+      {k:" ",t:"You can diff author edits."},
+      {k:"-",t:"No cloud required."},
+      {k:"+",t:"转载说明：原文来自 HN。"},
+      {k:"+",t:"（中文周刊摘要有删减）"},
+    ]
+  },
+  {
+    id:"c2", rep:"SQLite FTS5 中文检索", src:"2 源", overlap:0.91,
+    members:[
+      {key:"HN #1", feed:"Hacker News", title:"SQLite FTS5 tips for CJK",
+        text:"Use trigram tokenizer for Chinese substrings. Short keywords fall back to LIKE."},
+      {key:"博客转载", feed:"技术周刊", title:"SQLite FTS5 中文子串实践",
+        text:"Use trigram tokenizer for Chinese substrings. Short keywords fall back to LIKE. 补充：大库实测 0.5s。"},
+    ],
+    lines:[
+      {k:" ",t:"Use trigram tokenizer for Chinese substrings."},
+      {k:" ",t:"Short keywords fall back to LIKE."},
+      {k:"+",t:"补充：大库实测 0.5s。"},
+    ]
+  },
+];
+const POLICIES = [
+  {feed:"The Pragmatic Engineer",action:"lower_frequency",schedule:"weekly@Mon 08:00",note:"发信太密"},
+  {feed:"少数派",action:"tag",tag:"中文",note:""},
+  {feed:"旧测试源",action:"unsubscribe",schedule:"",note:"长期 404"},
+];
+const INSIGHTS = {
+  window:"7d", reads:23, sources:5, likes:6, fulltext:4,
+  top:[{s:"Hacker News",n:9},{s:"少数派",n:6},{s:"热汤茶馆",n:4}],
+  note:"事实给你，决定你来做。遥测默认关闭，本报告为模拟。",
+};
+
+const $ = (id)=>document.getElementById(id);
+const state = {view:"today",feedId:null,articleId:null,theme:"prefs",lang:"zh-CN",dict:{}};
+
+/*
+ * 直接吃 sip 语言文件（与 Lang.T 同一套约定）：
+ *   键 = 英文源文；值 = 译文
+ * 本目录 languages/ 从仓库复制：
+ *   languages/zh-CN.json  languages/en-US.json  languages/zh-Moe.json
+ * 若 fetch 失败（file:// 等），回退内置精简表。
+ */
+const FALLBACK = {
+  "zh-CN": {
+    "Read":"阅读","Search":"检索","Govern":"治理","System":"系统",
+    "Today":"今日哈汤","Feeds":"订阅源","Likes":"收藏","Imports":"本地导入",
+    "Edits":"改稿追踪","Dedup":"跨源去重","Policies":"源规则","Insights":"阅读报告",
+    "Reading settings":"阅读设置","About":"关于",
+    "+ Feed":"＋ 订阅","Sync":"同步","⟨ Collapse":"⟨ 收起",
+    "Day":"白昼","Paper":"羊皮纸","Night":"夜读",
+    "Font":"字号","Columns":"分栏","UI language":"界面语言","Other":"其它",
+    "Mock UI: most buttons only toast.":"本页为功能模拟：按钮多为 toast，不写库。",
+  },
+  "en-US": {},
+  "zh-Moe": {
+    "Today":"今日哈汤喵","Feeds":"订阅源喵","Likes":"收藏喵","Imports":"本地导入喵",
+  }
+};
+
+async function loadLangDict(code){
+  // en-US：词典即英文原文（键=值），可不加载
+  if(code==="en-US"){ state.dict = {}; return; }
+  try{
+    const res = await fetch(`./languages/${code}.json`, {cache:"no-store"});
+    if(!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    // 扁平化（兼容嵌套分组）
+    const flat = {};
+    (function walk(o){
+      if(!o || typeof o!=="object") return;
+      for(const [k,v] of Object.entries(o)){
+        if(typeof v==="string") flat[k]=v;
+        else if(v && typeof v==="object") walk(v);
+      }
+    })(data);
+    state.dict = flat;
+  }catch(e){
+    state.dict = FALLBACK[code] || {};
+    console.warn("language file load failed, using fallback", e);
+  }
+}
+
+function t(key){
+  // 英文界面：直接用键
+  if(state.lang==="en-US") return key;
+  const d = state.dict;
+  if(d && d[key]) return d[key];
+  const fb = FALLBACK[state.lang];
+  if(fb && fb[key]) return fb[key];
+  return key;
+}
+
+async function applyLang(){
+  document.documentElement.lang = state.lang;
+  await loadLangDict(state.lang);
+  document.querySelectorAll("[data-i]").forEach(el=>{ el.textContent = t(el.dataset.i); });
+  try{ localStorage.setItem("sip-mock-lang", state.lang); }catch{}
+}
+
+async function setLang(code){
+  state.lang = ["zh-CN","en-US","zh-Moe"].includes(code) ? code : "zh-CN";
+  await applyLang();
+  render();
+  toast(state.lang==="en-US" ? "Language: English (from en-US.json)"
+    : state.lang==="zh-Moe" ? "语言：zh-Moe（卖萌）"
+    : "语言：简体中文（zh-CN.json）");
+}
+
+function toast(m){
+  const el=$("toast"); el.textContent=m; el.classList.add("show");
+  clearTimeout(el._t); el._t=setTimeout(()=>el.classList.remove("show"),1600);
+}
+/* 面板里的**持续**状态行（toast 1.6 秒就消失，下载却要几秒到几分钟 ——
+   用户看到的正好是"点完就没动静"，于是只能连点试探，而连点又会重复下载）。 */
+function setMsg(id,text,kind){
+  const el=$(id); if(!el) return;
+  el.textContent=text||"";
+  el.hidden=!text;
+  el.style.color = kind==="bad" ? "var(--bad)" : kind==="ok" ? "var(--accent)" : "var(--muted)";
+}
+/* 按钮进行中状态：禁用 + 换文案，并记住原文案以便还原 */
+function setBusy(btn,on,busyLabel){
+  if(!btn) return;
+  if(on){ if(btn.dataset.idle==null) btn.dataset.idle=btn.textContent; btn.disabled=true; btn.textContent=busyLabel||"处理中…"; }
+  else { btn.disabled=false; if(btn.dataset.idle!=null) btn.textContent=btn.dataset.idle; }
+}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function titleOf(id){
+  for (const list of Object.values(ARTICLES)) { const a=list.find(x=>x.id===id); if(a) return a.t; }
+  if(PREVIEW_MOCKS && id===901) return IMPORTED[0].t;
+  return "文章 "+id;
+}
+function feedOfArticle(id){
+  for (const [fid,list] of Object.entries(ARTICLES)) if(list.some(a=>a.id===id)) return FEEDS.find(f=>f.id==fid)?.title||"";
+  return "本地导入";
+}
+
+/* 安全绑定：元素可缺省，避免整页脚本中断导致白屏 */
+function on(id, ev, fn){
+  const el=$(id);
+  if(el && el.addEventListener) el.addEventListener(ev, fn);
+}
+
+on("loginForm","submit",e=>{e.preventDefault();enterApp()});
+on("skipLogin","click",()=>enterApp());
+function enterApp(){
+  try{
+    const lg=$("login"); if(lg) lg.hidden=true;
+    const ap=$("app"); if(ap) ap.hidden=false;
+    const rb=$("rtBar"); if(rb) rb.hidden=true;
+  }catch{}
+  try{ render(); }catch(err){ console.error(err); }
+}
+
+/* 真实后端：仅本机回环 /api/*（进程内，无外网） */
+async function api(path, opts){
+  const res = await fetch(path, { headers:{"Content-Type":"application/json"}, ...opts });
+  let data=null; try{ data=await res.json(); }catch{}
+  if(!res.ok || (data && data.success===false)){
+    // 会话是**进程内**的：sip 一重启，已经开着的标签页手里的 cookie 就作废了，
+    // 于是下一个请求必然 401。这时直接把人送回登录页（服务端会给出密码框），
+    // 而不是在页面上弹一句 "UNAUTHORIZED" 让人猜发生了什么。
+    if(res.status === 401 && !api._sentToLogin){
+      api._sentToLogin = true;
+      location.replace("/");
+    }
+    // 把后端错误码带出来：页面需要区分"真的出错了"和"这项功能本来就没数据"
+    // （例如 TELEMETRY_OFF 应该显示一段说明，而不是一个红色报错）
+    const e = new Error(data?.error?.message || res.statusText || "error");
+    e.code = data?.error?.code || "";
+    e.hint = data?.error?.hint || "";
+    e.detail = data?.error || null;   // 原样带上后端错误对象（如免责声明原文）
+    e.status = res.status;
+    throw e;
+  }
+  return data?.data ?? data;
+}
+async function loadRealData(){
+  try{
+    const [st, feeds, today, likes] = await Promise.all([
+      api("/api/status").catch(()=>null),
+      api("/api/feeds").catch(()=>null),
+      api("/api/today").catch(()=>null),
+      api("/api/likes").catch(()=>null),
+    ]);
+    if(feeds?.feeds){
+      FEEDS.length=0;
+      feeds.feeds.forEach(f=>FEEDS.push({
+        id:f.id, num:f.displayNum, title:f.title, url:f.url||"",
+        active:f.active||0, archived:f.archived||0, deleted:f.deleted||0,
+        schedule:f.schedule||"manual",
+        // 后端目前不返回 health —— 别再写 `f.health||"ok"` 让健康徽章恒亮成绿的
+        health:f.health||"",
+        last:f.lastChecked||""
+      }));
+      $("nFeeds").textContent=FEEDS.length;
+      // 这里原来调 renderFeedSidebar?.()，而那个函数**从未定义** ——
+      // 未声明标识符配可选链照样抛 ReferenceError，被外层 try 捕获后
+      // 误报「API 不可用」且跳过下面的 render()。删掉。
+    }
+    if(today){
+      TODAY_META.target = today.target ?? 5;
+      TODAY_META.done = today.done ?? 0;
+      TODAY_META.tracking = !!today.tracking;
+      TODAY_META.generatedAt = today.generatedAt || "";
+      TODAY.length=0;
+      (today.items||[]).forEach(i=>TODAY.push({
+        id:i.itemId, t:i.title||"", src:i.source||"", reason:i.reason||"", min:i.minutes||5
+      }));
+      $("nToday").textContent=TODAY.length;
+    }
+    if(likes?.signals){
+      LIKES.length=0;
+      likes.signals.forEach(s=>LIKES.push({
+        id:s.itemId, t:s.title, feed:s.feed||""
+      }));
+      $("nLikes").textContent=LIKES.length;
+    }
+    // 把真实文章列表挂到 FEEDS 对应 id（懒加载也可）
+    render();
+    if(st?.sip) toast(st.sip+" · 本机 API");
+  }catch(e){
+    toast("API 不可用（请用 sip --start 打开）");
+  }
+}
+// 点订阅源时拉真实文章
+async function loadFeedArticles(feedId){
+  try{
+    const d=await api(`/api/feeds/${feedId}/articles`);
+    ARTICLES[feedId]=(d.articles||[]).map(a=>({
+      id:a.itemId, t:a.title, q:a.quality||"full", hist:!!a.hasHistory, liked:!!a.liked
+    }));
+  }catch{ /* keep previous */ }
+}
+
+/* ── 真实操作 ── */
+async function realFeedUpdate(id){
+  const btn=document.querySelector(`[data-update="${id}"]`);
+  setBusy(btn,true,"更新中…");
+  toast("更新中…（完成后会报新增篇数）");
+  try{
+    const d=await api(`/api/feeds/${id}/update`,{method:"POST"});
+    toast((d.added>0)?`更新完成：新增 ${d.added} 篇`:"更新完成：没有新内容");
+    await loadRealData();
+    await loadFeedArticles(id);
+    render();
+  }catch(e){
+    toast(e.code==="ALREADY_RUNNING"?"这个源正在更新中，等它结束":(e.message||"更新失败"));
+  }finally{ setBusy(document.querySelector(`[data-update="${id}"]`),false); }
+}
+async function realFeedArch(id, on){
+  try{
+    await api(`/api/feeds/${id}/${on?"archive":"unarchive"}`,{method:"POST"});
+    toast(on?"已归档":"已去归档");
+    await loadRealData();
+    render();
+  }catch(e){ toast(e.message||"操作失败"); }
+}
+async function realFeedInfo(id){
+  try{
+    const d=await api(`/api/feeds/${id}/info`);
+    toast(`${d.title} · ${d.schedule||"manual"} · ${d.lastChecked||"从未"}`);
+  }catch(e){ toast(e.message||"无信息"); }
+}
+async function realFeedDel(id){
+  if(!confirm("删除该订阅源及其全部文章？")) return;
+  try{
+    await api(`/api/feeds/${id}`,{method:"DELETE"});
+    toast("已删除");
+    state.view="feeds"; state.feedId=null;
+    await loadRealData();
+    render();
+  }catch(e){ toast(e.message||"删除失败"); }
+}
+async function realLike(id){
+  try{
+    const d=await api(`/api/articles/${id}/like`,{method:"POST"});
+    toast(d.liked?"已收藏 ♥":"已取消收藏");
+    await loadRealData();
+    render();
+  }catch(e){ toast(e.message||"操作失败"); }
+}
+let pendingFulltext=0;
+async function realFulltext(id, consent){
+  toast(consent?"已同意，正在抓全文…":"正在抓全文…");
+  try{
+    const d=await api(`/api/articles/${id}/fulltext`,{method:"POST",body:JSON.stringify({consent:!!consent})});
+    toast(`全文已缓存（${d.bytes||0} 字）`);
+    render();
+  }catch(e){
+    // 第一次抓全文：后端要求先确认免责声明（与 CLI 同一道门、同一段话）
+    if(e.code==="FULLTEXT_NEEDS_CONSENT"){
+      pendingFulltext=id;
+      $("consentText").textContent=(e.detail&&e.detail.disclaimer)||e.message||"";
+      $("pConsent").hidden=false;
+      return;
+    }
+    toast(e.message||"抓取失败");
+  }
+}
+on("doConsent","click",async()=>{
+  $("pConsent").hidden=true;
+  const id=pendingFulltext; pendingFulltext=0;
+  if(id) await realFulltext(id,true);
+});
+async function realSummary(id){
+  toast("正在生成摘要…");
+  try{
+    const d=await api(`/api/articles/${id}/summary`,{method:"POST"});
+    toast(d.summary?"摘要已生成":"摘要完成");
+    render();
+  }catch(e){ toast(e.message||"摘要失败"); }
+}
+async function realTodayRefresh(){
+  try{
+    await api("/api/today/refresh",{method:"POST"});
+    toast("已重新生成今日哈汤");
+    await loadRealData();
+    render();
+  }catch(e){ toast(e.message||"失败"); }
+}
+
+/* nav */
+on("nav","click",e=>{
+  const b=e.target.closest("button[data-v]"); if(!b) return;
+  state.view=b.dataset.v;
+  state.feedId=null; state.articleId=null; state.articleVer=null;
+  if(state.view==="diff") state.diffId=null;
+  if(state.view==="dedup") state.dedupId=null;
+  $("nav").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));
+  $("side").classList.remove("open");
+  render();
+});
+on("btnMenu","click",()=>{
+  const app=$("app");
+  if(app.classList.contains("side-collapsed")){
+    app.classList.remove("side-collapsed");
+    $("side").classList.remove("open");
+    toast("侧栏已展开");
+  } else if(window.matchMedia("(max-width:900px)").matches){
+    $("side").classList.toggle("open");
+  } else {
+    app.classList.add("side-collapsed");
+    toast("侧栏已收起");
+  }
+});
+on("btnHideSide","click",()=>{
+  $("app").classList.add("side-collapsed");
+  $("side").classList.remove("open");
+  toast("侧栏已收起 · 点左上角 ☰ 展开");
+});
+$("btnAdd")?.addEventListener("click",()=>{$("pAdd").hidden=false;$("addUrl").focus()});
+
+/* ── 阅读偏好：localStorage；进 sip 后可再同步 web_prefs.json ── */
+const PREF_KEY = "sip-web-prefs-v1";
+const BUILTIN_THEMES = ["paper","day","night"];
+// 自定义主题：--bg --elev --ink --muted --line --accent 等 CSS 变量
+// 未来可从 readwithhotsoup/themes/*.json 读入后 applyCustomTheme
+function loadPrefs(){
+  try{ return JSON.parse(localStorage.getItem(PREF_KEY)||"{}"); }catch{ return {}; }
+}
+function savePrefs(patch){
+  const p = {...loadPrefs(), ...patch};
+  localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  return p;
+}
+function applyCustomTheme(name, vars){
+  // vars: { "--bg":"#...", ... } 写入 :root，dataset.theme=custom-<name>
+  const root=document.documentElement;
+  root.dataset.theme = "custom-"+name;
+  for(const [k,v] of Object.entries(vars||{})) root.style.setProperty(k,v);
+}
+function setTheme(t){
+  // 内置：paper/day night；自定义：custom-xxx（已写好变量则只切 dataset）
+  const root=document.documentElement;
+  if(t.startsWith("custom-")){
+    const p=loadPrefs();
+    const vars=p.customThemes?.[t.slice(7)];
+    if(vars) applyCustomTheme(t.slice(7), vars);
+    else root.dataset.theme="paper";
+  }else{
+    root.dataset.theme = BUILTIN_THEMES.includes(t)?t:"paper";
+    // 清掉可能残留的自定义 inline 变量？这里用 class 切换即可，inline 只在 custom 时写
+  }
+  const th=$("rtTheme"); if(th) th.classList.toggle("on", root.dataset.theme.includes("night"));
+  savePrefs({theme: root.dataset.theme});
+  if(state.view==="settings") render();
+}
+function cycleTheme(){
+  const cur=document.documentElement.dataset.theme||"paper";
+  const i=BUILTIN_THEMES.indexOf(cur);
+  setTheme(BUILTIN_THEMES[(i+1)%BUILTIN_THEMES.length]);
+}
+function bumpFont(d){
+  const cur=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--reading-size'))||17;
+  const n=Math.min(24,Math.max(14,cur+d));
+  document.documentElement.style.setProperty('--reading-size',n+"px");
+  const el=$("rtSize"); if(el) el.textContent=n;
+  savePrefs({size:n});
+  pager.page=0; pagerMeasure();   // 字号变了 → 分页全变
+}
+function setLeading(v){
+  document.documentElement.style.setProperty('--reading-leading',String(v/100));
+  savePrefs({lh:v});
+  pager.page=0; pagerMeasure();
+}
+function setContentWidth(px){
+  const vw=Math.max(560, window.innerWidth - 48);
+  const n=Math.min(Math.max(2400, vw), Math.max(560, px));
+  document.documentElement.style.setProperty('--content-w',n+"px");
+  const el=$("rtW"); if(el){ el.max=String(Math.max(2400,vw)); if(+el.value!==n) el.value=n; }
+  savePrefs({width:n});
+  pager.page=0; pagerMeasure();
+}
+/* ── 分栏翻页（多栏阅读）──────────────────────────────────────
+   多栏时不纵向滚动：把 .prose 定成"一页高"，用 transform 横向平移翻页。
+   步长 = 页宽 + 栏间距；页数取两种估算的**较大值** —— 宁可多一页空白，
+   也不能少算一页（少算会让后面的内容被裁掉且无法到达）。
+   量不出多于 1 页时**不启用**分页，回退成原来的纵向滚动（安全优先）。
+   单栏完全不受影响。 */
+const pager={on:false,art:null,page:0,pages:1,step:0};
+function pagerReset(){
+  pager.on=false; pager.art=null; pager.page=0; pager.pages=1; pager.step=0;
+  const box=$("pager");
+  if(box){
+    box.classList.remove("paged");
+    const a=box.querySelector(".prose");
+    if(a){ a.style.transform=""; a.style.height=""; }
+  }
+  const bar=$("pagerBar"); if(bar) bar.hidden=true;
+}
+function pagerApply(){
+  if(!pager.on||!pager.art) return;
+  pager.art.style.transform="translateX("+(-pager.page*pager.step)+"px)";
+  const n=$("pagerNum"); if(n) n.textContent=(pager.page+1)+" / "+pager.pages;
+  const bar=$("pagerBar"); if(bar) bar.hidden=(pager.pages<2);
+}
+function pagerGo(d){
+  if(!pager.on) return false;
+  const p=Math.min(pager.pages-1,Math.max(0,pager.page+d));
+  if(p===pager.page) return false;
+  pager.page=p; pagerApply(); return true;
+}
+function pagerMeasure(){
+  try{
+    const box=$("pager"), art=box&&box.querySelector(".prose");
+    if(!box||!art||state.view!=="article"){ pagerReset(); return; }
+    if(+(art.dataset.cols||1)<2){ pagerReset(); return; }   // 单栏：保持滚动阅读
+    // 先回到"未分页"状态，量出自然高度（重排后重新量也要先清干净）
+    box.classList.remove("paged"); art.style.height=""; art.style.transform="";
+    const natural=art.getBoundingClientRect().height||0;
+    box.classList.add("paged");
+    const css=getComputedStyle(art);
+    const cols=parseInt(css.columnCount)||1;
+    const gap=parseFloat(css.columnGap)||0;
+    const W=box.clientWidth||1;
+    const top=Math.max(0,art.getBoundingClientRect().top);
+    const h=Math.max(300,Math.round(window.innerHeight-top-92));
+    art.style.height=h+"px";
+    const step=W+gap;
+    const byHeight=Math.ceil(natural/Math.max(1,h));          // 自然高度摊到页高
+    const byScroll=Math.round((art.scrollWidth+gap)/step);    // 横向栏条宽度
+    const pages=Math.max(1,byHeight,byScroll);
+    if(cols<2||pages<2){ pagerReset(); return; }              // 量不出多页 → 不裁内容，退回滚动
+    pager.on=true; pager.art=art; pager.step=step; pager.pages=pages;
+    if(pager.page>pages-1) pager.page=pages-1;
+    pagerApply();
+  }catch(e){ pagerReset(); }   // 任何意外都回退成能滚动的老样子
+}
+function setCols(n){
+  n=Math.min(3,Math.max(1,n|0));
+  document.documentElement.style.setProperty('--cols',String(n));
+  document.querySelectorAll(".prose").forEach(p=>p.dataset.cols=String(n));
+  document.querySelectorAll(".colbtn").forEach(b=>b.classList.toggle("on",+b.dataset.cols===n));
+  savePrefs({cols:n});
+  pager.page=0; pagerMeasure();   // 换栏数 = 重新分页；页数变了要重新量
+}
+function restorePrefs(){
+  const p=loadPrefs();
+  if(p.theme) setTheme(p.theme);
+  if(p.size) document.documentElement.style.setProperty('--reading-size',p.size+"px");
+  if(p.lh){
+    document.documentElement.style.setProperty('--reading-leading',String(p.lh/100));
+    const el=$("rtLh"); if(el) el.value=p.lh;
+  }
+  if(p.width) setContentWidth(p.width);
+  if(p.cols) setCols(p.cols);
+  if(p.size && $("rtSize")) $("rtSize").textContent=p.size;
+}
+on("rtTheme","click",cycleTheme);
+on("rtMinus","click",()=>bumpFont(-1));
+on("rtPlus","click",()=>bumpFont(1));
+on("rtLh","input",e=>setLeading(+e.target.value));
+on("rtW","input",e=>setContentWidth(+e.target.value));
+on("rtBar","click",e=>{
+  const b=e.target.closest(".colbtn"); if(!b) return;
+  setCols(+b.dataset.cols);
+});
+
+/* 搜索定位：高亮 + 滚到命中
+   ⚠️ 必须用 DOM API 造 <mark>，**不能**用 innerHTML ——
+   旧实现是 `span.innerHTML = node.nodeValue.replace(...)`，把**文本**当标记重新解析。
+   正文里只要字面写着 `<img src=x onerror=…>`，这一步就会把它变成真元素并执行；
+   顺带还会吃掉正文里正常的 `<` 和 `&`。 */
+function highlightIn(root, kw){
+  if(!kw) return 0;
+  const re=new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi");
+  let n=0;
+  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+  const nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
+  for(const node of nodes){
+    const text=node.nodeValue;
+    if(!text) continue;
+    re.lastIndex=0;
+    if(!re.test(text)) continue;
+    re.lastIndex=0;
+    const frag=document.createDocumentFragment();
+    let last=0, m;
+    while((m=re.exec(text))!==null){
+      if(m.index>last) frag.appendChild(document.createTextNode(text.slice(last,m.index)));
+      const mk=document.createElement("mark");
+      mk.className="hit";
+      mk.textContent=m[0];
+      frag.appendChild(mk);
+      last=m.index+m[0].length;
+      n++;
+      if(m[0].length===0) re.lastIndex++;   // 空匹配防死循环
+    }
+    if(last<text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    node.parentNode.replaceChild(frag,node);
+  }
+  return n;
+}
+
+/* 时间戳格式化：后端给的是 ISO 串，别再直接显示成 2026-09-11T21:30:00 */
+function fmtDate(s){
+  if(!s) return "";
+  const d=new Date(s);
+  if(isNaN(d)) return String(s);
+  const p=n=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* 用正文里的 link 打开原文 —— 只放行 http/https，防 javascript: 之类。
+   链接在渲染文章时存进 state.articleLink，不在这里再请求一次。 */
+function openExternal(){
+  const url=state.articleLink||"";
+  if(!/^https?:\/\//i.test(url)){ toast("这篇没有可打开的原文链接"); return; }
+  window.open(url,"_blank","noopener,noreferrer");
+}
+let hitIdx=0;
+function scrollToHit(){
+  const marks=document.querySelectorAll("mark.hit");
+  if(!marks.length) return;
+  hitIdx=0;
+  marks[hitIdx].scrollIntoView({behavior:"smooth",block:"center"});
+}
+function jumpNextHit(){
+  const marks=document.querySelectorAll("mark.hit");
+  if(!marks.length){toast("无命中");return}
+  hitIdx=(hitIdx+1)%marks.length;
+  marks[hitIdx].scrollIntoView({behavior:"smooth",block:"center"});
+  toast(`命中 ${hitIdx+1} / ${marks.length}`);
+}
+
+on("btnAdd","click",()=>{const p=$("pAdd"); if(p){p.hidden=false; $("addUrl")?.focus();}});
+on("btnSync","click",async()=>{
+  const btn=$("btnSync");
+  setBusy(btn,true,"同步中…");
+  toast("同步中…（完成后会报新增篇数）");
+  try{
+    const d=await api("/api/feeds/sync",{method:"POST"});
+    toast(`同步完成：${d.ok??0} 成功 / ${d.fail??0} 失败 · 新增 ${d.added??0} 篇`);
+    await loadRealData();
+    render();
+  }catch(e){ toast(e.code==="ALREADY_RUNNING"?"已经在同步了，等这轮跑完":(e.message||"同步失败")); }
+  finally{ setBusy($("btnSync"),false); }
+});
+on("doAdd","click",async()=>{
+  const u=($("addUrl")?.value||"").trim();
+  if(!u){setMsg("addMsg","请先填订阅源 URL","bad");return}
+  const btn=$("doAdd");
+  setBusy(btn,true,"抓取中…");
+  setMsg("addMsg",`正在抓取 ${u} —— 首次抓取要把该源的文章全部下回来，请稍候（别关这个页面）`);
+  try{
+    const d=await api("/api/feeds",{method:"POST",body:JSON.stringify({url:u})});
+    setMsg("addMsg",`已添加，抓到 ${d.items??0} 篇文章`,"ok");
+    const el=$("addUrl"); if(el) el.value="";
+    state.view="feeds";
+    await loadRealData();
+    render();
+  }catch(e){
+    setMsg("addMsg", e.code==="ALREADY_RUNNING" ? "这个源已经在抓取了，等它结束再看"
+                                                : "添加失败："+(e.message||"未知错误"), "bad");
+  }finally{ setBusy(btn,false); }
+});
+on("doOpml","click",async()=>{
+  const f=$("opmlFile")?.files?.[0];
+  if(!f){setMsg("addMsg","请先选择一个 .opml 文件","bad");return}
+  const btn=$("doOpml");
+  setBusy(btn,true,"导入中…");
+  setMsg("addMsg",`正在导入 ${f.name} —— 逐个抓取订阅源，源多时可能要几分钟，别关这个页面`);
+  // 轮询真实进度：后端每抓一个源就更新一次，界面显示"3/21 · 正在抓 xxx"。
+  // 只靠一条不会变的提示，用户没法判断是在跑还是卡住了。
+  const timer=setInterval(async()=>{
+    try{
+      const p=await api("/api/progress");
+      if(p&&p.active){
+        const pos=p.total?`${Math.min(p.done+1,p.total)}/${p.total}`:"";
+        setMsg("addMsg",`导入中 ${pos}${p.current?" · 正在抓 "+p.current:""}`);
+      }
+    }catch{}
+  },700);
+  try{
+    const text=await f.text();
+    const d=await api("/api/feeds/opml",{method:"POST",body:text,headers:{"Content-Type":"text/xml"}});
+    let msg=`导入完成：新增 ${d.imported??0} · 已存在跳过 ${d.skipped??0} · 失败 ${d.failed??0}`;
+    if(d.failed>0) msg+="（失败明细见浏览器控制台）";
+    setMsg("addMsg",msg,d.failed>0?"bad":"ok");
+    if(d.errors?.length) console.warn("OPML 导入失败明细：",d.errors);
+    await loadRealData();
+    render();
+  }catch(e){
+    setMsg("addMsg", e.code==="ALREADY_RUNNING" ? "已经有一个导入在跑了，等它结束"
+                                                : "导入失败："+(e.message||"未知错误"), "bad");
+  }finally{ clearInterval(timer); setBusy(btn,false); }
+});
+document.addEventListener("click",e=>{
+  if(e.target.matches("[data-close]")||e.target.classList.contains("panel")) e.target.closest(".panel").hidden=true;
+  const pg=e.target.closest("[data-page]");
+  if(pg){ pagerGo(+pg.dataset.page); return; }
+  const fa=e.target.closest("[data-feed]"); if(fa){state.view="feed";state.feedId=+fa.dataset.feed;render();return}
+  // 定位到原文命中（搜索结果）
+  const loc=e.target.closest("[data-loc]");
+  if(loc){
+    state.view="article";
+    state.articleId=+loc.dataset.loc;
+    state.jumpKw=loc.dataset.kw||"";
+    $("pSearch").hidden=true;
+    render();
+    return;
+  }
+  const ar=e.target.closest("[data-article]");
+  if(ar){
+    state.view="article"; state.articleId=+ar.dataset.article;
+    state.jumpKw=ar.dataset.kw||"";
+    $("pSearch").hidden=true;
+    render();
+    return;
+  }
+  const eb=e.target.closest("[data-ebook]");
+  if(eb){ openEbook(+eb.dataset.ebook); return; }
+});
+on("content","scroll",()=>{
+  const el=$("content"); const max=el.scrollHeight-el.clientHeight;
+  $("prog").style.width=(max<=0?100:(el.scrollTop/max)*100)+"%";
+},{passive:true});
+// 分栏翻页时页面本身没有纵向可滚的内容，所以把滚轮改成翻页
+on("content","wheel",e=>{
+  if(!pager.on) return;
+  if(e.deltaY<0&&pager.page===0) return;      // 第一页再往上滚 → 让页面正常滚回标题
+  if(Math.abs(e.deltaY)<6) return;
+  if(pagerGo(e.deltaY>0?1:-1)) e.preventDefault();
+},{passive:false});
+let _pagerRz=0;
+window.addEventListener("resize",()=>{
+  clearTimeout(_pagerRz);
+  _pagerRz=setTimeout(()=>{ if(state.view==="article") pagerMeasure(); },150);
+});
+
+on("semThr","input",e=>{
+  const v=$("semThrVal"); if(v) v.textContent=(+e.target.value/100).toFixed(2);
+});
+on("smode","click",e=>{
+  const b=e.target.closest("button[data-mode]"); if(!b) return;
+  $("smode").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));
+  const sem=b.dataset.mode==="sem";
+  const thr=$("thrRow"); if(thr) thr.hidden=!sem;
+  const gq=$("gq"); if(!gq) return;
+  gq.placeholder = sem ? "自然语言问题…" : "关键词…（全文可试 trigram）";
+  gq.value = sem ? "如何做中文全文搜索" : "trigram";
+});
+on("gRun","click",()=>{
+  const sem=$("smode")?.querySelector("button[data-mode=sem]")?.classList.contains("on");
+  if(sem) $("gSem")?.click(); else $("gGrep")?.click();
+});
+on("gGrep","click",async()=>{
+  const q=($("gq")?.value||"").trim();
+  if(!q){toast("请输入关键词");return}
+  const box=$("gHits"); if(!box) return;
+  box.innerHTML=`<div class="empty">搜索中…</div>`;
+  try{
+    const d=await api(`/api/grep?q=${encodeURIComponent(q)}&limit=50`);
+    const hits=d.hits||[];
+    box.innerHTML=`<p class="sub">全文 · <span class="mono">${esc(q)}</span> · ${hits.length} 篇</p><div class="cards">`+
+      hits.map(h=>`<div class="card" style="cursor:default">
+        <div class="t">${esc(h.title)}</div>
+        <div class="m"><span>${esc(h.feed||"")}</span></div>
+        ${h.snippet?`<div style="margin-top:6px;font-size:12.5px;color:var(--muted)">${esc(h.snippet)}</div>`:""}
+        <button class="loc-btn" data-loc="${h.itemId}" data-kw="${esc(q)}">打开原文</button>
+      </div>`).join("")+`</div>`;
+  }catch(e){ box.innerHTML=`<div class="empty">${esc(e.message||"搜索失败")}</div>`; }
+});
+on("gSem","click",async()=>{
+  const q=($("gq")?.value||"").trim();
+  if(!q){toast("请输入查询");return}
+  const thr=+($("semThr")?.value||70)/100;
+  const box=$("gHits"); if(!box) return;
+  box.innerHTML=`<div class="empty">语义检索中…</div>`;
+  try{
+    const d=await api(`/api/search?q=${encodeURIComponent(q)}&threshold=${thr}`);
+    const hits=(d.hits||[]).filter(h=>(h.score??1)>=thr);
+    box.innerHTML=`<p class="sub">语义 · 阈值 <span class="mono">${thr.toFixed(2)}</span> · ${hits.length} 条</p>
+      <div class="cards">${hits.map(h=>`<button class="card" data-article="${h.itemId}"><div class="t">${esc(h.title)}</div>
+        <div class="m"><span>${esc(h.feed||"")}</span><span class="b acc">${(h.score||0).toFixed(2)}</span></div></button>`).join("")
+        ||`<div class="empty">无结果（或未配置 embedding）</div>`}</div>`;
+  }catch(e){ box.innerHTML=`<div class="empty">${esc(e.message||"语义检索失败")}</div>`; }
+});
+
+on("savePass","click",()=>{
+  const a=$("np1")?.value||"",b=$("np2")?.value||"";
+  if(a.length<4){toast("至少 4 位");return}
+  if(a!==b){toast("两次不一致");return}
+  toast("已保存密码（模拟 PBKDF2）"); const p=$("pPass"); if(p) p.hidden=true;
+});
+on("clearPass","click",()=>{toast("已清除（模拟）");const p=$("pPass"); if(p) p.hidden=true});
+
+function openDiff(id){
+  state.view="diff";
+  state.diffId=id;
+  $("nav").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x.dataset.v==="diff"));
+  render();
+}
+function closeDiff(){
+  state.diffId=null;
+  state.view="diff";
+  $("nav").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x.dataset.v==="diff"));
+  render();
+}
+function openDedup(id){
+  state.view="dedup";
+  state.dedupId=id;
+  state.dedupPair=1;
+  $("nav").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x.dataset.v==="dedup"));
+  render();
+}
+function openDedupPair(id, idx){
+  state.view="dedup";
+  state.dedupId=id;
+  state.dedupPair=idx;
+  render();
+}
+function closeDedup(){
+  state.dedupId=null;
+  state.view="dedup";
+  render();
+}
+function openVersion(id, which){
+  if(!PREVIEW_MOCKS) return;   // 预览数据不许再伸进真实阅读路径（见 PREVIEW_MOCKS 注释）
+  const d=DIFF_LIST.find(x=>x.id===id);
+  state.view="article";
+  state.articleId=id;
+  state.articleVer = which==="old" ? (d?.from||1) : (d?.to||2);
+  render();
+}
+
+/* 刷新防缓存：改完设计后请 Ctrl+F5 */
+function syncChrome(){
+  // 浮动阅读条：RSS 文章 + 电子书阅读
+  const isRead=state.view==="article"||state.view==="ebook";
+  $("rtBar").hidden=!isRead;
+}
+/* 尚未接入 Web 的页面：宁可说"没接"，也不许渲染假数据。
+   （GREP_HITS / SEM_HITS 两组预览数据连渲染点都没有，属于死数据，留着备查。） */
+function notWired(kicker, heading, what, cli, note){
+  return `<p class="kicker">${esc(kicker)}</p><h2 class="h2">${esc(heading)}</h2>
+    <div class="note"><strong>这一页还没接入 Web 版。</strong>${esc(what)}
+      ${cli?`<div style="margin-top:8px">命令行可用：<span class="mono">${esc(cli)}</span></div>`:""}
+      ${note?`<div style="margin-top:8px">${esc(note)}</div>`:""}
+    </div>`;
+}
+async function render(){
+  const v=$("view"); const title=$("title");
+  const V=state.view;
+  syncChrome();
+  $("nToday").textContent=TODAY.length; $("nFeeds").textContent=FEEDS.length;
+  $("nLikes").textContent=LIKES.length;
+  // 导入条数没有真实接口 —— 预览模式显示设计稿里的条数，否则**隐藏**这枚角标：
+  // 显示 0 也是在替你断言"你没导入过任何东西"，而这一页根本还没接后端。
+  $("nImp").textContent=PREVIEW_MOCKS?IMPORTED.length:"";
+  $("nImp").style.display=PREVIEW_MOCKS?"":"none";
+  v.className="wrap"+(V==="article"?" narrow":"");
+
+  if(V==="today"){
+    title.textContent="今日哈汤";
+    const tm=TODAY_META;
+    // 进度全部来自 /api/today；遥测关闭时后端 tracking=false，这里就明说，
+    // 而不是显示一个永远不动的「已读 0」
+    const prog = tm.tracking
+      ? `目标 ${tm.target} 篇 · 已读 ${tm.done}`
+      : `目标 ${tm.target} 篇 · 进度未跟踪（遥测关闭）`;
+    v.innerHTML=`
+      <p class="kicker">TODAY · ${new Date().toISOString().slice(0,10)}${tm.generatedAt?" · 生成于 "+esc(tm.generatedAt):""}</p>
+      <h2 class="h2">今日哈汤</h2>
+      <p class="sub">${esc(prog)} · 规则式选文，读完就关</p>
+      <div class="grid3" style="margin-bottom:16px">
+        <div class="stat"><b>${TODAY.length}</b><span>今日清单</span></div>
+        <div class="stat"><b>${tm.tracking?tm.done:"—"}</b><span>已读</span></div>
+        <div class="stat"><b>${tm.target}</b><span>目标</span></div>
+      </div>
+      <div class="cards">${TODAY.length ? TODAY.map(a=>`
+        <button class="card" data-article="${a.id}">
+          <div class="t">${esc(a.t)}</div>
+          <div class="m"><span>${esc(a.src)}</span><span class="b">${esc(a.reason)}</span><span>≈${a.min} 分</span></div>
+        </button>`).join("") : `<div class="empty">今天还没有值得读的 —— 去「订阅源」更新一下</div>`}</div>
+      <div class="row"><button class="btn" onclick="realTodayRefresh()">重新熬一碗</button></div>`;
+  }
+  else if(V==="feeds"){
+    title.textContent="全部订阅";
+    v.innerHTML=`
+      <p class="kicker">FEEDS</p><h2 class="h2">全部订阅</h2>
+      <p class="sub">${FEEDS.length} 个源 · 支持更新计划 / 归档 / 删除</p>
+      <div class="cards">${FEEDS.length ? FEEDS.map(f=>`
+        <button class="card" data-feed="${f.id}">
+          <div class="t">${esc(f.title)}</div>
+          <div class="m">
+            <span class="b">${f.active} 在读</span>
+            ${f.archived?`<span class="b">${f.archived} 改稿</span>`:""}
+            <span class="b">${esc(f.schedule||"manual")}</span>
+            ${f.health?`<span class="b ${f.health==='ok'?'good':f.health==='stale'?'':'bad'}">${esc(f.health)}</span>`:""}
+            ${f.last?`<span>${esc(fmtDate(f.last))}</span>`:""}
+          </div>
+        </button>`).join("") : `<div class="empty">还没有订阅源 —— 点左下角「＋ 订阅」加一个</div>`}</div>`;
+  }
+  else if(V==="feed"){
+    const f=FEEDS.find(x=>x.id===state.feedId)||FEEDS[0];
+    title.textContent=f.title;
+    v.innerHTML=`<div class="empty">加载文章…</div>`;
+    await loadFeedArticles(f.id);
+    const list=ARTICLES[f.id]||[];
+    v.innerHTML=`
+      <p class="kicker">ARTICLES</p>
+      <h2 class="h2">${esc(f.title)}</h2>
+      <p class="sub mono">${esc(f.url)}</p>
+      <div class="row">
+        <button class="btn pri" data-update="${f.id}" onclick="realFeedUpdate(${f.id})">更新</button>
+        <button class="btn" onclick="realFeedArch(${f.id},true)">归档</button>
+        <button class="btn" onclick="realFeedArch(${f.id},false)">去归档</button>
+        <button class="btn" onclick="realFeedInfo(${f.id})">来源信息</button>
+        <button class="btn dan" onclick="realFeedDel(${f.id})">删除</button>
+      </div>
+      <div class="cards">${list.map(a=>`
+        <button class="card" data-article="${a.id}">
+          <div class="t">${a.liked?"♥ ":""}${esc(a.t)}</div>
+          <div class="m"><span class="b">${a.q}</span>${a.hist?`<span class="b acc">有改稿</span>`:""}</div>
+        </button>`).join("")||`<div class="empty">这个源还没有文章</div>`}</div>`;
+  }
+  else if(V==="article"){
+    const id=state.articleId;
+    title.textContent="阅读 · "+id;
+    v.innerHTML=`<div class="empty">加载文章…</div>`;
+    let real=null;
+    try{ real = await api(`/api/articles/${id}`); }catch(e){ real=null; }
+    if(!real){
+      v.innerHTML=`<div class="empty">这篇文章读不到（可能已被删除，或接口不可用）</div>`;
+      return;
+    }
+    const liked = !!real.liked || LIKES.some(x=>x.id===id);
+    state.articleLink = real.link || "";
+    const jk=state.jumpKw||"";
+    // 历史版本仍是 mock —— 后端 /versions 与 /diff 早已就绪，接真是下一刀
+    // PREVIEW_MOCKS 关掉时恒为 null：真实文章页绝不因为"预览数据里正好有这个 id"
+    // 而挂上一条历史版本横幅（假数据漏进真实阅读路径最坏的一种形态）。
+    const dmeta=PREVIEW_MOCKS?DIFF_LIST.find(x=>x.id===id):null;
+    const isOld = dmeta && state.articleVer && state.articleVer===dmeta.from;
+    v.innerHTML=`
+      ${isOld?`<div class="jump-bar" style="background:rgba(185,28,28,.12);border-color:rgba(185,28,28,.25);color:var(--bad)">
+        <span>历史版本（此路径尚未接真）</span><strong class="mono">v${esc(state.articleVer)}</strong>
+        <button class="btn" onclick="state.articleVer=null;render()">回到最新</button>
+      </div>`:""}
+      ${jk?`<div class="jump-bar">
+        <span>已定位关键词</span><strong class="mono">${esc(jk)}</strong>
+        <button class="btn" onclick="jumpNextHit()">下一个命中</button>
+        <button class="btn" onclick="state.jumpKw='';render()">清除高亮</button>
+      </div>`:""}
+      <header class="article-header">
+        <p class="kicker">${esc(real.feed||"")}</p>
+        <h2>${esc(real.title||"")}</h2>
+        <div class="meta">
+          ${real.published?`<span>${esc(fmtDate(real.published))}</span><span>·</span>`:""}
+          ${real.author?`<span>${esc(real.author)}</span><span>·</span>`:""}
+          <span class="b">${esc(real.quality||"")}</span>
+          ${real.hasFulltext?`<span class="b acc">已抓全文</span>`:""}
+        </div>
+        <div class="row">
+          <button class="btn ${liked?'pri':''}" onclick="realLike(${id})">♥ 收藏</button>
+          <button class="btn" onclick="realFulltext(${id})">抓全文</button>
+          <button class="btn" onclick="realSummary(${id})">生成摘要</button>
+          ${real.link?`<button class="btn" onclick="openExternal()">原文</button>`:""}
+          <button class="btn" onclick="toast('导出请用 CLI: sip --export ${id}')">导出 MD</button>
+        </div>
+        ${real.summary?`<div class="note">${esc(real.summary)}</div>`:""}
+        <div class="rule"></div>
+      </header>
+      <div class="pager" id="pager">
+        <article class="prose" data-cols="${getComputedStyle(document.documentElement).getPropertyValue('--cols').trim()||'1'}">${real.bodyHtml||DEFAULT_BODY}</article>
+        <div class="pager-bar" id="pagerBar" hidden>
+          <button class="btn" data-page="-1" title="上一页">‹</button>
+          <span class="n" id="pagerNum">1 / 1</span>
+          <button class="btn" data-page="1" title="下一页">›</button>
+          <span class="hint">← → 或滚轮翻页</span>
+        </div>
+      </div>`;
+    setCols(+(getComputedStyle(document.documentElement).getPropertyValue('--cols').trim()||1));
+    // 图片是懒加载的：加载完高度会变，不重新分页就可能**少算页数**（后面的内容会被裁掉）。
+    // 所以图片 load 后重排一次，外加一个 500ms 兜底（图挂了/太慢也要量一次）。
+    clearTimeout(window._pagerImgT);
+    window._pagerImgT=setTimeout(()=>{ if(state.view==="article") pagerMeasure(); },500);
+    v.querySelectorAll(".pager img").forEach(im=>im.addEventListener("load",()=>{
+      if(state.view==="article") pagerMeasure();
+    },{once:true}));
+    // bodyHtml 已由**服务端**净化，这里直接注入 —— 前端不再判断 isHtml，也不再自己转义。
+    // 判断点越少，漏点越少；旧版这里是 `innerHTML = isHtml ? body : esc(body)`
+    // 的 HTML 分支直接把订阅源的原始 HTML 注进来，等于把 API 交给订阅源作者。
+    if(jk){
+      const n=highlightIn(v.querySelector(".prose"), jk);
+      toast(n?`高亮 ${n} 处，已滚到第一处`:"正文里没扫到关键词");
+      if(n) setTimeout(scrollToHit,80);
+    }
+    state.jumpKw="";
+  }
+  else if(V==="likes"){
+    title.textContent="收藏";
+    v.innerHTML=`<p class="kicker">LIKES</p><h2 class="h2">收藏</h2><p class="sub">♥ 用户 / 🤖 AI 标记</p>
+      <div class="cards">${LIKES.map(a=>`<button class="card" data-article="${a.id}">
+        <div class="t">♥ ${esc(a.t)}</div><div class="m"><span>${esc(a.feed)}</span></div></button>`).join("")}</div>`;
+  }
+  else if(V==="imported"){
+    title.textContent="本地导入";
+    if(!PREVIEW_MOCKS){
+      v.innerHTML=notWired("IMPORT","本地导入",
+        "Web 版还没有上传入口——文件不会为了看一个列表而离开你的机器。",
+        "sip --import <file>",
+        "列表接口也还没做；接上之后这里会列出真实的导入项，预览数据就搬走。");
+      return;
+    }
+    v.innerHTML=`<p class="kicker">IMPORT</p><h2 class="h2">本地导入</h2>
+      <p class="sub">txt / md / pdf / epub / mobi / docx · 上传请用 CLI sip --import</p>
+      <div class="row">
+        <div class="field" style="flex:1;margin:0"><input type="file" id="fakeFile" accept=".pdf,.epub,.mobi,.docx,.txt,.md" /></div>
+        <button class="btn pri" onclick="toast('请用 CLI: sip --import <file>')">导入文件（CLI）</button>
+      </div>
+      <div class="cards">${IMPORTED.map(a=>`
+        <button class="card" data-ebook="${a.id}">
+          <div class="t">${esc(a.t)}</div>
+          <div class="m">
+            <span class="b">${a.type.toUpperCase()}</span>
+            ${a.pages?`<span class="b">${a.pages} 页</span>`:""}
+            ${a.chapters?`<span class="b">${a.chapters.length} 章</span>`:""}
+            <span class="b">${esc(a.size)}</span>
+            <span>进度 ${a.progress||1}${a.pages?"/"+a.pages:a.chapters?"/"+a.chapters.length:""}</span>
+            <span>${esc(a.when)}</span>
+          </div>
+        </button>`).join("")}</div>
+      <div class="note">模拟导入：选文件后点「模拟导入」，列表会多一条占位书；真实后端为 <span class="mono">sip --import</span>。</div>`;
+  }
+  else if(V==="ebook"){
+    if(!PREVIEW_MOCKS){
+      v.innerHTML=notWired("EBOOK","电子书阅读",
+        "Web 阅读器还没接入；导入的文件目前用 TUI 或系统阅读器打开。",
+        "sip --import <file>");
+      return;
+    }
+    const book=IMPORTED.find(x=>x.id===state.ebookId)||IMPORTED[0];
+    title.textContent="阅读 · "+book.t;
+    const isPdf=book.type==="pdf";
+    const page=state.ebookPage||1;
+    const chIdx=state.ebookChapter||1;
+    const ch=book.chapters?.[chIdx-1];
+    const pageText=isPdf?(book.pageTexts?.[page-1]||"（本页无文本层）"):"";
+    v.innerHTML=`
+      <div class="row" style="margin-top:0">
+        <button class="btn" onclick="state.view='imported';render()">← 书库</button>
+        <span class="b">${book.type.toUpperCase()}</span>
+        ${isPdf?`<span class="b acc">第 ${page} / ${book.pages} 页</span>`:`<span class="b acc">第 ${chIdx} / ${book.chapters?.length||1} 章</span>`}
+      </div>
+      <p class="kicker">EBOOK · 本地导入</p>
+      <h2 class="h2">${esc(book.t)}</h2>
+      <p class="sub">${esc(book.size)} · 导入于 ${esc(book.when)} · 可全文搜索</p>
+
+      ${isPdf?`
+        <div class="card" style="cursor:default;min-height:320px;display:flex;flex-direction:column;justify-content:center;
+             background:linear-gradient(180deg,var(--elev),var(--soft));text-align:center">
+          <div style="font-family:var(--serif);white-space:pre-wrap;line-height:var(--reading-leading);font-size:var(--reading-size);padding:24px">${esc(pageText)}</div>
+          <div style="opacity:.45;font-size:11px;margin-top:auto;padding:8px">— 模拟页图 ${page} —</div>
+        </div>
+        <div class="row" style="justify-content:space-between">
+          <button class="btn" ${page<=1?"disabled":""} onclick="ebookPage(${page-1})">← 上一页</button>
+          <div class="row" style="margin:0;align-items:center">
+            <button class="btn" onclick="ebookPage(1)">首页</button>
+            <input type="number" min="1" max="${book.pages}" value="${page}" style="width:64px;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--elev)"
+              onchange="ebookPage(+this.value)" />
+            <button class="btn" onclick="ebookPage(${book.pages})">末页</button>
+          </div>
+          <button class="btn pri" ${page>=book.pages?"disabled":""} onclick="ebookPage(${page+1})">下一页 →</button>
+        </div>
+        <div class="note">PDF 模拟「整页栅格化」：真实后端对应 <span class="mono">--pages</span> / 页图 API。键盘 ← → 也可翻页。</div>
+      `:`
+        <div class="chips" style="margin-bottom:12px">
+          ${(book.chapters||[]).map(c=>`<button class="chip ${c.n===chIdx?"on":""}" onclick="ebookChapter(${c.n})">${c.n}. ${esc(c.t)}</button>`).join("")}
+        </div>
+        <article class="prose narrow" data-cols="1">${ch?.html||"<p>（无章节内容）</p>"}</article>
+        <div class="row" style="justify-content:space-between;margin-top:20px">
+          <button class="btn" ${chIdx<=1?"disabled":""} onclick="ebookChapter(${chIdx-1})">← 上一章</button>
+          <button class="btn pri" ${chIdx>=(book.chapters?.length||1)?"disabled":""} onclick="ebookChapter(${chIdx+1})">下一章 →</button>
+        </div>
+        <div class="note">EPUB/DOCX 模拟分章滚动阅读；也可用右下角浮动条调字号/栏宽。</div>
+      `}`;
+    // PDF 键盘翻页
+    if(isPdf){
+      state._ebookKey=function(e){
+        if(state.view!=="ebook") return;
+        if(e.key==="ArrowLeft") ebookPage(Math.max(1,(state.ebookPage||1)-1));
+        if(e.key==="ArrowRight") ebookPage(Math.min(book.pages,(state.ebookPage||1)+1));
+      };
+    }
+  }
+  else if(V==="search"){
+    title.textContent="搜索";
+    v.innerHTML=`<p class="kicker">SEARCH</p><h2 class="h2">搜索</h2>
+      <p class="sub">全文：子串命中 + 行号定位 · 语义：向量相似度（才需要阈值）</p>
+      <div class="seg" style="margin-bottom:10px" id="smode2">
+        <button data-mode="grep" class="on">全文</button>
+        <button data-mode="sem">语义</button>
+      </div>
+      <div class="field">
+        <input id="gq3" placeholder="关键词…（试试 trigram）" value="trigram" />
+      </div>
+      <div class="row" style="align-items:center;margin-top:0">
+        <button class="btn pri" onclick="runSearchPage()">检索</button>
+        <label id="thrRow2" hidden style="font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px">
+          阈值
+          <input type="range" id="semThr2" min="50" max="95" step="5" value="70" style="width:90px"
+            oninput="document.getElementById('semThrVal2').textContent=(this.value/100).toFixed(2)" />
+          <span class="mono" id="semThrVal2">0.70</span>
+          <span style="opacity:.7">仅语义</span>
+        </label>
+      </div>
+      <div id="searchPageHits"><div class="empty">选择模式并检索</div></div>
+      <div class="note">全文没有「相似度」，故无阈值；只有语义检索用阈值滤低分结果。</div>`;
+    $("smode2").addEventListener("click",e=>{
+      const b=e.target.closest("button[data-mode]"); if(!b) return;
+      $("smode2").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));
+      const sem=b.dataset.mode==="sem";
+      $("thrRow2").hidden=!sem;
+      $("gq3").placeholder=sem?"自然语言问题…":"关键词…（试试 trigram）";
+      $("gq3").value=sem?"如何做中文全文搜索":"trigram";
+    });
+    window.runSearchPage=function(){
+      const sem=$("smode2")?.querySelector("button[data-mode=sem]")?.classList.contains("on");
+      const q=($("gq3")?.value||"").trim();
+      const box=$("searchPageHits");
+      if(!box) return;
+      if(!sem){
+        if(!q){box.innerHTML=`<div class="empty">请输入关键词</div>`;return}
+        box.innerHTML=`<div class="empty">全文搜索中…</div>`;
+        api(`/api/grep?q=${encodeURIComponent(q)}&limit=50`).then(d=>{
+          const hits=d.hits||[];
+          box.innerHTML=`<p class="sub">全文 · <span class="mono">${esc(q)}</span> · ${hits.length} 篇</p><div class="cards">`+
+            hits.map(h=>`<div class="card" style="cursor:default">
+              <div class="t">${esc(h.title)}</div>
+              <div class="m"><span>${esc(h.feed||"")}</span></div>
+              ${h.snippet?`<div style="margin-top:6px;font-size:12.5px;color:var(--muted)">${esc(h.snippet)}</div>`:""}
+              <button class="loc-btn" data-loc="${h.itemId}" data-kw="${esc(q)}">打开原文</button>
+            </div>`).join("")+`</div>`;
+        }).catch(e=>{ box.innerHTML=`<div class="empty">${esc(e.message)}</div>`; });
+        return;
+      }
+      const thr=+($("semThr2")?.value||70)/100;
+      box.innerHTML=`<div class="empty">语义检索中…</div>`;
+      api(`/api/search?q=${encodeURIComponent(q)}&threshold=${thr}`).then(d=>{
+        const hits=(d.hits||[]).filter(h=>(h.score??1)>=thr);
+        box.innerHTML=`<p class="sub">语义 · 阈值 <span class="mono">${thr.toFixed(2)}</span> · ${hits.length} 条</p>
+          <div class="cards">${hits.map(h=>`<button class="card" data-article="${h.itemId}"><div class="t">${esc(h.title)}</div>
+            <div class="m"><span>${esc(h.feed||"")}</span><span class="b acc">${(h.score||0).toFixed(2)}</span></div></button>`).join("")
+            ||`<div class="empty">无结果</div>`}</div>`;
+      }).catch(e=>{ box.innerHTML=`<div class="empty">${esc(e.message)}</div>`; });
+    };
+  }
+  else if(V==="diff"){
+    title.textContent="改稿追踪";
+    if(!PREVIEW_MOCKS){
+      v.innerHTML=notWired("DIFF","改稿追踪",
+        "后端其实已经就绪（/api/articles/{id}/versions 与 /diff，含行级 diff），是 Web 版还没接上——这是下一刀。",
+        "sip --versions <id>　sip --diff <id>",
+        "还差一个「列出所有有版本的文章」的接口；在那之前这一页不放任何假数据。");
+      return;
+    }
+    // 列表模式：未选中具体文章
+    if(!state.diffId){
+      v.innerHTML=`<p class="kicker">DIFF · 列表</p><h2 class="h2">改稿追踪</h2>
+        <p class="sub">有版本历史的文章 · 点一条看 diff，可退回本列表换另一篇</p>
+        <div class="cards">${DIFF_LIST.map(d=>`
+          <button class="card" onclick="openDiff(${d.id})">
+            <div class="t">${esc(d.title)}</div>
+            <div class="m">
+              <span>${esc(d.feed)}</span>
+              <span class="b">v${d.from} → v${d.to}</span>
+              <span class="b acc">${esc(d.grade)}</span>
+              <span>${esc(d.when)}</span>
+            </div>
+          </button>`).join("")}</div>
+        <div class="note">也可在阅读页点「查看改稿」跳到对应 diff。</div>`;
+      return;
+    }
+    const D=DIFF_LIST.find(x=>x.id===state.diffId)||DIFF_LIST[0];
+    title.textContent="改稿 · v"+D.from+"→"+D.to;
+    v.innerHTML=`
+      <div class="row" style="margin-top:0">
+        <button class="btn" onclick="closeDiff()">← 返回列表</button>
+        <button class="btn" onclick="state.view='article';state.articleId=${D.id};render()">打开最新原文</button>
+      </div>
+      <p class="kicker">DIFF · ${esc(D.feed)}</p>
+      <h2 class="h2">${esc(D.title)}</h2>
+      <p class="sub">v${D.from} → v${D.to} · ${esc(D.grade)} · ${esc(D.when)}</p>
+      <div class="row">
+        <span class="b">v${D.from} 旧</span>
+        <span class="b acc">v${D.to} 新</span>
+        <button class="btn pri" onclick="openVersion(${D.id},'old')">看旧版原文</button>
+        <button class="btn" onclick="openVersion(${D.id},'new')">看最新原文</button>
+        <button class="btn" onclick="closeDiff()">换一篇…</button>
+      </div>
+      <div class="card" style="cursor:default;font-family:var(--serif);font-size:14px;line-height:1.85">
+        ${D.lines.map(l=>l.k==="-"?`<div class="diff-del">${esc(l.t)}</div>`
+          :l.k==="+"?`<div class="diff-add">${esc(l.t)}</div>`
+          :`<div>${esc(l.t)||"&nbsp;"}</div>`).join("")}
+      </div>
+      <div class="note">今日哈汤的「变化摘要」会引用这里的 added/removed 行数。</div>`;
+  }
+  else if(V==="dedup"){
+    title.textContent="跨源去重";
+    if(!PREVIEW_MOCKS){
+      v.innerHTML=notWired("DEDUP","跨源去重",
+        "去重算法在 CLI 里（段落重合度聚簇，只聚簇/隐藏，不自动删），Web 版还没接。",
+        "sip --dedup scan　sip --dedup list",
+        "接上之后这里会显示真实的簇与成员并排对比。");
+      return;
+    }
+    if(state.dedupId){
+      const d=DEDUP.find(x=>x.id===state.dedupId)||DEDUP[0];
+      const pair=state.dedupPair||0; // 0 = 代表 vs 第2；或 members[i]
+      const left=d.members[0];
+      const right=d.members[Math.min(Math.max(1,pair), d.members.length-1)]||d.members[1]||d.members[0];
+      title.textContent="去重 · "+d.rep;
+      v.innerHTML=`
+        <div class="row" style="margin-top:0">
+          <button class="btn" onclick="closeDedup()">← 返回簇列表</button>
+        </div>
+        <p class="kicker">DEDUP · 对比</p>
+        <h2 class="h2">${esc(d.rep)}</h2>
+        <p class="sub">overlap <span class="mono">${d.overlap}</span> · 代表元 vs 转载差异（模拟段落对齐）</p>
+        <div class="chips" style="margin-bottom:12px">
+          <span class="chip">代表 · ${esc(left.key)}</span>
+          ${d.members.slice(1).map((m,i)=>`<button class="chip ${(i+1)===(pair||1)?"on":""}" onclick="openDedupPair('${d.id}',${i+1})">对比 · ${esc(m.key)}</button>`).join("")}
+        </div>
+        <div class="grid2" style="margin-bottom:12px">
+          ${[left,right].map((m,i)=>`
+            <div class="card" style="cursor:default">
+              <div class="t">${i===0?"代表元":"对比项"} · ${esc(m.key)}</div>
+              <div class="m"><span>${esc(m.feed)}</span></div>
+              <div style="margin-top:6px;font-size:13px;font-family:var(--serif)">${esc(m.title)}</div>
+              <p class="sub" style="margin:8px 0 0;font-size:12.5px;line-height:1.7">${esc(m.text)}</p>
+            </div>`).join("")}
+        </div>
+        <div class="card" style="cursor:default;font-family:var(--serif);font-size:14px;line-height:1.85">
+          <div class="m" style="margin-bottom:10px"><span class="b">统一 diff</span><span class="b">绿=对比多出</span><span class="b">红=代表独有</span></div>
+          ${d.lines.map(l=>l.k==="-"?`<div class="diff-del">${esc(l.t)}</div>`
+            :l.k==="+"?`<div class="diff-add">${esc(l.t)}</div>`
+            :`<div>${esc(l.t)}</div>`).join("")}
+        </div>
+        <div class="row">
+          <button class="btn pri" onclick="toast('请用 CLI: sip --dedup hide …')">保留代表元 · 隐藏其余</button>
+          <button class="btn" onclick="toast('请用 CLI: sip --dedup …')">全部保留</button>
+          <button class="btn" onclick="toast('请用 CLI: sip --dedup undo …')">撤销</button>
+        </div>`;
+      return;
+    }
+    v.innerHTML=`<p class="kicker">DEDUP</p><h2 class="h2">跨源去重</h2>
+      <p class="sub">段落重合度检测 · 不自动删，只聚簇 / 隐藏 · 点簇查看成员 diff</p>
+      <div class="row"><button class="btn pri" onclick="toast('扫描完成：发现 2 组')">扫描</button>
+        <button class="btn" onclick="toast('已列出隐藏簇')">已隐藏列表</button></div>
+      ${DEDUP.map(d=>`<div class="card" style="margin-bottom:8px" onclick="openDedup('${d.id}')" role="button" tabindex="0">
+        <div class="t">${esc(d.rep)}</div>
+        <div class="m"><span class="b">${d.src}</span><span class="b acc">overlap ${d.overlap}</span>
+          <span style="margin-left:auto;color:var(--accent)">查看 diff →</span></div>
+        <div class="badge-list">${d.members.map(m=>`<span class="b">${esc(m.key)}</span>`).join("")}</div>
+      </div>`).join("")}
+      <div class="note">与「改稿追踪」不同：这里是<strong>跨源同一内容</strong>的转载/摘要差异，不是作者改稿。</div>`;
+  }
+  else if(V==="policy"){
+    title.textContent="源规则";
+    if(!PREVIEW_MOCKS){
+      v.innerHTML=notWired("POLICY","源规则",
+        "规则存在你自己的库里，CLI 可以增删改查，Web 版还没接。",
+        "sip --policy list　sip --policy set <源> <动作>",
+        "规则只由你确认，AI 不会自动写。");
+      return;
+    }
+    v.innerHTML=`<p class="kicker">POLICY</p><h2 class="h2">源规则</h2>
+      <p class="sub">你确认的规则：降频 / 标签 / 归档 / 保留 / 退订 · AI 不自动写</p>
+      <div class="field"><select><option>选择订阅源…</option>${FEEDS.map(f=>`<option>${esc(f.title)}</option>`).join("")}</select>
+        <select><option>lower_frequency</option><option>tag</option><option>archive</option><option>keep</option><option>unsubscribe</option></select>
+        <button class="btn pri" onclick="toast('请用 CLI: sip --policy set …')">添加</button></div>
+      <table class="dt"><thead><tr><th>源</th><th>动作</th><th>参数</th><th>备注</th><th></th></tr></thead>
+      <tbody>${POLICIES.map(p=>`<tr><td>${esc(p.feed)}</td><td>${esc(p.action)}</td>
+        <td>${esc(p.schedule||p.tag||"—")}</td><td>${esc(p.note||"—")}</td>
+        <td><button class="btn" onclick="toast('已删除规则')">删</button></td></tr>`).join("")}</tbody></table>`;
+  }
+  else if(V==="insights"){
+    title.textContent="阅读报告";
+    v.innerHTML=`<div class="empty">读取报告…</div>`;
+    let rep=null, rerr=null;
+    try{ rep=await api("/api/insights"); }catch(e){ rerr=e; }
+    // 遥测默认关闭 → 这不是"出错了"，是"本来就没有数据"。
+    // 把它当错误弹一行红字，等于为编造数字道歉 —— 该说的是「没有数据，去开遥测」。
+    if(rerr && rerr.code==="TELEMETRY_OFF"){
+      v.innerHTML=notWired("INSIGHTS","阅读报告",
+        "这份报告全部来自本机遥测，而遥测默认是关的——所以现在没有任何数据可报。",
+        "sip telemetry enable（开启后 sip --insights 与这一页都有数据）",
+        "以前这一页显示的是一组编造的统计数字，已经删掉：报告可以没有，不能是假的。");
+      return;
+    }
+    if(rerr || !rep){
+      v.innerHTML=`<div class="empty">报告读不到：${esc(rerr?.message||"接口不可用")}</div>`;
+      return;
+    }
+    const feeds=rep.feeds||[];
+    const sum=k=>feeds.reduce((a,f)=>a+(f[k]||0),0);
+    v.innerHTML=`<p class="kicker">INSIGHTS · ${rep.windowDays} 天</p><h2 class="h2">阅读报告</h2>
+      <p class="sub">事实来自本机遥测（不发往任何地方）· 生成于 ${esc(fmtDate(rep.generatedAt))}</p>
+      <div class="grid3">
+        <div class="stat"><b>${sum("opened")}</b><span>打开</span></div>
+        <div class="stat"><b>${sum("completed")}</b><span>读完</span></div>
+        <div class="stat"><b>${sum("backlog")}</b><span>未读积压</span></div>
+      </div>
+      <p class="sub" style="margin-top:10px">♥ 你点赞 ${sum("userLikes")} · 🤖 AI 点赞 ${sum("aiLikes")} · AI 调用 ${rep.aiCalls?.total||0} 次（摘要 ${rep.aiCalls?.llm||0} / 嵌入 ${rep.aiCalls?.embedding||0}）</p>
+      <div class="card" style="cursor:default;margin-top:12px">
+        <div class="t">按源</div>
+        ${feeds.length?feeds.map(f=>`
+          <div style="margin-top:8px">
+            <div style="display:flex;gap:8px"><span style="flex:1">${esc(f.title)}</span><span class="b">${esc(f.status||"")}</span></div>
+            <div style="color:var(--muted);font-size:12px;margin-top:2px">订阅 ${f.active} · 积压 ${f.backlog} · 打开 ${f.opened} · 读完 ${f.completed} · 完成率 ${f.completionRate}%${(f.reasons&&f.reasons.length)?" · "+f.reasons.map(r=>esc(r)).join(" / "):""}</div>
+          </div>`).join(""):`<div class="empty">还没有订阅源</div>`}
+      </div>`;
+  }
+  else if(V==="settings"){
+    title.textContent=t("Reading settings");
+    const th=document.documentElement.dataset.theme||"paper";
+    const fs=getComputedStyle(document.documentElement).getPropertyValue('--reading-size').trim();
+    v.innerHTML=`<p class="kicker">SETTINGS</p><h2 class="h2">${t("Reading settings")}</h2>
+      <p class="sub">${state.lang==="en-US"?"Loaded from ./languages/en-US.json (identity)":"词条来自 ./languages/"+state.lang+".json（与 sip Lang.T 同键）"}</p>
+      <div class="seg" style="margin-bottom:14px">
+        <button data-th="day" class="${th==='day'?'on':''}">${t("Day")}</button>
+        <button data-th="paper" class="${th==='paper'?'on':''}">${t("Paper")}</button>
+        <button data-th="night" class="${th==='night'?'on':''}">${t("Night")}</button>
+      </div>
+      <div class="card" style="cursor:default">
+        <div class="t">${t("Font")} ${fs} · ${t("Columns")} ${getComputedStyle(document.documentElement).getPropertyValue('--cols').trim()}</div>
+        <div class="row">
+          <button class="btn" onclick="bumpFont(-1)">A−</button>
+          <button class="btn" onclick="bumpFont(1)">A+</button>
+          <button class="btn" onclick="setCols(1)">1</button>
+          <button class="btn" onclick="setCols(2)">2</button>
+          <button class="btn" onclick="setCols(3)">3</button>
+        </div>
+      </div>
+      <div class="card" style="cursor:default;margin-top:8px">
+        <div class="t">${t("UI language")}</div>
+        <div class="seg" style="margin-top:8px">
+          <button data-lang="zh-CN" class="${state.lang==='zh-CN'?'on':''}">简体中文</button>
+          <button data-lang="en-US" class="${state.lang==='en-US'?'on':''}">English</button>
+          <button data-lang="zh-Moe" class="${state.lang==='zh-Moe'?'on':''}">卖萌</button>
+        </div>
+        <div class="m" style="margin-top:10px">dict keys: ${Object.keys(state.dict).length} · lang=${state.lang}</div>
+      </div>
+      <div class="card" style="cursor:default;margin-top:8px">
+        <div class="t">${t("Other")}</div>
+        <div class="m">readwithhotsoup/ · telemetry off · single-file exe</div>
+      </div>
+      <div class="card" style="cursor:default;margin-top:8px">
+        <div class="t">主题扩展（规划）</div>
+        <div class="m" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <span>内置：paper / day / night</span>
+          <span>自定义：readwithhotsoup/themes/&lt;name&gt;.json</span>
+          <span class="mono" style="font-size:11px">{ "--bg":"#F7F3EB", "--ink":"#292524", "--accent":"#A16207", … }</span>
+          <span>偏好存在本机 localStorage；进 sip 后可再写 web_prefs.json</span>
+        </div>
+      </div>
+      <div class="note">${t("Mock UI: most buttons only toast.")}</div>`;
+    v.querySelectorAll("[data-th]").forEach(b=>b.addEventListener("click",()=>{
+      setTheme(b.dataset.th); render();
+    }));
+    v.querySelectorAll("[data-lang]").forEach(b=>b.addEventListener("click",()=>{
+      setLang(b.dataset.lang);
+    }));
+  }
+  else if(V==="about"){
+    title.textContent="关于";
+    v.innerHTML=`<p class="kicker">ABOUT</p><h2 class="h2">关于 sip</h2>
+      <p class="sub">本地优先的个人信息库 · 品，你细品</p>
+      <div class="grid2">
+        <div class="card" style="cursor:default">
+          <div class="t">项目</div>
+          <div class="m" style="flex-direction:column;align-items:flex-start;gap:8px">
+            <span>作者：<strong>hahahotsoup</strong></span>
+            <span>仓库：<a href="https://github.com/hahahotsoup/sipintui" target="_blank" rel="noopener">github.com/hahahotsoup/sipintui</a></span>
+            <span>Web 附加：<a href="https://github.com/hahahotsoup/sip-webapiextra" target="_blank" rel="noopener">sip-webapiextra</a></span>
+            <span>文档：<a href="https://sip.hotsouprealm.top/" target="_blank" rel="noopener">sip.hotsouprealm.top</a></span>
+          </div>
+        </div>
+        <div class="card" style="cursor:default">
+          <div class="t">版本</div>
+          <div class="m" style="flex-direction:column;align-items:flex-start;gap:8px">
+            <span>版本号：<span class="b acc">v1.3.0</span></span>
+            <span>构建日期：2026-09-11</span>
+            <span>运行时：.NET 10 · 单文件</span>
+            <span>本页：功能模拟（非生产后端）</span>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="cursor:default;margin-top:10px">
+        <div class="t">安全能力（真实产品）</div>
+        <div class="m" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <span>· Web 密码 / 绑定：CLI <span class="mono">sip --start</span> · <span class="mono">sip webpass</span></span>
+          <span>· AI Key：<span class="mono">sip aikey</span> / <span class="mono">sip --init</span>（系统凭据库）</span>
+          <span>· 孟思琳挡位：<span class="mono">sip simon</span></span>
+          <span>· 上述敏感项 <strong>不通过 Web 修改</strong>，须在终端（必要时管理员/真实 TTY）执行</span>
+        </div>
+      </div>
+      <div class="note">GPL-3.0 · 遥测默认关闭 · 数据全在本地 readwithhotsoup/</div>`;
+  }
+}
+
+// 初始主题 / 语言 / 真实数据
+document.documentElement.dataset.theme="paper";
+try{
+  const saved=localStorage.getItem("sip-mock-lang");
+  if(saved) state.lang=saved;
+}catch{}
+// 先进主界面，语言/偏好异步补上，避免卡在壳上
+enterApp();
+applyLang().then(()=>{ restorePrefs(); render(); });
+loadRealData();
+</script>
+</body>
+</html>

@@ -909,6 +909,25 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             return MessageBox.Query(Application.Instance, Lang.T("Notice"), message, btns) ?? 0;
         }
 
+        // 掩码输入对话框（口令用）。返回输入内容；用户取消返回 null。
+        // 存在的意义：让 TUI 也能走 SensitiveActionAllowed —— 否则 TUI 就是降挡的旁路。
+        string? AskSecret(string title)
+        {
+            string? result = null;
+            bool cancelled = true;
+            var lbl = new Label { Text = Lang.T("Web password: "), X = 1, Y = 1 };
+            var tf = new TextField { X = 17, Y = 1, Width = Dim.Fill(2), Text = "", Secret = true };
+            var ok = new Button { Text = Lang.T("OK"), IsDefault = true, X = 1, Y = 3 };
+            var cancel = new Button { Text = Lang.T("Cancel"), X = Pos.Right(ok) + 2, Y = 3 };
+            var dlg = new Dialog { Title = title, Width = 60, Height = 8 };
+            dlg.Add(lbl, tf, ok, cancel);
+            ok.Accepted += (_, _) => { result = tf.Text?.ToString() ?? ""; cancelled = false; dlg.RequestStop(); };
+            cancel.Accepted += (_, _) => { dlg.RequestStop(); };
+            tf.SetFocus();
+            Application.Run(dlg);
+            return cancelled ? null : result;
+        }
+
         // 在浏览器/默认程序中打开链接（仅放行 http/https，防 javascript: 等注入）
         void OpenUrl(string url)
         {
@@ -1528,15 +1547,24 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
                     return;
                 case "simon" or "--simon":
                 {
-                    // 孟思琳(simon)守护:从 TUI 可升降挡(降挡是唯一被允许的通道,需确认)
+                    // 孟思琳(simon)：升档任意通道；降档走人工通道（真 TTY + 口令）。
+                    // TUI 自己用掩码框收口令，再交给同一个校验函数 —— TUI 不再是旁路。
+                    // 挡位基准用 CurrentSimonLevel()（凭据库权威值），不用 settings 缓存。
                     var spos = (arg ?? "").Split(' ').Where(x => x.Length > 0).ToArray();
-                    if (spos.Length >= 2 && spos[0].Equals("level", StringComparison.OrdinalIgnoreCase)
-                        && int.TryParse(spos[1], out int lvl) && lvl < LoadSettings().SimonLevel)
+                    bool isDowngrade = spos.Length >= 2 && spos[0].Equals("level", StringComparison.OrdinalIgnoreCase)
+                                       && int.TryParse(spos[1], out int wantLvl) && wantLvl < CurrentSimonLevel();
+                    string? pw = null;
+                    if (isDowngrade)
                     {
-                        if (Ask(Lang.T("确定要把孟思琳(simon)守护挡位从 {0} 降到 {1} 吗?(降挡后仍无法关闭,只能再升回)", LoadSettings().SimonLevel, lvl), Lang.T("降挡"), Lang.T("取消")) != 0)
+                        if (!WebPasswordIsSet())
+                        {
+                            Ask(Lang.T("No Web password is set. Run `sip webpass` in a terminal first — lowering the level needs a real password, not just a confirmation."), Lang.T("OK"));
                             return;
+                        }
+                        pw = AskSecret(" " + Lang.T("Lower Simon level") + " ");
+                        if (pw == null) return;   // 用户取消
                     }
-                    RunCliCommandInTui(() => SimonCli(spos, dbPath, fromTui: true));
+                    RunCliCommandInTui(() => SimonCli(spos, dbPath, passwordFromUi: pw));
                     return;
                 }
                 default:
@@ -1705,9 +1733,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             if (float.TryParse(thr.Text.Trim(), out float t)) cfg.Embedding.SearchThreshold = t;
             SaveConfig(dbPath, cfg);
 
-            // Key 存系统凭据库
-            if (!string.IsNullOrEmpty(embKey.Text)) CredSet("embedding_api_key", embKey.Text);
-            if (!string.IsNullOrEmpty(llmKey.Text)) CredSet("llm_api_key", llmKey.Text);
+            // Key 存系统凭据库（按数据目录 scope）
+            if (!string.IsNullOrEmpty(embKey.Text)) AiKeySet(embedding: true, embKey.Text);
+            if (!string.IsNullOrEmpty(llmKey.Text)) AiKeySet(embedding: false, llmKey.Text);
 
             Ask(Lang.T("AI config saved. Run reindex after changing the Embedding model."), Lang.T("OK"));
         }

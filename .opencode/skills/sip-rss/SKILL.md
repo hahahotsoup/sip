@@ -81,6 +81,8 @@ dotnet bin/Release/net10.0/sip.dll <命令> [参数]
 ### 安全守护
 - `sip simon status` — 查看安全挡位
 - `sip simon --set <level>` — 设置安全挡位（需真实终端）
+- `sip --agentstatus` — 查看 Agent 门（程序能否调用 sip）
+- `sip --agentok` / `sip --agentoff` — 开/关 Agent 门（开启需真实终端 + Web 口令）
 
 ### 其他
 - `sip --help` — 查看帮助
@@ -109,6 +111,7 @@ dotnet bin/Release/net10.0/sip.dll <命令> [参数]
 ## 安全约定
 
 - **所有 CLI 经过 simon 守护**：挡位 2 拒绝写操作，挡位 3 拒绝所有
+- **Agent 门默认关闭**（与挡位是**两条独立的轴**：挡位管命令，这道门管调用者）：不是真人终端的调用一律返回 `AGENT_BLOCKED`（退出码 3）。**这不是故障**——如实告诉用户需要在真实终端跑 `sip --agentok`；**不要尝试任何绕过**（写 `agent_mode.json` 已无效，换 `SIP_SIMON_KEY_NAME` 也只会得到"关"）
 - **AI 必须检查退出码**：非 0 即失败，禁止忽略
 - **AI 绝不能代跑 `--init`**：这是用户交互命令
 - **TUI 不经安全检查**：假定是真人通道

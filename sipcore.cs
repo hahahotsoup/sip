@@ -36,13 +36,6 @@ using Terminal.Gui.Text;
 try { Console.OutputEncoding = new System.Text.UTF8Encoding(false); } catch { /* 某些重定向场景可能不支持，忽略 */ }
 try { Console.InputEncoding = new System.Text.UTF8Encoding(false); } catch { /* 同上，忽略 */ }
 
-// 孟思琳(simon):启用 SQLCipher provider。
-// 注意顺序:2.1.x 的 SQLitePCL.Batteries_V2.Init(由 Microsoft.Data.Sqlite 首次连接时触发)
-// 会无条件覆盖 provider——必须先完成默认初始化,再 SetProvider(sqlcipher) 切换
-using (var _initConn = new SqliteConnection("Data Source=:memory:")) { _initConn.Open(); }
-try { SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlcipher()); }
-catch (Exception ex) { Console.Error.WriteLine("[diag] SetProvider failed: " + ex.GetType().Name + ": " + ex.Message); }
-
 // 数据目录 = exe 同级下的 readwithhotsoup 文件夹（首次启动自动创建）
 // 数据库、AI 配置、语言文件等所有配置文件都放在这里，方便整体备份/迁移
 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -76,6 +69,10 @@ for (int gi = 0; gi < args.Length - 1; gi++)
 Lang.Init(dataDir, langCode);
 TelemetryService.Init(dataDir);   // 遥测：默认关闭，仅本地，独立 telemetry.db
 
+// 每天首次启动留一份本地快照(放在 Lang.Init 之后,失败提示才有译文)。
+// 静默、不阻塞:备份是兜底,不是启动前置条件。
+BackupDbDaily(dbPath);
+
 // ══════════ CLI 模式 ══════════
 if (args.Length > 0)
 {
@@ -88,6 +85,14 @@ if (args.Length > 0)
 }
 
 // ══════════ TUI 模式（无参数时进入）══════════
+// TUI 已宣布弃用（见 README 路线预告）：双击 exe 或直接敲 sip 的人，
+// 先被告知还有 --start，再由他自己决定。不禁止使用，只保证信息到位。
+if (!ConfirmDeprecatedTui())
+{
+    TelemetryService.Shutdown();
+    MarkCleanExit(dataDir);
+    return 0;
+}
 var tuiExit = await RunTui(dbPath);
 TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
 MarkCleanExit(dataDir);
@@ -279,6 +284,9 @@ static string FulltextConsentPath() => Path.Combine(dataDir, "fulltext_consent.t
 static bool HasFulltextConsent() => File.Exists(FulltextConsentPath());
 static void WriteFulltextConsent() => File.WriteAllText(FulltextConsentPath(), DateTime.Now.ToString("O"));
 
+// 免责声明原文：CLI 与 Web 必须显示**同一段话**（各写一份，措辞迟早不一致）。
+static string FulltextDisclaimer() => Lang.T("sip is a reading aid; article fetching is for personal reading/study only. You agree to respect the source's intellectual property and copyright. You alone bear any loss from malicious use.");
+
 // 内容是否过短（Content 或 Description 字符数 < 100 → 触发全文抓取）
 static bool ContentTooShort(string content, string desc)
 {
@@ -303,10 +311,15 @@ static bool ArticleContentShort(string dbPath, int itemId)
     catch { return true; }
 }
 
-// 读取某文全文缓存；未缓存返回 null(兼容明文/加密)
+// 读取某文全文缓存；未缓存返回 null
 static string? ReadFulltextCache(long itemId)
 {
-    return SimonReadText(FulltextPath(itemId));
+    try
+    {
+        string p = FulltextPath(itemId);
+        return File.Exists(p) ? File.ReadAllText(p) : null;
+    }
+    catch { return null; }
 }
 
 // —— SSRF 防护：地址分类 0=允许 1=硬拦截（回环/链路本地） 2=私网段（默认拦截，AllowPrivateNet=true 放行）——
@@ -378,6 +391,20 @@ static string? FetchAndExtract(string url)
         doc.LoadHtml(html);
         foreach (var node in doc.DocumentNode.SelectNodes("//script | //style | //nav | //footer | //header | //aside | //form | //noscript") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>())
             node.Remove();
+        // 取文章主体，再交给 HtmlToMarkdown：它保留标题/段落/列表/引用，并把图片的
+        // **相对地址按 url 转成绝对**（不转的话本地渲染不出来，等于没抓到图）。
+        //
+        // 为什么不再用 InnerText：那是把整页文字**无分隔地拍平** —— 标题与正文粘成一行、
+        // 段落分隔全丢、图片与链接全没了，连页面上的按钮符号（× ↺ ⇻ ⇔）都被当正文收进来。
+        // 网页端只能把这一坨塞进一个 <p>，于是"排版很乱 + 没图片"（2026-09-12 用户反馈）。
+        var body = doc.DocumentNode.SelectSingleNode("//article")
+                ?? doc.DocumentNode.SelectSingleNode("//main")
+                ?? doc.DocumentNode.SelectSingleNode("//body")
+                ?? doc.DocumentNode;
+        string md = HtmlToMarkdown(body.InnerHtml, imageWidth: 80, baseUrl: url).Trim();
+        if (!string.IsNullOrWhiteSpace(md)) return md;
+
+        // 兜底：站点结构完全取不出正文时，退回原来的纯文本（至少别给空）
         var text = doc.DocumentNode.InnerText;
         text = Regex.Replace(text, @"[ \t\r]+", " ");
         text = Regex.Replace(text, @"\n{3,}", "\n\n");
@@ -414,7 +441,7 @@ static (string? Text, int ExitCode, string? Error) DoFetchCore(string dbPath, in
     if (urlErr != null) return (null, 2, urlErr);
     string text = FetchAndExtract(link) ?? "";
     if (string.IsNullOrWhiteSpace(text)) return (null, 2, Lang.T("Fetch failed"));
-    SimonWriteText(FulltextPath(itemId), text);
+    File.WriteAllText(FulltextPath(itemId), text);
     TrimFulltextCache();
     // 该源若已索引 → 用全文做 sidecar 向量（存 fulltext/vecs.json，不污染主 Vectors 表）
     EmbedFulltextSidecar(dbPath, itemId, feedId, text);
@@ -447,7 +474,7 @@ static (string? Text, int ExitCode, string? Error) FetchFulltext(string dbPath, 
         if (yes) WriteFulltextConsent();
         else
         {
-            Console.WriteLine(Lang.T("sip is a reading aid; article fetching is for personal reading/study only. You agree to respect the source's intellectual property and copyright. You alone bear any loss from malicious use."));
+            Console.WriteLine(FulltextDisclaimer());
             Console.Write(Lang.T("Type exactly to agree: {0}: ", agreePhrase));
             string input = Console.ReadLine()?.Trim() ?? "";
             if (input != agreePhrase)
@@ -1373,10 +1400,10 @@ static void FeedInfoCli(string[] args, string dbPath)
 // ══════════ OPML 导入导出（RSS 标准，零改表）══════════
 static string XmlEscape(string s) => s.Replace("&", "&amp;").Replace("\"", "&quot;").Replace("<", "&lt;").Replace(">", "&gt;");
 
-// CLI：sip --export-opml [feeds.opml]
-static void ExportOpmlCli(string arg, string dbPath)
+// OPML 生成的**唯一实现**：CLI 与 Web 共用（与 ImportOpmlCore 对称）。
+// 两边各写一套的话，导出的文件迟早会有细微差别，而 OPML 是要喂给别的阅读器的。
+static string BuildOpml(string dbPath)
 {
-    string file = string.IsNullOrWhiteSpace(arg) ? "feeds.opml" : arg;
     var feeds = new List<(string Title, string Url)>();
     using (var conn = OpenDb(dbPath))
     {
@@ -1398,9 +1425,17 @@ static void ExportOpmlCli(string arg, string dbPath)
             sb.AppendLine($"    <outline type=\"rss\" text=\"{XmlEscape(t)}\" title=\"{XmlEscape(t)}\" xmlUrl=\"{XmlEscape(u)}\"/>");
     sb.AppendLine("  </body>");
     sb.AppendLine("</opml>");
+    return sb.ToString();
+}
+
+// CLI：sip --export-opml [feeds.opml]
+static void ExportOpmlCli(string arg, string dbPath)
+{
+    string file = string.IsNullOrWhiteSpace(arg) ? "feeds.opml" : arg;
+    string xml = BuildOpml(dbPath);
     try
     {
-        File.WriteAllText(file, sb.ToString());
+        File.WriteAllText(file, xml);
     }
     catch (Exception ex)
     {
@@ -1408,7 +1443,8 @@ static void ExportOpmlCli(string arg, string dbPath)
         Console.WriteLine(Lang.T("Export OPML failed: {0}", ex.Message));
         return;
     }
-    Console.WriteLine(Lang.T("Exported {0} feeds to {1}", feeds.Count(f => f.Url.Length > 0), file));
+    int n = xml.Split("<outline").Length - 1;   // 只数真正写入的源（无 URL 的会被跳过）
+    Console.WriteLine(Lang.T("Exported {0} feeds to {1}", n, file));
 }
 
 static bool FeedUrlExists(string dbPath, string url)
@@ -1426,14 +1462,24 @@ static bool FeedUrlExists(string dbPath, string url)
 }
 
 // CLI：sip --import-opml <file.opml>（逐条下载添加，已存在的跳过）
-static void ImportOpmlCli(string file, string dbPath)
+// OPML 解析：**不可信输入**（用户从别处导出的文件，Web 版还能直接上传）。
+// 所以禁 DTD、禁外部实体解析：不设的话一份恶意 OPML 就能读本机文件（XXE），
+// 或者用递归实体把进程撑死（十亿笑声）。返回 error 非空 = 解析失败。
+static List<string> ParseOpmlUrls(string xml, out string? error)
 {
-    if (!File.Exists(file)) { SetExit(); Console.WriteLine(Lang.T("File not found: {0}", file)); return; }
+    error = null;
     var urls = new List<string>();
     try
     {
-        var doc = new System.Xml.XmlDocument();
-        doc.Load(file);
+        var settings = new System.Xml.XmlReaderSettings
+        {
+            DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+            XmlResolver = null,
+        };
+        var doc = new System.Xml.XmlDocument { XmlResolver = null };
+        using (var sr = new StringReader(xml))
+        using (var xr = System.Xml.XmlReader.Create(sr, settings))
+            doc.Load(xr);
         var nodes = doc.SelectNodes("//outline[@xmlUrl]");
         if (nodes != null)
             foreach (System.Xml.XmlNode n in nodes)
@@ -1442,17 +1488,57 @@ static void ImportOpmlCli(string file, string dbPath)
                 if (!string.IsNullOrWhiteSpace(u)) urls.Add(u.Trim());
             }
     }
-    catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("Parse OPML failed: {0}", ex.Message)); return; }
+    catch (Exception ex) { error = ex.Message; }
+    return urls;
+}
 
-    if (urls.Count == 0) { Console.WriteLine(Lang.T("No feeds found in the OPML file")); return; }
+// OPML 导入的**唯一实现**：CLI 与 Web 都调这里。
+// 为什么必须共用：两边各写一套，迟早会出现「终端说导入了 3 个源、网页说导入了 0 个」
+// —— 这种不一致比功能缺失更难查。
+// ParseFailed：「文件根本不是 OPML」；Fatal：「是 OPML 但里面没有源」。
+static (int Ok, int Skip, int Fail, bool ParseFailed, string? Fatal, List<string> Errors)
+    ImportOpmlCore(string xml, string dbPath, Action<int, int, string>? onStep = null)
+{
+    var urls = ParseOpmlUrls(xml, out string? err);
+    if (err != null)
+        return (0, 0, 0, true, Lang.T("Parse OPML failed: {0}", err), new List<string>());
+    if (urls.Count == 0)
+        return (0, 0, 0, false, Lang.T("No feeds found in the OPML file"), new List<string>());
+
     int ok = 0, skip = 0, fail = 0;
-    foreach (var u in urls)
+    var errors = new List<string>();
+    for (int i = 0; i < urls.Count; i++)
     {
+        var u = urls[i];
+        onStep?.Invoke(i, urls.Count, u);   // 进度回调：CLI 传 null，Web 用来显示"3/21 · 正在抓 xxx"
         if (FeedUrlExists(dbPath, u)) { skip++; continue; }
         try { DownloadAndSaveToDb(u, dbPath, interactive: false).Wait(); ok++; }
-        catch { fail++; }
+        catch (Exception ex)
+        {
+            fail++;
+            if (errors.Count < 20) errors.Add(u + " — " + ex.Message);   // 只回前 20 条，够了
+        }
+    }
+    return (ok, skip, fail, false, null, errors);
+}
+
+static void ImportOpmlCli(string file, string dbPath)
+{
+    if (!File.Exists(file)) { SetExit(); Console.WriteLine(Lang.T("File not found: {0}", file)); return; }
+    string xml;
+    try { xml = File.ReadAllText(file); }
+    catch (Exception ex) { SetExit(); Console.WriteLine(Lang.T("Parse OPML failed: {0}", ex.Message)); return; }
+
+    var (ok, skip, fail, parseFailed, fatal, errors) = ImportOpmlCore(xml, dbPath);
+    if (fatal != null)
+    {
+        // 「OPML 里没有源」只提示、不算失败（保持原行为）；解析失败才置退出码
+        if (parseFailed) SetExit();
+        Console.WriteLine(fatal);
+        return;
     }
     Console.WriteLine(Lang.T("Import done: {0} added, {1} skipped (already exist), {2} failed", ok, skip, fail));
+    foreach (var e in errors) Console.WriteLine("  ! " + e);
 }
 
 // ══════════ 文章标记信号（article_signals.json，零改表）══════════
@@ -2059,7 +2145,8 @@ static Dictionary<string, DedupRule> LoadDedup()
 {
     try
     {
-        string? text = SimonReadText(DedupPath());
+        string p = DedupPath();
+        string? text = File.Exists(p) ? File.ReadAllText(p) : null;
         if (text != null)
             return JsonSerializer.Deserialize<Dictionary<string, DedupRule>>(text) ?? new();
     }
@@ -2071,7 +2158,7 @@ static void SaveDedup(Dictionary<string, DedupRule> map)
 {
     try
     {
-        SimonWriteText(DedupPath(), JsonSerializer.Serialize(map,
+        File.WriteAllText(DedupPath(), JsonSerializer.Serialize(map,
             new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }));
     }
     catch { }
@@ -3073,6 +3160,19 @@ static async Task RunCli(string[] args, string dbPath)
         return;
     }
 
+    // Agent/外部调用门：默认关闭。只拦「非交互调用」（脚本/Agent），不影响你自己的终端。
+    // 与上面的挡位是两条独立的轴：挡位是命令级策略，这道门是调用者级策略。
+    string? agentBlock = AgentModeBlock(cmd, args);
+    if (agentBlock != null)
+    {
+        SimonRecord("blocked_cmd", $"agent-off:{cmd} {string.Join(' ', args.Skip(1))}", CurrentSimonLevel());
+        bool j2 = args.Contains("--json", StringComparer.OrdinalIgnoreCase);
+        if (j2) JsonOut(new { success = false, error = new { code = "AGENT_BLOCKED", message = agentBlock } });
+        else Console.WriteLine(Lang.T("🔒 Agent 门: {0}", agentBlock));
+        SetExit(3);
+        return;
+    }
+
     // 孟思琳(simon)守护配置(读命令,永不拦截)
     if (cmd == "simon")
     {
@@ -3103,6 +3203,16 @@ static async Task RunCli(string[] args, string dbPath)
         return;
     }
 
+    // ══════════ 内嵌 Web（进程内，前台阻塞）══════════
+    // sip --start  →  固定 http://127.0.0.1:8777，Ctrl+C 退出
+    if (cmd is "--start")
+    {
+        HandleWebAuthResetFile();       // 逃生口：存在 web_auth.reset 则清密码
+        FirstRunWebPasswordSetup();     // 首次且真实终端：询问是否设密码
+        await StartWebServer(dbPath);
+        return;
+    }
+
     if (cmd is "-h" or "--help")
     {
         PrintHelp();
@@ -3123,11 +3233,15 @@ static async Task RunCli(string[] args, string dbPath)
         bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
         // -l <N> --limit M：限制输出的文章条数（大源省 token 用；0=不限制）
         int listLimit = 0;
+        // --limit 后面那个数是**flag 的值**，不是源编号：`sip -l --limit 2` 曾经被解析成
+        // 「列出 2 号源」（静默给出另一批结果）。先把被 flag 吃掉的下标记下来，再挑位置参数。
+        var flagValues = new HashSet<int>();
         for (int i = 1; i < args.Length - 1; i++)
             if (args[i].Equals("--limit", StringComparison.OrdinalIgnoreCase) && int.TryParse(args[i + 1], out int lm))
-                listLimit = Math.Clamp(lm, 1, 5000);
-        // 找第一个非 flag 的参数作为编号（-l --json 或 -l 1 --json 都能用）
-        var numArg = args.Skip(1).FirstOrDefault(a => !a.StartsWith("--"));
+            { listLimit = Math.Clamp(lm, 1, 5000); flagValues.Add(i + 1); }
+        // 找第一个既不是 flag、也不是 flag 值的参数作为编号（-l --json 或 -l 1 --json 都能用）
+        var numArg = args.Select((a, i) => (a, i))
+            .FirstOrDefault(t => t.i > 0 && !flagValues.Contains(t.i) && !t.a.StartsWith("--")).a;
         if (numArg != null)
         {
             // -l 后面带编号 → 列出该源的文章
@@ -3183,6 +3297,15 @@ static async Task RunCli(string[] args, string dbPath)
                 return;
             }
             InitAiConfigInteractive(dbPath);
+            return;
+        case "webpass":
+            CliWebPass(args.Skip(1).ToArray());
+            return;
+        case "aikey":
+            CliAiKey(args.Skip(1).ToArray());
+            return;
+        case "--agentok" or "--agentoff" or "--agentstatus":
+            AgentModeCli(cmd);
             return;
         case "--config":
             ShowConfig(dbPath);
@@ -3325,6 +3448,10 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  -a, --archive    archive a feed (add timestamp)"));
     Console.WriteLine(Lang.T("  -una, --unarchive unarchive a feed"));
     Console.WriteLine(Lang.T("  -r, --remove     delete a feed (add --yes to skip confirmation)"));
+    Console.WriteLine(Lang.T("  --start          start built-in web UI at http://127.0.0.1:8777 (Ctrl+C to stop) · 内嵌 Web"));
+    Console.WriteLine(Lang.T("  webpass [clear|status]  set/change/clear Web login password (CLI, no TUI); forgot? create web_auth.reset"));
+    Console.WriteLine(Lang.T("  aikey status|set-llm|set-embedding|clear-llm|clear-embedding  manage AI keys in OS credentials (no TUI)"));
+    Console.WriteLine(Lang.T("  --agentok | --agentoff | --agentstatus  allow/deny programs calling sip (OFF by default; enabling needs a real terminal + Web password)"));
     Console.WriteLine(Lang.T("  pic              TUI with article images on (sixel); images are OFF by default — terminal sixel detection is unreliable"));
     Console.WriteLine(Lang.T("  --show <id>      fullscreen reading (no sidebar; W = full TUI, Esc = exit); add --json to output raw content; add --vision to download images to temp dir; for PDF add --pages <range> (e.g. 3-7) to rasterize only those pages"));
     Console.WriteLine(Lang.T("  --versions <id>  list all versions of an article (use --show <id> to view one)"));
@@ -3488,7 +3615,10 @@ static string BuildArticleMarkdown(long itemId, bool contentMode, string dbPath,
             md.AppendLine();
             md.AppendLine("## " + Lang.T("Fetched full text"));
             md.AppendLine();
-            md.AppendLine(EscapeMd(fulltext.Trim()));
+            // 全文缓存现在是 **Markdown**（抓取时已转好，保留标题/段落/图片）。
+            // 以前这里是 EscapeMd(...)：那是为"缓存是纯文本"设计的，现在会把 Markdown 语法
+            // 转义成 \#、\*\* 直接显示出来 —— 反而更难读。
+            md.AppendLine(fulltext.Trim());
         }
         else if (showFetchHint && ContentTooShort(content, desc))
         {
@@ -4238,6 +4368,27 @@ static void MarkCleanExit(string dataDir)
     try { File.WriteAllText(Path.Combine(dataDir, ".clean-exit"), DateTime.Now.ToString("O")); } catch { }
 }
 
+// ══════════ TUI 弃用确认门（仅无参数启动时调用）══════════
+// 目的不是拦人,而是让「双击 exe」「直接敲 sip」的人知道还有内嵌 Web。
+// 提示写在提问**之前**:他答 N 之后窗口可能立刻关闭,该看到的必须先看到。
+// 非交互(管道/脚本/无控制台)不提问直接放行 —— 那种环境下 TUI 本来就起不来,
+// 提问只会把 ReadLine 的 null 误判成拒绝,反而改变脚本行为。
+static bool ConfirmDeprecatedTui()
+{
+    if (!HasInteractiveConsole()) return true;
+
+    Console.WriteLine();
+    Console.WriteLine(Lang.T("(!) The TUI is planned for deprecation; new work goes to CLI + Web."));
+    Console.WriteLine(Lang.T("    Web UI (recommended): sip --start"));
+    Console.WriteLine(Lang.T("    All commands: sip --help"));
+    Console.WriteLine();
+    Console.Write(Lang.T("Are you sure you want to start the TUI? [y/N] "));
+    if (IsYes(Console.ReadLine())) return true;
+
+    Console.WriteLine(Lang.T("Cancelled. Run sip --start to use the built-in web UI."));
+    return false;
+}
+
 // ══════════ FTS5 全文索引维护（百万级 grep 的关键；trigram 中文子串可搜）══════════
 // ItemsFts 只存索引,rowid = Items.Id;数据在 Items,由代码增量维护。
 // 老库/新库首次搜索时懒回填(一次性),之后增量同步。
@@ -4298,7 +4449,12 @@ static void SyncFtsDelete(SqliteConnection conn, long itemId)
     catch { }
 }
 
-// 主库完整性检查：魔数不符/打开失败/quick_check 非 ok → 改名保留现场 → 重建新库；绝不崩溃
+// 主库完整性检查：明确损坏 → 改名留档(.corrupt-*) → 由 InitDatabase 重建新库；绝不崩溃。
+// 三条铁律：
+//   ① **永不删除 rss.db** —— 整个阅读库只有这一份,「自愈」没有资格拿它冒险
+//   ② 「被占用/读不到」不等于「损坏」—— 并发启动、杀软、权限都会造成这一幕,一律不动文件
+//   ③ 改名**成功之后**才记 repair_db —— 先记账会让日志谎称「已保留现场」
+//      (2026-08-30 那两条 repair_db 记录就是这么产生的:没有任何 .corrupt-* 文件落地)
 // 性能：.clean-exit 标记 = 「最近一次完整性检查通过」。有标记 → 跳过全库 quick_check
 // (百万级 + FTS 索引的库可达 2GB+,全检 30s+);无标记才全检,检查通过后立即写标记——
 // 之后即使进程被强杀/断电,下次启动也无需再全检(SQLite WAL 崩溃自恢复,打开时自带校验)
@@ -4306,19 +4462,22 @@ static void CheckMainDbIntegrity(string dbPath)
 {
     try
     {
-        // 加密迁移中断恢复:rss.db 缺失但明文备份存在 → 恢复明文(数据优先;重新 simon level 3 即可再加密)
-        string plainBak = dbPath + ".plaintext.bak";
-        if (!File.Exists(dbPath) && File.Exists(plainBak))
+        // 旧版（挡位 3 + SQLCipher）加密过的库:加密功能已移除,本版本打不开它。
+        // 明确报错并退出——绝不让用户面对一句莫名其妙的 "file is not a database",
+        // 更绝不能让它走进下面的「损坏」分支被改名/删除。文件原样不动。
+        string encMarker = Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted");
+        if (File.Exists(encMarker))
         {
-            try
-            {
-                File.Move(plainBak, dbPath);
-                Console.Error.WriteLine(Lang.T("检测到加密迁移未完成,已从备份恢复数据;可重新执行 simon level 3 加密"));
-                try { File.Delete(Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".db-encrypted")); } catch { }
-                string enc = dbPath + ".enc";
-                if (File.Exists(enc)) { try { File.Delete(enc); } catch { } }
-            }
-            catch { /* 恢复失败不阻断(备份仍在,可手动处理) */ }
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(Lang.T("(!) This library was encrypted by an older sip (Simon level 3 + SQLCipher)."));
+            Console.Error.WriteLine(Lang.T("    Encryption has been removed, so this build cannot open it."));
+            Console.Error.WriteLine(Lang.T("Data folder: {0}", Path.GetDirectoryName(dbPath) ?? ""));
+            Console.Error.WriteLine();
+            Console.Error.WriteLine(Lang.T("    To recover: use an older build to run `sip simon level 1`, or restore a plaintext backup."));
+            Console.Error.WriteLine(Lang.T("    If your rss.db is already plaintext, just delete the .db-encrypted marker."));
+            Console.Error.WriteLine(Lang.T("    Nothing has been deleted — your files are untouched."));
+            Console.Error.WriteLine();
+            Environment.Exit(1);
         }
         if (!File.Exists(dbPath)) return;  // 新建库走正常建表流程
         string cleanMarker = Path.Combine(Path.GetDirectoryName(dbPath) ?? "", ".clean-exit");
@@ -4328,20 +4487,23 @@ static void CheckMainDbIntegrity(string dbPath)
             return;
         }
         Console.Error.WriteLine(Lang.T("🔒 孟思琳(simon): 数据库完整性检查中(上次未正常退出;大库约需 30 秒,仅此一次)…"));
-        bool ok = TelemetryService.IsSqliteFile(dbPath);
-        if (ok)
+        switch (QuickCheckHealth(dbPath))
         {
-            // 独立方法 + 显式 Dispose：确保句柄释放后文件才能改名
-            ok = QuickCheckOk(dbPath);
+            case DbHealth.Ok:
+                // 检查通过 → 立即写标记,避免「每次强杀后下次启动都全检」的恶性循环
+                try { File.WriteAllText(cleanMarker, DateTime.Now.ToString("O")); } catch { }
+                return;
+
+            case DbHealth.Unavailable:
+                // 读不到 ≠ 损坏。既不自愈也不改动任何文件,本次直接放行:
+                // 应用照常打开它(SQLite 自己会处理并发),下次启动再检查。
+                Console.Error.WriteLine(Lang.T("rss.db is in use or unreadable; skipping the integrity repair this time. Nothing was changed."));
+                return;
         }
-        if (ok)
-        {
-            // 检查通过 → 立即写标记,避免「每次强杀后下次启动都全检」的恶性循环
-            try { File.WriteAllText(cleanMarker, DateTime.Now.ToString("O")); } catch { }
-            return;
-        }
+
+        // ── 到这里才是「明确损坏」：改名留档,由 InitDatabase 重建新库 ──
+        // 只改名,**永不删除**;改名做不到就放手,什么都不动。
         string corrupt = dbPath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        SimonRecord("repair_db", Lang.T("检测到数据库损坏,已保留现场并重建: {0}", Path.GetFileName(corrupt)));
         try
         {
             SqliteConnection.ClearAllPools();
@@ -4349,20 +4511,33 @@ static void CheckMainDbIntegrity(string dbPath)
         }
         catch (Exception ex)
         {
-            // 文件被其他进程占用（并发启动）：不是真损坏现场，本次跳过自愈，下次启动再试
-            try { File.Delete(dbPath); } catch { }
-            Console.Error.WriteLine("rss.db 完整性检查异常（文件可能被占用，本次跳过自愈）：" + ex.Message);
+            // 连改名都失败(仍被占用/权限不足):很可能根本就没损坏,只是并发启动。
+            // 这里**绝不能**删 rss.db —— 库只有这一份,而走到这里的原因不足以证明它坏了。
+            Console.Error.WriteLine(Lang.T("rss.db looks corrupt but could not be quarantined; leaving it untouched: {0}", ex.Message));
             return;
         }
+        // 改名成功之后才记账:顺序反了会让日志谎称「已保留现场」而文件其实还在原地
+        SimonRecord("repair_db", Lang.T("检测到数据库损坏,已保留现场并重建: {0}", Path.GetFileName(corrupt)));
         Console.Error.WriteLine(Lang.T("哎呀，麻烦我修复下数据库——检测到损坏，已保留现场并重建：{0}", corrupt));
     }
     catch { /* 完整性检查失败不阻断启动 */ }
 }
 
-// 打开主库执行 quick_check；返回是否完好。连接在本方法内用完即关，避免文件句柄占用。
-// 带 busy_timeout；busy/locked 与瞬时非 ok 结果重试，连续多次失败才算损坏（与 telemetry 同策略）
-static bool QuickCheckOk(string dbPath)
+// 主库健康三态。**必须是三态而不是 bool**:
+// 「被占用/读不到」与「明确损坏」混在同一个 false 里,正是「并发启动把健康库判成损坏」的根因。
+enum DbHealth { Ok, Corrupt, Unavailable }
+
+// 只有这两个码意味着「这个文件不是可用的数据库」:
+//   11 = SQLITE_CORRUPT(页损坏)   26 = SQLITE_NOTADB(不是数据库文件)
+// 其余一律不算损坏 —— 14 CANTOPEN / 23 PERM / 10 IOERR / 8 READONLY / 13 FULL
+// 都只是「现在拿不到结论」,而拿不到结论绝不能触发自愈。
+static bool IsCorruptCode(int rc) => rc is 11 or 26;
+
+// 打开主库执行 quick_check。连接在本方法内用完即关,避免文件句柄占用。
+// 带 busy_timeout;busy/locked 与瞬时非 ok 结果重试(与 telemetry 同策略)。
+static DbHealth QuickCheckHealth(string dbPath)
 {
+    bool sawNonOk = false;
     for (int attempt = 0; attempt < 3; attempt++)
     {
         try
@@ -4373,12 +4548,92 @@ static bool QuickCheckOk(string dbPath)
             c.CommandText = "PRAGMA busy_timeout = 2000;";
             c.ExecuteNonQuery();
             c.CommandText = "PRAGMA quick_check";
-            if (c.ExecuteScalar()?.ToString() == "ok") return true;
+            if (c.ExecuteScalar()?.ToString() == "ok") return DbHealth.Ok;
+            sawNonOk = true;   // 瞬时非 ok:重试
         }
-        catch (SqliteException ex) when (TelemetryService.IsBusyCode(ex.SqliteErrorCode)) { /* 锁冲突：重试 */ }
-        catch { return false; }   // 真损坏/打开失败
+        catch (SqliteException ex) when (TelemetryService.IsBusyCode(ex.SqliteErrorCode)) { /* 锁冲突:重试 */ }
+        catch (SqliteException ex) when (IsCorruptCode(ex.SqliteErrorCode)) { return DbHealth.Corrupt; }
+        catch { return DbHealth.Unavailable; }
     }
-    return false;
+    return sawNonOk ? DbHealth.Corrupt : DbHealth.Unavailable;
+}
+
+// ══════════ 本地滚动备份（每天一份）══════════
+// 为什么是备份而不是加密:个人库最现实的丢失原因是程序自身或误操作,不是被偷。
+// 2026-08-30 那两次完整性自愈就是例子——除了留档之外当时没有任何兜底。
+// 用 VACUUM INTO 而不是裸文件复制:WAL 模式下直接拷 .db 可能拿到不一致的状态。
+// 全程静默失败:备份是附加值,绝不因为它挡住启动。
+static string BackupsDir() => Path.Combine(dataDir, "backups");
+const int BackupKeepDays = 7;                                  // 最多留最近 7 天
+const long BackupMaxTotalBytes = 2L * 1024 * 1024 * 1024;      // 备份目录总量上限 2 GiB
+
+static void BackupDbDaily(string dbPath)
+{
+    string tmp = "";
+    try
+    {
+        if (!File.Exists(dbPath)) return;                      // 新建库还没内容,不必备
+        string dir = BackupsDir();
+        Directory.CreateDirectory(dir);
+        string target = Path.Combine(dir, $"rss-{DateTime.Now:yyyyMMdd}.db");
+        if (File.Exists(target)) return;                       // 今天已经备过
+
+        // 先写 .tmp 再改名:中途失败不会留下一个「看起来像今天的备份」的残file
+        tmp = target + ".tmp";
+        try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+
+        using (var conn = OpenDb(dbPath))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = "VACUUM INTO @p";                  // 参数绑定,避免路径转义问题
+            c.Parameters.AddWithValue("@p", tmp);
+            c.ExecuteNonQuery();
+        }
+        File.Move(tmp, target, overwrite: true);
+        PruneBackups(dir);
+    }
+    catch (Exception ex)
+    {
+        try { if (tmp.Length > 0 && File.Exists(tmp)) File.Delete(tmp); } catch { }
+        Console.Error.WriteLine(Lang.T("Local backup skipped this time: {0}", ex.Message));
+    }
+}
+
+// 保留最近 BackupKeepDays 份;总量超限再从最旧的开始淘汰。
+// 至少保留 1 份 —— 「备份占盘」比「没有备份」好接受,而且份数本就被天数限死。
+static void PruneBackups(string dir)
+{
+    try
+    {
+        var files = new DirectoryInfo(dir).GetFiles("rss-*.db").OrderByDescending(f => f.Name).ToList();
+        for (int i = BackupKeepDays; i < files.Count; i++)
+        {
+            try { files[i].Delete(); } catch { }
+        }
+        files = new DirectoryInfo(dir).GetFiles("rss-*.db").OrderByDescending(f => f.Name).ToList();
+        long total = files.Sum(f => f.Length);
+        for (int i = files.Count - 1; i > 0 && total > BackupMaxTotalBytes; i--)
+        {
+            total -= files[i].Length;
+            try { files[i].Delete(); } catch { }
+        }
+    }
+    catch { /* 清理失败不影响本次备份 */ }
+}
+
+// 备份概况(供 simon status 展示 —— 备份找不到就等于没有备份)
+static (int Count, long Bytes, string Latest) BackupSummary()
+{
+    try
+    {
+        var di = new DirectoryInfo(BackupsDir());
+        if (!di.Exists) return (0, 0, "");
+        var files = di.GetFiles("rss-*.db").OrderByDescending(f => f.Name).ToList();
+        if (files.Count == 0) return (0, 0, "");
+        return (files.Count, files.Sum(f => f.Length), files[0].Name);
+    }
+    catch { return (0, 0, ""); }
 }
 
 // ══════════ 列出指定源的所有文章（用 ROW_NUMBER 显示编号）═══════════
@@ -5816,6 +6071,89 @@ static void SaveConfig(string dbPath, AiConfig cfg)
     var opts = new JsonSerializerOptions { WriteIndented = true };
     File.WriteAllText(ConfigPath(dbPath), JsonSerializer.Serialize(cfg, opts));
 }
+// ══════════ AI 密钥（凭据库，按数据目录 scope）══════════
+// 原先在 WebAuth.cs 里：它与 web 无关，是"AI Key 存哪、怎么读"这件事，
+// 所以放在凭据存储旁边，与 CredSet/CredGet 同一个主题。
+
+static string AiEmbeddingKeyName()
+    => "embedding_api_key_" + SimonScopeHash();
+
+static string AiLlmKeyName()
+    => "llm_api_key_" + SimonScopeHash();
+
+// 读 AI Key：优先 scope 名，回退旧全局名（兼容已配置用户）
+static string? AiKeyGet(bool embedding)
+{
+    string scoped = embedding ? AiEmbeddingKeyName() : AiLlmKeyName();
+    string legacy = embedding ? "embedding_api_key" : "llm_api_key";
+    string? v = CredGet(scoped);
+    if (!string.IsNullOrEmpty(v)) return v;
+    return CredGet(legacy);
+}
+
+static void AiKeySet(bool embedding, string value)
+{
+    CredSet(embedding ? AiEmbeddingKeyName() : AiLlmKeyName(), value);
+    try { CredSet(embedding ? "embedding_api_key" : "llm_api_key", ""); } catch { }
+}
+
+static void AiKeyClear(bool embedding)
+{
+    try { CredSet(embedding ? AiEmbeddingKeyName() : AiLlmKeyName(), ""); } catch { }
+    try { CredSet(embedding ? "embedding_api_key" : "llm_api_key", ""); } catch { }
+}
+
+
+// ══════════ CLI: sip aikey ══════════
+static void CliAiKey(string[] args)
+{
+    string sub = args.Length > 0 ? args[0].ToLowerInvariant() : "status";
+
+    if (sub is "status" or "show" or "list")
+    {
+        bool emb = !string.IsNullOrEmpty(AiKeyGet(embedding: true));
+        bool llm = !string.IsNullOrEmpty(AiKeyGet(embedding: false));
+        Console.WriteLine(Lang.T("Embedding API Key: {0}", emb ? Lang.T("set") : Lang.T("not set")));
+        Console.WriteLine(Lang.T("LLM API Key:       {0}", llm ? Lang.T("set") : Lang.T("not set")));
+        Console.WriteLine(Lang.T("Stored in OS credential store · scope: data folder {0}", SimonScopeHash()));
+        Console.WriteLine(Lang.T("You can still use sip --init for a full endpoint/model/key wizard"));
+        return;
+    }
+
+    bool embedding = sub is "set-embedding" or "clear-embedding" or "emb";
+    bool isSet = sub is "set-llm" or "set-embedding" or "llm" or "emb";
+    bool isClear = sub is "clear-llm" or "clear-embedding";
+
+    if (isClear)
+    {
+        RequireInteractiveTty("aikey clear");
+        AiKeyClear(embedding);
+        Console.WriteLine(Lang.T("{0} key cleared", embedding ? "Embedding" : "LLM"));
+        return;
+    }
+
+    if (isSet || sub is "set")
+    {
+        if (sub == "set") embedding = false;
+        RequireInteractiveTty("aikey set");
+        Console.WriteLine(Lang.T("Enter {0} API key (hidden input; press Enter to skip for local Ollama)", embedding ? "Embedding" : "LLM"));
+        string key = ReadSecret();
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            Console.WriteLine(Lang.T("Skipped"));
+            return;
+        }
+        AiKeySet(embedding, key.Trim());
+        EnsureAiPrompted();
+        Console.WriteLine(Lang.T("Saved to OS credential store (scoped by data folder)"));
+        return;
+    }
+
+    SetExit();
+    Console.WriteLine(Lang.T("Usage: sip aikey status | set-llm | set-embedding | clear-llm | clear-embedding"));
+}
+
+
 
 // ══════════ 凭据存储（系统原生凭据管理器）═══════════
 // 服务标识：固定字符串，用于在系统凭据库中区分本应用的条目
@@ -5902,7 +6240,7 @@ static async Task<float[]?> GetEmbeddingAsync(string text, AiConfig cfg, int? ar
     try
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-        string? key = CredGet("embedding_api_key");
+        string? key = AiKeyGet(embedding: true);
         if (!string.IsNullOrEmpty(key))
             client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
 
@@ -6951,7 +7289,7 @@ static async Task<string?> CallLlmAsync(string prompt, AiConfig cfg, int? articl
     bool ok = false;
     try
     {
-        string? key = CredGet("llm_api_key");
+        string? key = AiKeyGet(embedding: false);
 
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
         if (!string.IsNullOrEmpty(key))
@@ -7158,9 +7496,9 @@ static void InitAiConfigInteractive(string dbPath)
         cfg.Embedding.Dimensions = embDim;
 
     Console.Write(Lang.T("  Embedding API key (skip with Enter for local Ollama; hidden input, stored in OS credentials) [current: {0}]: ",
-        CredHas("embedding_api_key") ? Lang.T("set") : Lang.T("not set")));
+        !string.IsNullOrEmpty(AiKeyGet(embedding: true)) ? Lang.T("set") : Lang.T("not set")));
     var embKey = ReadSecret();
-    if (!string.IsNullOrEmpty(embKey)) CredSet("embedding_api_key", embKey);
+    if (!string.IsNullOrEmpty(embKey)) AiKeySet(embedding: true, embKey);
 
     // --- LLM ---
     Console.WriteLine(Lang.T("\n[2/3] LLM service (for summaries, OpenAI-compatible format):"));
@@ -7178,7 +7516,7 @@ static void InitAiConfigInteractive(string dbPath)
 
     Console.Write(Lang.T("  LLM API key (hidden input, stored in OS credentials, Enter to skip): "));
     var llmKey = ReadSecret();
-    if (!string.IsNullOrEmpty(llmKey)) CredSet("llm_api_key", llmKey);
+    if (!string.IsNullOrEmpty(llmKey)) AiKeySet(embedding: false, llmKey);
 
     // --- 通用 ---
     Console.Write(Lang.T("\n[3/3] Default search similarity threshold (0-1, suggest 0.7; 0.5 for local bge-m3) [current: {0}]: ", cfg.Embedding.SearchThreshold));
@@ -7194,16 +7532,30 @@ static void InitAiConfigInteractive(string dbPath)
 static string ReadSecret()
 {
     var sb = new StringBuilder();
-    while (true)
+    try
     {
-        var key = Console.ReadKey(true);
-        if (key.Key == ConsoleKey.Enter) break;
-        if (key.Key == ConsoleKey.Backspace && sb.Length > 0)
+        while (true)
         {
-            sb.Length--;
-            continue;
+            var key = Console.ReadKey(true);
+            if (key.Key == ConsoleKey.Enter) break;
+            if (key.Key == ConsoleKey.Backspace && sb.Length > 0)
+            {
+                sb.Length--;
+                continue;
+            }
+            // 方向键/F 键等的 KeyChar 是 '\0'：无条件 Append 会往口令里塞 NUL，
+            // 结果是**永远校验不过、且看不出原因**（PromptSecret 已修过这个坑，这里漏了）。
+            if (key.KeyChar == '\0') continue;
+            sb.Append(key.KeyChar);
         }
-        sb.Append(key.KeyChar);
+    }
+    catch
+    {
+        // 没有控制台、或 stdin 到了 EOF 时 Console.ReadKey 会抛。
+        // 返回空串 —— 调用方的长度校验会拒绝它，**不会**设出一个没人知道的口令
+        // （2026-09-12 实测：一次自动化启动后，数据目录里出现了没人知道的 web_auth.json，
+        //  从此每次登录都被挡住。任何"从 EOF 里读出口令"的路径都必须失败关闭。）
+        return "";
     }
     Console.WriteLine();
     return sb.ToString();
@@ -7217,10 +7569,10 @@ static void ShowConfig(string dbPath)
     Console.WriteLine(Lang.T("Embedding: {0} / {1} ({2} dims)", cfg.Embedding.Provider, cfg.Embedding.Model, cfg.Embedding.Dimensions));
     Console.WriteLine(Lang.T("  endpoint: {0}", cfg.Embedding.ApiEndpoint));
     Console.WriteLine(Lang.T("  default search threshold: {0}", cfg.Embedding.SearchThreshold));
-    Console.WriteLine(Lang.T("  API Key: {0}", CredHas("embedding_api_key") ? Lang.T("set") : Lang.T("not set")));
+    Console.WriteLine(Lang.T("  API Key: {0}", !string.IsNullOrEmpty(AiKeyGet(embedding: true)) ? Lang.T("set") : Lang.T("not set")));
     Console.WriteLine(Lang.T("LLM: {0} / {1}", cfg.Llm.Provider, cfg.Llm.Model));
     Console.WriteLine(Lang.T("  endpoint: {0}", cfg.Llm.ApiEndpoint));
-    Console.WriteLine(Lang.T("  API Key: {0}", CredHas("llm_api_key") ? Lang.T("set") : Lang.T("not set")));
+    Console.WriteLine(Lang.T("  API Key: {0}", !string.IsNullOrEmpty(AiKeyGet(embedding: false)) ? Lang.T("set") : Lang.T("not set")));
     Console.WriteLine(Lang.T("Config file: {0}", ConfigPath(dbPath)));
 
     var warn = CheckDimensionMismatch(dbPath, cfg.Embedding);
@@ -7740,6 +8092,10 @@ class SipSettings
     // 孟思琳(simon)安全守护挡位:1=基础 2=严格 3=极致。
     // 默认开启、无法关闭(无 0),只能调节挡位——降挡必须交互终端
     public int SimonLevel { get; set; } = 1;
+    // Web: --start 绑定与端口；WebSetupDone 表示已完成首次交互初始化
+    public string WebHost { get; set; } = "127.0.0.1";
+    public int WebPort { get; set; } = 8777;
+    public bool WebSetupDone { get; set; } = false;
 }
 
 // Source Policy：用户确认的「处理规则」（source_policy.json）。createdBy 永远 user，AI 永不自动写。
