@@ -431,7 +431,33 @@ public partial class Program
             {
                 if (method == "GET" && impRest == "") { HandleImportDetail(res, impId); return; }
                 if (method == "GET" && impRest == "/text") { HandleImportText(req, res, impId); return; }
+                // 目录与按章读取（契约 §2.3）。前端**不许**再用 h1~h3 启发式推算目录 ——
+                // 否则"AI 说的第 3 章"和"你看到的第 3 章"会是两个不同的东西。
+                if (method == "GET" && impRest == "/toc") { HandleImportToc(res, impId); return; }
+                if (method == "GET" && impRest.StartsWith("/chapters/", StringComparison.Ordinal))
+                {
+                    HandleImportChapter(res, impId, Uri.UnescapeDataString(impRest["/chapters/".Length..]));
+                    return;
+                }
                 if (method == "GET" && impRest == "/asset") { HandleImportAsset(req, res, impId); return; }
+                // ── AI 阅读助手（划词问 AI）：契约 §5.1 / §4.5 ──
+                // 全部挂在 /api/* 认证闸门**之后**（Web.cs:341），闸门前不新增例外；
+                // 路由名是契约的一部分（§4.5「不许自拟别名」）。
+                // 四个写端点（/ask、POST /chat、两个 DELETE /chat）在 handler 里各自过 WebWriteAllowed，
+                // 挡位 ≥2 → 403 SIMON_BLOCKED；纯读端点（GET /chat*）不过闸。
+                if (method == "POST" && impRest == "/ask") { HandleAsk(req, res, impId); return; }
+                if (impRest == "/chat")
+                {
+                    if (method == "GET") { HandleChatList(res, impId); return; }
+                    if (method == "POST") { HandleChatNew(req, res, impId); return; }
+                    if (method == "DELETE") { HandleChatDeleteAll(req, res, impId); return; }
+                }
+                if (impRest.StartsWith("/chat/", StringComparison.Ordinal))
+                {
+                    string sessId = Uri.UnescapeDataString(impRest["/chat/".Length..]);
+                    if (method == "GET") { HandleChatMessages(res, impId, sessId); return; }
+                    if (method == "DELETE") { HandleChatDeleteOne(req, res, impId, sessId); return; }
+                }
                 if (method == "POST" && impRest == "/link") { HandleImportLink(res, impId); return; }
                 if (method == "GET" && impRest.StartsWith("/page/", StringComparison.Ordinal))
                 {
@@ -451,6 +477,10 @@ public partial class Program
             if (method == "POST" && path == "/api/telemetry") { HandleTelemetrySet(req, res); return; }
             if (method == "GET" && path == "/api/telemetry/export") { HandleTelemetryExport(res); return; }
             if (method == "GET" && path == "/api/config") { HandleConfig(res); return; }
+            // AI 配置（契约 §12.1-A40②）：GET 永不回显 key；POST 分级 + 端点变更审计。
+            // 默认关闭（sip_settings.json 的 AiConfigWebWrite），保持"key 只在真终端输入"的加强。
+            if (method == "GET" && path == "/api/ai/config") { HandleAiConfigGet(res); return; }
+            if (method == "POST" && path == "/api/ai/config") { HandleAiConfigSet(req, res); return; }
             if (method == "GET" && path == "/api/onboarding") { HandleOnboardingList(res); return; }
             if (method == "POST" && path == "/api/onboarding/add") { HandleOnboardingAdd(req, res); return; }
             if (method == "POST" && path == "/api/insights/interval") { HandleInsightsInterval(req, res); return; }
@@ -3186,9 +3216,15 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
     // 库里的那份不受影响。Web 走的是「字节 → 临时文件 → ImportFileCore」，
     // 与 CLI `sip --import` 完全同一条实现。
     //
-    // 电子书：**没有章节模型**。EPUB/DOCX/MOBI/TXT/MD 抽出来的是一整篇 HTML/Markdown；
-    // PDF 则从不解析文本（ReadPdfFile 只放一句占位），真正的"第 N 页"来自
-    // RenderPdfPages 的逐页栅格化。所以这里的阅读模型就是这两条，不假装有章节。
+    // 电子书：**有章节模型**（这段注释以前写的是"没有章节模型"，本轮已改 —— 它当时是对的，
+    // 现在再留着就是假的）。目录由 `Chapters` 表承载（契约 §1.2），**懒回填**：第一次有人要目录时
+    // 才按书解析一次（§1.6），EPUB 走 nav/ncx/spine，PDF 走书签树、无书签则退化成"每页一章"。
+    // 入口是两个新接口：`/api/imports/{id}/toc` 与 `/api/imports/{id}/chapters/{chapterId}`。
+    //
+    // 阅读渲染这一层**没变**：EPUB/DOCX/MOBI/TXT/MD 仍是一整篇 HTML/Markdown；
+    // PDF 仍靠 `RenderPdfPages` 逐页栅格化成图（"第 N 页"= 栅格图 + 页码定位）。
+    // 【注意】PDF 的**正文文本抽取**是产品范围问题，以契约 §1.4/§11-13 为准，别在这句里写死 ——
+    // 写成格式事实（"PDF 没有文本层"）是错的，实测非扫描件逐页有字。
 
     static void HandleImportList(HttpListenerResponse res)
     {
@@ -3208,9 +3244,16 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
                 return;
             }
             var cmd = conn.CreateCommand();
+            // 目录数量用**分组子查询 JOIN** 一次算出来，不要在循环里逐项查（那就是 N+1）。
+            // 这里**不触发回填**：列表只是"看一眼有哪些书"，不该把整个书架解析一遍。
             cmd.CommandText = @"
-                SELECT Id, Title, Link, Description, PublishDate, PageCount, LENGTH(Content)
-                FROM Items WHERE FeedId = @f ORDER BY Id DESC";
+                SELECT i.Id, i.Title, i.Link, i.Description, i.PublishDate, i.PageCount, LENGTH(i.Content),
+                       COALESCE(c.N, 0), COALESCE(c.Src, '')
+                FROM Items i
+                LEFT JOIN (
+                    SELECT ItemId, COUNT(*) AS N, MIN(Source) AS Src FROM Chapters GROUP BY ItemId
+                ) c ON c.ItemId = i.Id
+                WHERE i.FeedId = @f ORDER BY i.Id DESC";
             cmd.Parameters.AddWithValue("@f", feedId);
             using var r = cmd.ExecuteReader();
             while (r.Read())
@@ -3222,17 +3265,23 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
                 try { ext = Path.GetExtension(link).TrimStart('.').ToLowerInvariant(); } catch { }
                 long size = 0;
                 try { if (link.Length > 0 && File.Exists(link)) size = new FileInfo(link).Length; } catch { }
+                int chN = r.GetInt32(7);
+                string chSrc = r.GetString(8);
                 rows.Add(new
                 {
                     itemId = id,
                     title = r.GetString(1),
                     type = ext,
+                    kind = BookKindOf(ext),
                     size,
                     description = r.IsDBNull(3) ? "" : r.GetString(3),
                     importedAt = r.IsDBNull(4) ? "" : r.GetString(4),
                     pages = r.IsDBNull(5) ? (int?)null : r.GetInt32(5),
                     chars = r.IsDBNull(6) ? 0 : r.GetInt32(6),
-                    isPdf = ext == "pdf"
+                    isPdf = ext == "pdf",
+                    // null = 还没建目录（不是"没有目录"）。书库卡片可以据此写"未建目录"。
+                    chapters = chN > 0 ? chN : (int?)null,
+                    chaptersSource = chN > 0 && chSrc.Length > 0 ? chSrc : null
                 });
             }
         }
@@ -3334,6 +3383,95 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         return (r.GetInt64(0), r.GetString(1), link, ext, r.IsDBNull(3) ? null : r.GetInt32(3));
     }
 
+    /// <summary>chapterId 的合法形状（契约 §1.3）。服务端与前端共用一个正则，免得两边对不上。
+    /// 它的作用不只是校验：chapterId 会被当 URL 路径段、HTML data- 属性、JSON 值，
+    /// 所以「不含 / 空格 中文」是**协议**而不是风格。</summary>
+    static readonly System.Text.RegularExpressions.Regex ChapterIdRe = new(
+        @"^(epub:\d{1,5}(~[A-Za-z0-9_.:-]{1,64})?|pdf:p\d{1,6}|sec:\d{1,5})$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>GET /api/imports/{id}/toc —— 与 CLI `--toc --json` 的 data **逐字段相同**（契约 §2.3）。
+    /// 目录不依赖 AI：没有 ai_config.json / 没有 Key 也照常 200（I2）。</summary>
+    static void HandleImportToc(HttpListenerResponse res, int itemId)
+    {
+        // 先用 ImportItemInfo 把 itemId 钉在本地导入源上（审计约束 #5）：
+        // 只按 Items.Id 查的话，RSS 文章的 id 就能被拿来探文件路径。
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        var t = OpenToc(webDbPath, itemId);
+        if (!t.Ok)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = t.Code, message = t.Message } });
+            return;
+        }
+        // 抽取失败 + 一条章节都没有 → 404 NO_CHAPTERS（契约 §3.6：不许"成功返回空目录"）。
+        // 但若库里**已有**目录、只是这次刷新失败，就照常 200 并把 chaptersError 带上（§1.6）。
+        if (t.ErrCode != null && t.Chapters.Count == 0)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "NO_CHAPTERS", message = t.ErrMsg ?? ChapterErrorText(t.ErrCode) } });
+            return;
+        }
+        WriteJson(res, 200, new { success = true, data = TocPayload(webDbPath, itemId, t.Backfilled, t.ErrCode, t.ErrMsg) });
+    }
+
+    /// <summary>GET /api/imports/{id}/chapters/{chapterId} —— 单章正文（契约 §2.3）。
+    /// 跳章、引用 chip、AI 的"本章层"材料**都走这一条**，
+    /// 保证"你看到的"和"AI 读到的"是同一份文本。</summary>
+    static void HandleImportChapter(HttpListenerResponse res, int itemId, string chapterId)
+    {
+        // 审计约束 #4：非法 chapterId 一律 400，不得 500，也不得把 ex.Message 回给前端。
+        // 这里直接按契约正则拒掉，连数据库都不用碰。
+        if (chapterId.Length > 200 || !ChapterIdRe.IsMatch(chapterId))
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_ARGUMENT", message = "invalid chapterId" } });
+            return;
+        }
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        var t = OpenToc(webDbPath, itemId);
+        if (!t.Ok || t.Chapters.Count == 0)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "NO_CHAPTERS", message = ChapterErrorText(t.ErrCode ?? "NO_CHAPTERS") } });
+            return;
+        }
+        var ch = FindChapter(t.Chapters, chapterId);
+        if (ch == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "CHAPTER_NOT_FOUND", message = $"no such chapter: {chapterId}" } });
+            return;
+        }
+        var book = ImportBookOf(webDbPath, itemId);
+        var b = book ?? default;
+        var slice = ReadChapterContent(itemId, ch, t.Chapters, b.Link ?? "", b.Ext ?? "", b.Content ?? "");
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                chapterId = ch.ChapterId,
+                ord = ch.Ord,
+                title = ch.Title,
+                kind = ch.Kind,
+                source = ch.Source,
+                // 同源：text = StripHtml(html)。两个长度体系会让"AI 读到的"和"你看到的"差一截。
+                html = slice?.Html ?? "",
+                text = slice?.Text ?? "",
+                charCount = slice?.CharCount ?? 0,
+                pageStart = ch.PageStart,
+                pageEnd = ch.PageEnd,
+                textAvailable = slice != null,
+            }
+        });
+    }
+
     static void HandleImportDetail(HttpListenerResponse res, int itemId)
     {
         var info = ImportItemInfo(itemId);
@@ -3351,6 +3489,9 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         }
         long size = 0;
         try { if (File.Exists(v.Link)) size = new FileInfo(v.Link).Length; } catch { }
+        // 目录摘要：**只读**，不触发回填（契约 §2.3）。null = 还没建目录 ——
+        // 界面靠它把"还没建"和"这本书没有目录"分开说。
+        var chSum = ChapterSummary(webDbPath, itemId);
         WriteJson(res, 200, new
         {
             success = true,
@@ -3360,10 +3501,13 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
                 title = v.Title,
                 feedId = v.FeedId,
                 type = v.Ext,
+                kind = BookKindOf(v.Ext),
                 size,
                 pages,
                 isPdf = v.Ext == "pdf",
-                file = Path.GetFileName(v.Link)
+                file = Path.GetFileName(v.Link),
+                chapters = chSum.Count > 0 ? chSum.Count : (int?)null,
+                chaptersSource = chSum.Source
             }
         });
     }
@@ -3511,19 +3655,25 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
     static void HandleImportDelete(HttpListenerResponse res, int itemId)
     {
         if (!WebWriteAllowed(res, "import")) return;
-        var (ok, code, message) = ImportItemDelete(itemId, webDbPath);
+        var (ok, code, message, chats) = ImportItemDelete(itemId, webDbPath);
         if (!ok)
         {
             WriteJson(res, code == "ITEM_NOT_FOUND" ? 404 : 400, new { success = false, error = new { code, message } });
             return;
         }
-        WriteJson(res, 200, new { success = true, data = new { itemId, deleted = true } });
+        // kept:true 是**有意**的：删书不删对话，界面要明说一句，
+        // 否则用户会遇到"删本书把我聊天记录也删了"这种惊吓（契约 §1.7）
+        WriteJson(res, 200, new { success = true, data = new { itemId, deleted = true, chat = new { sessions = chats, kept = true } } });
     }
 
     // 删除一个导入项（CLI 的 `--import-rm` 与 Web 的 DELETE 共用）：
     // 删库里的行 + 删落地的那份文件；assets/<guid>/ 不删（可能被别的项共享，
     // 且它只是一堆图，留着比误删安全）。
-    static (bool Ok, string Code, string Message) ImportItemDelete(long realId, string dbPath)
+    // Chapters 必须**连坐**（契约 §1.7）：它是派生数据，书没了目录就没有意义，
+    // 留着还会让"重新导入同一本书"读到上一次的章节。
+    // 对话历史**不连坐**：删的是"库里的文件"，不是"你跟 AI 说过的话"；
+    // 所以把会话数带回去，让界面能明说一句"聊天记录还在"。
+    static (bool Ok, string Code, string Message, int ChatSessions) ImportItemDelete(long realId, string dbPath)
     {
         string link = "";
         bool imported;
@@ -3535,12 +3685,13 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
                 SELECT i.Link, f.FeedUrl FROM Items i JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id";
             c.Parameters.AddWithValue("@id", realId);
             using var r = c.ExecuteReader();
-            if (!r.Read()) return (false, "ITEM_NOT_FOUND", Lang.T("Article {0} not found", realId));
+            if (!r.Read()) return (false, "ITEM_NOT_FOUND", Lang.T("Article {0} not found", realId), 0);
             link = r.IsDBNull(0) ? "" : r.GetString(0);
             imported = (r.IsDBNull(1) ? "" : r.GetString(1)) == "local://import";
         }
-        if (!imported) return (false, "NOT_IMPORTED", Lang.T("Article {0} is not an imported file", realId));
+        if (!imported) return (false, "NOT_IMPORTED", Lang.T("Article {0} is not an imported file", realId), 0);
 
+        int chats = ChatSessionCount(realId);
         if (link.Length > 0 && File.Exists(link))
         {
             try { File.Delete(link); } catch { }
@@ -3549,11 +3700,12 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         {
             conn.Open();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+            // 目录跟着书走；对话不跟着走（在另一个库里，根本不在这个连接上）
+            cmd.CommandText = "DELETE FROM Chapters WHERE ItemId = @id; DELETE FROM Items WHERE Id = @id;";
             cmd.Parameters.AddWithValue("@id", realId);
             cmd.ExecuteNonQuery();
         }
-        return (true, "", "");
+        return (true, "", "", chats);
     }
 
     // ══════════ 导入原文件：浏览器直接打开 + 临时链接 ══════════

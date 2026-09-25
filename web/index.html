@@ -107,6 +107,8 @@ a:hover{text-decoration:underline}
 .top h1{margin:0;flex:1;font-size:14px;font-weight:550;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ib{width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted)}
 .ib:hover{background:var(--elev);color:var(--ink)}
+.ib:disabled{opacity:.35;cursor:default}
+.ib:disabled:hover{background:none;color:var(--muted)}
 .ib.on{color:var(--accent);background:var(--accent-soft)}
 .prog{height:2px;margin:0 18px;background:var(--line);border-radius:99px;overflow:hidden}
 .prog i{display:block;height:100%;width:0;background:var(--accent);transition:width .12s linear}
@@ -372,6 +374,114 @@ table.dt th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.08
   .h2{font-size:21px}
   .rt-bar .sep{display:none}
 }
+
+/* ══════════ AI 阅读助手（划词问 AI）· 悬浮球 + 对话面板 ══════════
+   位置/尺寸对齐交互基准 docs/草稿-AI阅读悬浮球.html：球 52px、距边 26px、accent 底。
+   两条硬约束在这里同样成立：无内联脚本、无内联事件属性（全走 data-act 委托）。 */
+#aiOrb{
+  position:fixed;right:26px;bottom:26px;width:52px;height:52px;border-radius:50%;
+  border:1px solid var(--line2);background:var(--accent);color:#fff;
+  box-shadow:0 10px 26px rgba(0,0,0,.22);cursor:grab;touch-action:none;
+  display:grid;place-items:center;z-index:120;transition:transform .18s var(--ease);
+}
+#aiOrb:hover{transform:scale(1.06)}
+#aiOrb:active{cursor:grabbing}
+#aiOrb svg{width:24px;height:24px}
+#aiOrb .dot{
+  position:absolute;top:-2px;right:-2px;min-width:17px;height:17px;border-radius:999px;
+  background:var(--bad);color:#fff;font-size:10.5px;display:none;place-items:center;padding:0 4px;
+}
+#aiOrb.has .dot{display:grid}
+#aiOrb.pulse{animation:aiPulse 1.6s infinite}
+@keyframes aiPulse{0%{box-shadow:0 0 0 0 var(--accent-soft)}70%{box-shadow:0 0 0 12px transparent}100%{box-shadow:0 0 0 0 transparent}}
+#aiTip{
+  position:fixed;right:26px;z-index:119;background:var(--elev);border:1px solid var(--line2);
+  border-radius:999px;padding:5px 12px;font-size:12px;color:var(--muted);box-shadow:var(--shadow);
+  opacity:0;transform:translateY(6px);transition:.2s var(--ease);pointer-events:none;
+}
+#aiTip.on{opacity:1;transform:translateY(0)}
+
+#aiPanel{
+  position:fixed;top:0;right:0;bottom:0;width:422px;max-width:100vw;z-index:130;
+  background:var(--elev);border-left:1px solid var(--line);box-shadow:var(--shadow);
+  display:flex;flex-direction:column;transform:translateX(103%);transition:transform .26s var(--ease);
+}
+#aiPanel.on{transform:translateX(0)}
+@media (max-width:900px){
+  #aiPanel{top:auto;left:0;width:auto;height:78vh;border-left:0;border-top:1px solid var(--line);
+    border-radius:16px 16px 0 0;transform:translateY(103%)}
+  #aiPanel.on{transform:translateY(0)}
+}
+.ai-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.ai-h .t{flex:1;min-width:0}
+.ai-h .t b{display:block;font-family:var(--serif);font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ai-h .t span{font-size:11.5px;color:var(--muted)}
+.ai-meta{display:flex;flex-wrap:wrap;gap:5px;padding:9px 14px 0}
+.ai-msgs{flex:1;overflow:auto;padding:12px 14px 4px}
+.ai-m{margin-bottom:14px;display:flex;flex-direction:column;gap:6px}
+.ai-m.u{align-items:flex-end}
+.ai-q{background:var(--accent-soft);color:var(--ink);border-radius:12px 12px 3px 12px;padding:8px 12px;max-width:88%;font-size:13.5px;white-space:pre-wrap}
+.ai-a{font-family:var(--serif);font-size:15.2px;line-height:1.82}
+.ai-a p{margin:0 0 .7em}
+.ai-a blockquote{margin:0 0 .8em;padding:2px 0 2px 12px;border-left:2px solid var(--line2);color:var(--muted);font-size:14.4px}
+.ai-a b{color:var(--ink)}
+.ai-cur{display:inline-block;width:7px;height:15px;background:var(--accent);vertical-align:-2px;animation:aiBlink .9s steps(1) infinite}
+@keyframes aiBlink{50%{opacity:0}}
+.ai-cites{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.ai-chip{
+  border:1px solid var(--line2);background:var(--soft);color:var(--accent);border-radius:999px;
+  font:inherit;font-size:11.5px;padding:3px 10px;cursor:pointer;transition:.15s var(--ease);
+}
+.ai-chip:hover{background:var(--accent-soft);border-color:var(--accent)}
+.ai-why{font-size:11px;color:var(--faint);margin-top:3px}
+.ai-why summary{cursor:pointer;list-style:none}
+.ai-why summary::-webkit-details-marker{display:none}
+.ai-why pre{margin:6px 0 0;white-space:pre-wrap;font-size:10.5px;color:var(--muted)}
+.ai-sel{display:flex;gap:8px;align-items:flex-start;margin:0 14px 8px;padding:8px 10px;background:var(--soft);
+  border-left:2px solid var(--accent);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+.ai-sel .q{font-family:var(--serif);font-size:12.6px;line-height:1.6;color:var(--muted);flex:1;max-height:62px;overflow:auto}
+.ai-sel button{border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:14px;line-height:1}
+.ai-inp{display:flex;gap:8px;padding:10px 14px 14px;border-top:1px solid var(--line)}
+.ai-inp textarea{
+  flex:1;resize:none;height:42px;max-height:120px;border:1px solid var(--line2);border-radius:var(--radius-sm);
+  background:var(--bg);color:var(--ink);font:inherit;font-size:13.5px;padding:10px 11px;
+}
+.ai-inp textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.ai-hint{font-size:11.5px;color:var(--faint);padding:0 14px 10px}
+.ai-empty{font-size:12.6px;color:var(--muted);line-height:1.8}
+/* ── 会话切换（同一个阅读项下会有多个会话）── */
+.ai-sessbtn{border:1px solid transparent;cursor:pointer;font:inherit;font-size:11px;padding:2px 8px;border-radius:999px;
+  background:var(--soft);color:var(--muted)}
+.ai-sessbtn:hover{border-color:var(--line2);color:var(--ink)}
+.ai-sessbtn.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}
+.ai-sess{max-height:190px;overflow:auto;padding:8px 14px 4px;border-bottom:1px solid var(--line);
+  display:flex;flex-direction:column;gap:5px}
+.ai-sess[hidden]{display:none}
+.ai-sess-empty{font-size:11.5px;color:var(--faint);padding:2px 0 6px}
+button.ai-sess{display:flex;flex-direction:column;gap:2px;align-items:flex-start;width:100%;text-align:left;
+  border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg);color:var(--ink);
+  font:inherit;padding:7px 9px;cursor:pointer;transition:.15s var(--ease);height:auto;max-height:none}
+button.ai-sess:hover{border-color:var(--accent)}
+button.ai-sess.on{background:var(--accent-soft);border-color:var(--accent)}
+button.ai-sess .t{font-size:12.4px;font-family:var(--serif);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+button.ai-sess .m{font-size:10.5px;color:var(--faint)}
+/* ── AI 配置面板（契约 §12.1-A40②）── 盖在对话之上的整页层，不另开窗口 */
+.ai-cfg{position:absolute;inset:0;background:var(--elev);display:flex;flex-direction:column;z-index:2}
+.ai-cfg[hidden]{display:none}
+.ai-cfg-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.ai-cfg-h b{flex:1;font-family:var(--serif);font-size:14.5px;font-weight:600}
+.ai-cfg-body{flex:1;overflow:auto;padding:14px}
+.ai-f{margin-bottom:13px}
+.ai-f label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:4px}
+.ai-f input[type=text],.ai-f input[type=password]{
+  width:100%;box-sizing:border-box;border:1px solid var(--line2);border-radius:var(--radius-sm);
+  background:var(--bg);color:var(--ink);font:inherit;font-size:13px;padding:8px 10px;
+}
+.ai-f input:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.ai-f .sub{font-size:10.5px;color:var(--faint);margin-top:4px;line-height:1.6}
+.ai-cfg-warn{background:var(--accent-soft);border-left:2px solid var(--accent);border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+  padding:8px 10px;font-size:11.5px;line-height:1.65;color:var(--ink);margin-bottom:13px}
+.ai-cfg-acts{display:flex;gap:8px;padding-top:4px}
 </style>
 </head>
 <body>
@@ -504,6 +614,51 @@ table.dt th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.08
      正文只被顶上那一行细条占掉 —— 见 .rd-bar / .rd-drawer 的注释。 -->
 <div class="rd-scrim" id="rdScrim" hidden></div>
 <aside class="rd-drawer" id="rdDrawer" hidden></aside>
+
+<!-- ══════════ AI 阅读助手（划词问 AI）══════════
+     一个可拖动的圆形悬浮球 + 一个对话面板。位置/尺寸对齐交互基准
+     docs/草稿-AI阅读悬浮球.html（52px / 距边 26px / accent 底 / 位置存 localStorage）。
+     只在阅读页（文章或电子书）出现 —— 别的时候它没有"这段"可指。
+     无内联事件属性：全部走 app.js 里的 data-act 委托。 -->
+<button id="aiOrb" data-act="ai-open" title="问问 AI（可拖动）" aria-label="问问 AI" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12a8 8 0 0 1-8 8H7l-4 3 1.2-4.2A8 8 0 1 1 21 12z"/><path d="M9 11h6M9 14h4"/>
+  </svg>
+  <span class="dot" id="aiOrbDot">问</span>
+</button>
+<div id="aiTip">划词问问 AI →</div>
+
+<section id="aiPanel" aria-label="AI 阅读助手">
+  <div class="ai-h">
+    <div class="t"><b id="aiTitle">—</b><span id="aiPos">—</span></div>
+    <button class="ib" data-act="ai-new" title="新会话（换一本书会自动新建）">↺</button>
+    <button class="ib" data-act="ai-cfg" id="aiCfg" title="配置 AI（端点 / 模型 / API Key）">⚙</button>
+    <button class="ib" data-act="ai-del" id="aiDel" title="删除这本书的聊天记录（不可恢复）">🗑</button>
+    <button class="ib" data-act="ai-close" title="关闭（Esc）">✕</button>
+  </div>
+  <div class="ai-meta" id="aiMeta"></div>
+  <div class="ai-sess" id="aiSess" hidden></div>
+  <div class="ai-msgs" id="aiMsgs"></div>
+  <div class="ai-sel" id="aiSel" hidden>
+    <div class="q" id="aiSelText"></div>
+    <button data-act="ai-sel-clear" title="去掉这段引用">✕</button>
+  </div>
+  <div class="ai-inp">
+    <textarea id="aiQ" placeholder="问点什么…（划词后打开会自动带上你选的那段）"></textarea>
+    <button class="btn pri" data-act="ai-send" id="aiSend">发送</button>
+  </div>
+  <div class="ai-hint" id="aiHint">Enter 发送 · Shift+Enter 换行 · 引用可以点，直接跳到对应章节</div>
+
+  <!-- AI 配置（契约 §12.1-A40②）。默认由 sip_settings.json 的 AiConfigWebWrite 关着；
+       关着时这里显示的是"去终端配"的说明，而不是一个点了就报错的表单。 -->
+  <div class="ai-cfg" id="aiCfgBox" hidden>
+    <div class="ai-cfg-h">
+      <b id="aiCfgTitle">AI 配置</b>
+      <button class="ib" data-act="ai-cfg-close" title="返回对话">✕</button>
+    </div>
+    <div class="ai-cfg-body" id="aiCfgBody"></div>
+  </div>
+</section>
 
 <script src="/app.js" defer></script>
 </body>

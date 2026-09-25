@@ -113,6 +113,7 @@ async function applyLang() {
 async function setLang(code) {
   state.lang = ["zh-CN", "en-US", "zh-Moe"].includes(code) ? code : "zh-CN";
   await applyLang();
+  aiSyncText();                    // 新界面的文案也要跟着语言走，别单独掉队
   render();
   toast(state.lang === "en-US" ? "Language: English" : state.lang === "zh-Moe" ? "语言：zh-Moe（卖萌）" : "语言：简体中文");
 }
@@ -1259,6 +1260,8 @@ function syncChrome() {
   const pg = $("rtPager"); if (pg) pg.classList.toggle("on", !!state.paged);
   // 全屏阅读只在阅读类视图里成立；离开阅读就自动退出，免得回到列表时没有导航
   if (!isRead && state.immersive) setImmersive(false);
+  // 悬浮球只在阅读页出现；顺带把"换书 = 换会话"的作废逻辑跑一遍
+  aiSyncOrb();
 }
 
 /* ── 全屏阅读（沉浸）模式 ──
@@ -1412,6 +1415,10 @@ async function render() {
     const vq = state.articleVersion ? `?version=${state.articleVersion}` : "";
     try { real = await api(`/api/articles/${id}${vq}`); } catch (e) { real = null; }
     if (!real) { v.innerHTML = `<div class="empty">这篇文章读不到（可能已被删除，或接口不可用）</div>`; return; }
+    // 记下标题：AI 面板要拿它当标题（articleId -> 标题的映射这里最省事，
+    // 见 aiTitleOf 的注释）。**不要**在这里顺手算"有没有正文"——那件事的判据归服务端，
+    // 前端猜一份必然漂移（踩过：猜的字段名跟 bodyHtml 对不上，把好文章判成没正文）。
+    state.articleTitle = real.title || "";
 
     // 本地导入的文件**一律交给阅读器**：那边按"节"分页（整本书一次排版会把浏览器卡死）、
     // 图片也改写好路径。文章视图对整本书分不了页（只能退回滚动，于是"左栏读到底、
@@ -2245,6 +2252,24 @@ document.addEventListener("click", async (e) => {
   const act = hit.dataset.act;
   const id = +hit.dataset.id || 0;
   switch (act) {
+    /* AI 阅读助手（划词问 AI）—— 见文件末尾那一节 */
+    case "ai-open": aiOpen(); return;
+    case "ai-close": aiClose(); return;
+    case "ai-send": aiSend(); return;
+    case "ai-new":
+      AI.messages = []; AI.sessionId = null; AI.lastCites = []; AI.sel = ""; aiSyncSel(); aiRenderPanel(); return;
+    case "ai-del": aiDelete(); return;
+    case "ai-cfg": aiCfgOpen(); return;
+    case "ai-cfg-close": aiCfgClose(); return;
+    case "ai-cfg-save": await aiCfgSave(hit); return;
+    case "ai-sess-toggle":
+      AI.sessionListOpen = !AI.sessionListOpen; aiRenderPanel(); return;
+    case "ai-switch":
+      await aiSwitchSession(hit.dataset.sid || ""); return;
+    case "ai-sel-clear":
+      AI.sel = ""; aiSyncSel(); $("aiOrb")?.classList.remove("has", "pulse"); return;
+    case "ai-cite":
+      aiJumpTo(hit.dataset.id || "", +hit.dataset.page || 0); return;
     case "nav": navTo(hit.dataset.v); return;
     case "nav-feed": state.view = "feed"; state.feedId = id; render(); return;
     case "tab": state.tab = hit.dataset.tab; render(); return;
@@ -2382,6 +2407,16 @@ document.addEventListener("change", (e) => {
 
 /* 命令面板键盘：↑↓ 选择、Enter 执行、Esc 关闭；Ctrl/Cmd+K 打开 */
 document.addEventListener("keydown", (e) => {
+  // ── AI 对话面板优先接管键盘 ──
+  // 面板开着时，用户在**打字**：Esc 该关面板、Enter 该发送，
+  // 而"F 切全屏 / Esc 关抽屉"这些阅读快捷键**不能**顺手触发 ——
+  // 否则打一句问句就会被切掉半屏。所以这里先处理、并直接 return。
+  if ($("aiPanel")?.classList.contains("on")) {
+    if (e.key === "Escape") { aiClose(); e.preventDefault(); return; }
+    if (e.target && e.target.id === "aiQ") {
+      if (e.key === "Enter" && !e.shiftKey) { aiSend(); e.preventDefault(); return; }
+    }
+  }
   const pal = $("pPalette");
   if (pal && !pal.hidden) {
     if (e.key === "Escape") { closePalette(); e.preventDefault(); return; }
@@ -2584,5 +2619,724 @@ applyLang().then(() => {
   restorePrefs();
   loadReadingProgress();
   render();
+  aiInitOrb();          // 悬浮球：拖动位置 + 划词监听（见文件末尾那一节）
 });
 loadRealData();
+
+/* ══════════════════════════════════════════════════════════════════
+   AI 阅读助手（划词问 AI）· 前端
+   ══════════════════════════════════════════════════════════════════
+   交互基准：docs/草稿-AI阅读悬浮球.html（用户点过并认可的那张草图）。
+   服务端：AiReading.cs（路由注册在 Web.cs 的 imports 段）。
+
+   三条纪律，和站内其它地方同源：
+   · **无内联脚本 / 无内联事件属性** —— CSP 是 script-src 'self'，
+     所有动作走 data-act + 文件中部那个唯一的委托监听器。
+   · **划词段只活一轮**（契约 §7）：每次发送取"当下"的选区快照带走；
+     发完就清，绝不让上一轮的选区被下一轮复用 —— 否则会出现
+     "拿旧段落答新问题"这种最典型的答非所问。
+   · **引用跳不回去就不显示**（契约 I4）：服务端已经保证 chapterId 可回查，
+     前端只负责把它变成一次真实的跳转。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 会话按书隔离：换书 = 换会话（服务端也会用 SESSION_BOOK_MISMATCH 拦） */
+const AI = {
+  itemId: null,        // 当前阅读的 item（文章或电子书都算；契约 §12.1-A40①）
+  isArticle: false,    // 这一项是 RSS 文章（不是本地导入的书）—— 决定引用指向什么
+  sessionId: null,
+  messages: [],        // { role:"user"|"assistant", text, cites:[], snapshot:{} }
+  sel: "",             // 本轮的划词快照
+  anchor: null,        // 本轮的位置锚点
+  busy: false,
+  deleting: false,     // 删除进行中：防重复点击（服务端是硬删，点两次没意义）
+  lastCites: [],
+  sessions: [],        // 当前阅读项下的全部会话（换会话用；服务端 /chat 一直返回，之前被丢掉了）
+  sessionListOpen: false,
+};
+
+/* ───────── 位置：悬浮球 ─────────
+   位置存 localStorage：刷新后还在原地（草稿里的行为）。
+   拖动阈值 4px 用来区分"点一下"和"拖一下" —— 不然想拖动就总会误开面板。 */
+function aiInitOrb() {
+  const orb = $("aiOrb");
+  if (!orb) return;
+  aiSyncText();                    // 界面文案跟当前语言对齐
+  try {
+    const p = JSON.parse(localStorage.getItem("sip-ai-orb") || "null");
+    if (p && typeof p.r === "number") { orb.style.right = p.r + "px"; orb.style.bottom = p.b + "px"; }
+  } catch { }
+
+  let drag = null;
+  orb.addEventListener("pointerdown", (e) => {
+    const cs = getComputedStyle(orb);
+    drag = { x: e.clientX, y: e.clientY, r: parseFloat(cs.right) || 26, b: parseFloat(cs.bottom) || 26, moved: false };
+    try { orb.setPointerCapture(e.pointerId); } catch { }
+  });
+  orb.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+    const r = Math.min(Math.max(6, drag.r - dx), window.innerWidth - 62);
+    const b = Math.min(Math.max(6, drag.b - dy), window.innerHeight - 62);
+    orb.style.right = r + "px"; orb.style.bottom = b + "px";
+  });
+  orb.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const moved = drag.moved; drag = null;
+    try {
+      localStorage.setItem("sip-ai-orb", JSON.stringify({
+        r: parseFloat(orb.style.right) || 26, b: parseFloat(orb.style.bottom) || 26,
+      }));
+    } catch { }
+    // 拖动只是移动它，不该顺手打开面板 —— 这是"抓起来挪个地方"的常见误触
+    if (!moved) aiOpen();
+  });
+
+  // 划词：只在正文里认（.pager .prose，与分页器同一个选择器），太短的不算
+  document.addEventListener("selectionchange", () => {
+    if (!aiOrbVisible()) return;
+    const s = String(window.getSelection() || "").trim();
+    const n = window.getSelection()?.anchorNode;
+    const inProse = !!(n && n.parentElement && n.parentElement.closest(".pager .prose"));
+    if (!inProse || s.length < 2) return;
+    AI.sel = s.replace(/\s+/g, " ").slice(0, 1500);   // 与服务端 AskSelectionChars 对齐
+    const tip = $("aiTip"), orbEl = $("aiOrb");
+    if (orbEl) { orbEl.classList.add("has", "pulse"); const d = $("aiOrbDot"); if (d) d.textContent = "问"; }
+    if (tip) {
+      tip.classList.add("on");
+      const r = $("aiOrb")?.getBoundingClientRect();
+      if (r) tip.style.bottom = (window.innerHeight - r.top + 10) + "px";
+      clearTimeout(tip._t); tip._t = setTimeout(() => tip.classList.remove("on"), 2600);
+    }
+    aiSyncSel();
+  });
+}
+
+/** 悬浮球只在阅读页出现 —— 别的时候没有"这段"可指。 */
+function aiOrbVisible() {
+  const id = AI.itemId;
+  return !!id && (state.view === "article" || state.view === "ebook");
+}
+
+/** 界面文案走 t()（键=英文原文，与 Lang.T 同一批键）。
+    理由：站内**只有一个**语言开关，新界面若把中文写死，切到英文/zh-Moe 时
+    它会单独掉队 —— 这正是"同一句话在两处各写一份"的变体。
+    缺键时 t() 回落成键本身（英文），所以这里传空串让它保持元素里已有的中文。 */
+function aiSyncText() {
+  const T = (k) => { const v = t(k); return v === k ? "" : v; };
+  const set = (id, v) => { const el = $(id); if (el && v) el.textContent = v; };
+  const orb = $("aiOrb");
+  if (orb) { const v = T("Ask AI (draggable)"); if (v) { orb.title = v; orb.setAttribute("aria-label", v); } }
+  set("aiTip", T("Select text and ask AI →"));
+  set("aiSend", T("Send") || "发送");
+  const panel = $("aiPanel");
+  if (panel) { const v = T("AI reading assistant"); if (v) panel.setAttribute("aria-label", v); }
+  const q = $("aiQ");
+  if (q) { const v = T("Ask about this passage… (selecting text first fills it in)"); if (v) q.placeholder = v; }
+  const hint = $("aiHint");
+  if (hint) { const v = T("Enter to send · Shift+Enter for a new line · citations are clickable"); if (v) hint.textContent = v; }
+  // 面板里的三个图标按钮靠 title 表达含义。
+  // ⚠ 必须按 data-act 找，不能用下标 —— 下标会在加/减按钮时静静错位（把"关闭"的
+  // 文案贴到"删除"上，而且不报错）。这里就是踩过一次的地方。
+  const hv = (act, k) => { const el = $("aiPanel")?.querySelector(`.ai-h .ib[data-act="${act}"]`); if (el) { const v = T(k); if (v) el.title = v; } };
+  hv("ai-new", "New chat");
+  hv("ai-del", "Delete this book's chat history (cannot be undone)");
+  hv("ai-cfg", "AI settings");
+  hv("ai-close", "Close (Esc)");
+  const clr = $("aiPanel")?.querySelector(".ai-sel button");
+  if (clr) { const v = T("Drop this passage"); if (v) clr.title = v; }
+}
+
+/** 每次 render 之后调用：同步球的显隐、标题、位置标签。 */
+function aiSyncOrb() {
+  // 换书/换文章就换会话：AI.sessionId 属于上一项时直接作废（服务端也会拦）
+  // 契约 §12.1-A40①：会话的粒度是**阅读项** —— 本地导入的书和 RSS 文章都算，
+  // 所以文章视图下 itemId 就是 articleId（这与"文章不是导入项"曾经冲突，
+  // 那段历史见 app.js 里 aiSend 的注释：曾经这里把文章 id 发给 /ask 换回 404）。
+  const id = (state.view === "article") ? state.articleId
+    : (state.view === "ebook") ? state.ebookId : null;
+  AI.isArticle = state.view === "article";
+  if (id !== AI.itemId) { AI.sessionId = null; AI.messages = []; AI.lastCites = []; AI.sel = ""; }
+  AI.itemId = id;
+  const orb = $("aiOrb");
+  if (orb) orb.hidden = !aiOrbVisible();
+  if (!aiOrbVisible()) aiClose();
+  aiSyncSel();
+  if ($("aiPanel")?.classList.contains("on")) aiRenderPanel();
+}
+
+/** 当前位置（给面板标题用）：电子书给"第 N 章 · 章名"或"第 N 页"，文章给"本文"。 */
+function aiWhereNow() {
+  if (state.view === "ebook") {
+    const m = state.ebookMeta || {};
+    if (m.isPdf) return `第 ${state.ebookPage || 1} 页`;
+    const secs = state.ebookText?.sections || [];
+    const i = state.ebookText?.section ?? 0;
+    const s = secs[i];
+    // ⚠ 单位是「节」不是「章」，这是刻意的（§12.1-A45③）。
+    // 这里的序号来自**前端自己的切节**（按 h1~h3 / 每 12000 字），
+    // 与数据库 `Chapters` 的 `Ord` **不是一回事**。以前显示成"第 N 章"，
+    // 于是出现"面板说第 1 章、你其实在读第 3 章（正文一）"这种自相矛盾的读数 ——
+    // 位置标签不能把"切割序号"冒充成"章节号"。
+    return s?.title ? `第 ${i + 1} 节 · ${s.title}` : `第 ${i + 1} 节`;
+  }
+  return "本文";
+}
+
+/** 当前阅读项的标题。文章用加载时存下的 real.title，书用 ebookMeta.title。
+    为什么不从 ARTICLES 里找：那样要先知道 feedId，而文章视图手上只有 articleId
+    （§2.1 那套"编号双轨"的坑就在这儿）。加载文章时顺手存一份最省事也最不容易错。 */
+function aiTitleOf() {
+  if (state.view === "ebook") return state.ebookMeta?.title || "";
+  if (state.view === "article") return state.articleTitle || "";
+  return "";
+}
+
+/* ───────── 面板 ───────── */
+function aiOpen() {
+  if (!aiOrbVisible()) return;
+  const p = $("aiPanel"), orb = $("aiOrb");
+  if (!p) return;
+  p.classList.add("on");
+  if (orb) orb.classList.remove("has", "pulse");
+  aiSyncText();
+  aiSyncSel();
+  aiRenderPanel();
+  // 已有历史就拉回来（按书保存 —— 刷新/重开浏览器不该丢）
+  if (!AI.messages.length) aiLoadHistory().then(() => aiRenderPanel()).catch(() => { });
+  setTimeout(() => $("aiQ")?.focus(), 260);
+}
+
+function aiClose() { $("aiPanel")?.classList.remove("on"); }
+
+function aiSyncSel() {
+  const box = $("aiSel"), txt = $("aiSelText");
+  if (!box || !txt) return;
+  const has = !!AI.sel;
+  box.hidden = !has;
+  if (has) txt.textContent = AI.sel;
+}
+
+/** 本轮的锚点：把"我现在读到哪儿 + 我划了哪段"打包给服务端（契约 §5.1 anchor）。
+    文章的 anchor **不带 chapterId** —— 它没有章节模型（§12.1-A40①：扩的是问答，不是章节），
+    硬塞一个章节 id 只会让服务端 FindChapter 落空、白记一个 `chapter:none` 降级。
+
+    ⚠ 契约 §12.1-A45 修的就是这里。原来送的是 `secs[i].title` —— 而前端切节在无标题时
+    会兜底成「第 N 节」，服务端的 FindChapter 只认「精确 ChapterId」和「#<ord>」，
+    两者都不是 → 本章层整层为空，AI 只能回"没有可依据的资料"。
+    实测（《咸的玩笑》）：划的是 ord 3「正文一」(epub:5) 的正文，面板却报"第 1 章"。
+    现在改成送**服务端认得出的两种线索**：
+      · `chapterId = "#<节序号>"` —— FindChapter 已支持的形式（A45② 的第 2 级）
+      · `sectionLead` = 当前节开头的一段纯文本 —— 兜底定位（A45② 的第 4 级）
+    两样都不依赖"前端切节 == 服务端章节"这个不成立的假设。
+    `sel` 参数是**必须显式传进来**的划词段：调用点已经先把 `AI.sel` 清空了
+    （"划词只活一轮"），所以这个函数不能指望从全局读到它。 */
+function aiBuildAnchor(sel) {
+  const a = { locType: state.view === "ebook" ? (state.ebookMeta?.isPdf ? "page" : "chapter") : "article", ord: 0 };
+  const s = (sel !== undefined ? sel : AI.sel);
+  if (s) a.selection = s;
+  if (state.view === "ebook" && !state.ebookMeta?.isPdf) {
+    const secs = state.ebookText?.sections || [];
+    const i = state.ebookText?.section ?? 0;
+    const sec = secs[i];
+    a.chapterId = "#" + (i + 1);
+    a.ord = i + 1;
+    const lead = aiSectionLead(sec);
+    if (lead) a.sectionLead = lead;
+  }
+  return a;
+}
+
+/** 当前节开头的一段纯文本，给服务端当"内容定位"的线索（A45② 第 4 级）。
+    取的是**正文第一个有实义的文本节点之后**的 200 字，不是节首 200 字符 ——
+    节首往往是 h1 标题或图片，拿它去比正文会定位不到。 */
+function aiSectionLead(sec) {
+  if (!sec) return "";
+  try {
+    const d = document.createElement("div");
+    d.innerHTML = sec.html || "";
+    // 跳过 heading/media 这类"不是正文"的开头
+    for (const n of Array.from(d.children || [])) {
+      const tag = (n.tagName || "").toLowerCase();
+      if (/^h[1-6]$/.test(tag) || tag === "img" || tag === "figure") continue;
+      const txt = (n.textContent || "").replace(/\s+/g, " ").trim();
+      if (txt.length >= 12) return txt.slice(0, 200);
+    }
+    const all = (d.textContent || "").replace(/\s+/g, " ").trim();
+    return all.length >= 12 ? all.slice(0, 200) : "";
+  } catch { return ""; }
+}
+
+/** 把服务端返回的消息数组转成面板内部形状。
+    抽出来是因为它现在有**两个**消费者：载入当前会话、以及切换到别的会话 ——
+    两处各写一遍必然漂移（这个文件里已经踩过一次同类坑）。 */
+function aiMsgsFrom(raw) {
+  const msgs = [];
+  (raw || []).forEach((m) => msgs.push({
+    role: m.role === "user" ? "user" : "assistant",
+    text: m.text || m.content || "",
+    cites: m.cites || [], snapshot: m.snapshot || null,
+    persisted: m.persisted,
+  }));
+  return msgs;
+}
+
+async function aiLoadHistory() {
+  if (!AI.itemId) return;
+  try {
+    const d = await api(`/api/imports/${AI.itemId}/chat`);
+    // 会话列表要一直记着：面板顶部的"会话已保存"点开就是它（见 aiSessionListHtml）。
+    // 之前这个返回值里的 sessions 被丢掉了，于是"换会话"无从谈起。
+    AI.sessions = (d?.sessions || []).map((s) => ({
+      id: s.id, title: s.title || "", turnCount: s.turnCount || 0, updatedAt: s.updatedAt || "",
+    }));
+    if (d?.activeSessionId) AI.sessionId = d.activeSessionId;
+    const msgs = aiMsgsFrom(d?.messages);
+    if (msgs.length) AI.messages = msgs;
+  } catch { /* 没有历史不是错误 */ }
+}
+
+/** 切到指定会话：**只换消息，不新建**。
+    与服务端的分工：服务端会按 sessionId 校验归属（SESSION_BOOK_MISMATCH），
+    所以这里不做归属判断 —— 判断只能有一处，多了必然漂移。 */
+async function aiSwitchSession(sid) {
+  if (!sid || !AI.itemId || AI.busy) return;
+  try {
+    const d = await api(`/api/imports/${AI.itemId}/chat/${encodeURIComponent(sid)}`);
+    AI.sessionId = sid;
+    AI.messages = aiMsgsFrom(d?.messages);
+    AI.lastCites = [];
+    AI.sel = ""; aiSyncSel();
+    AI.sessionListOpen = false;
+    aiRenderPanel();
+  } catch (e) {
+    toast(e?.message || t("Could not load that chat"));
+  }
+}
+
+/** 会话列表（折叠在"会话已保存"那个徽标里）。
+    为什么要这个：同一个阅读项下会有多个会话（换一次话题就是一个），
+    而面板一次只显示一个 —— 没有切换入口的话，看起来就像"别的记录丢了"。
+    这正是用户报障时的体感（实测他的库里 itemId=2 下有 4 个会话）。 */
+function aiSessionListHtml() {
+  const list = AI.sessions || [];
+  if (!list.length) return `<div class="ai-sess-empty">${esc(t("No saved chats yet"))}</div>`;
+  return list.map((s) => {
+    const cur = s.id === AI.sessionId;
+    const when = (s.updatedAt || "").replace("T", " ").slice(5, 16);
+    return `<button class="ai-sess${cur ? " on" : ""}" data-act="ai-switch" data-sid="${esc(s.id)}"
+      title="${esc(s.title || s.id)}">
+      <span class="t">${esc(s.title || t("(untitled)"))}</span>
+      <span class="m">${s.turnCount} ${esc(t("turns"))} · ${esc(when)}</span>
+    </button>`;
+  }).join("");
+}
+
+/* 删除这本书的聊天记录。
+   契约要点（§4.5 + AiReading.cs:446）：DELETE 必须带 `?yes=1`，否则 400 CONFIRM_REQUIRED
+   ——「不可恢复」的动作不能靠一个手滑的点击完成。所以：先弹确认，再带上 yes=1。
+   删除的是**当前会话**；没有当前会话才退化成清空整本（服务端另有 DELETE /chat 端点）。
+   删完**重新拉一次**服务端状态，而不是只清本地：这样界面上剩几条就是真的剩几条。 */
+async function aiDelete() {
+  if (!AI.itemId || AI.deleting) return;
+  const sid = AI.sessionId;
+  const what = sid ? t("this chat") : t("all chats for this book");
+  if (!window.confirm(`${t("Delete")} ${what}？\n${t("This cannot be undone.")}`)) return;
+  AI.deleting = true;
+  const btn = $("aiDel"); if (btn) btn.disabled = true;
+  try {
+    const url = sid
+      ? `/api/imports/${AI.itemId}/chat/${encodeURIComponent(sid)}?yes=1`
+      : `/api/imports/${AI.itemId}/chat?yes=1`;
+    await api(url, { method: "DELETE" });
+    AI.messages = []; AI.sessionId = null; AI.lastCites = []; AI.sel = ""; aiSyncSel();
+    await aiLoadHistory();          // 以服务端为准（可能还有别的会话）
+    aiRenderPanel();
+    toast(t("Chat history deleted"));
+  } catch (e) {
+    // 403 = 挡位 ≥2 被孟思琳拦下；把服务端的话原样带出来，别自己编一句
+    toast(e?.message || t("Could not delete the chat history"));
+    if (btn) btn.disabled = false;
+  } finally { AI.deleting = false; }
+}
+
+function aiRenderPanel() {
+  const meta = $("aiMeta"), msgs = $("aiMsgs"), hint = $("aiHint");
+  const title = aiTitleOf();
+  if ($("aiTitle")) $("aiTitle").textContent = title || t("AI reading assistant");
+  if ($("aiPos")) $("aiPos").textContent = aiWhereNow();
+
+  if (meta) {
+    const bits = [];
+    // 载体徽标：文章/EPUB/PDF 三种。§12.1-A40① 之后文章也能问，所以这三个不是装饰 ——
+    // 它决定了回答里的"引用"会指向章节、页码，还是只是一篇文章。
+    const kind = state.view === "ebook" ? (state.ebookMeta?.isPdf ? "PDF" : "EPUB") : "文章";
+    bits.push(`<span class="b">${esc(kind)}</span>`);
+    bits.push(`<span class="b acc">${esc(aiWhereNow())}</span>`);
+    // 会话徽标是个**按钮**：点开就是会话列表（只有一个会话时不点也不碍事）
+    if (AI.sessionId) {
+      const n = (AI.sessions || []).length;
+      bits.push(`<button class="b ai-sessbtn${AI.sessionListOpen ? " on" : ""}" data-act="ai-sess-toggle"
+        title="${esc(t("Switch chat"))}">${esc(t("chat saved"))}${n > 1 ? ` (${n})` : ""} ▾</button>`);
+    }
+    meta.innerHTML = bits.join("");
+  }
+
+  // 会话列表：展开时插在消息区之上
+  const sessBox = $("aiSess");
+  if (sessBox) {
+    const show = !!AI.sessionListOpen && (AI.sessions || []).length > 0;
+    sessBox.hidden = !show;
+    if (show) sessBox.innerHTML = aiSessionListHtml();
+  }
+
+  if (msgs) {
+    if (!AI.messages.length) {
+      msgs.innerHTML = `<div class="ai-empty">
+        ${esc(t("Ask away: the whole book and the current chapter are both fair game."))}<br />
+        ${esc(t("Or select a passage first — the ball brings it in for you."))}<br />
+        ${esc(t("Citations are clickable and jump straight to the chapter."))}</div>`;
+    } else {
+      msgs.innerHTML = AI.messages.map((m, i) => aiMsgHtml(m, i)).join("");
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+  }
+  if (hint) hint.textContent = t("Enter to send · Shift+Enter for a new line · citations are clickable");
+  const ta = $("aiQ"), send = $("aiSend");
+  if (ta) ta.placeholder = t("Ask about this passage… (selecting text first fills it in)");
+  if (send) send.disabled = AI.busy;
+  // 没有会话就没有"这条记录"可删 —— 别给一个点了报错的按钮
+  const del = $("aiDel");
+  if (del) del.disabled = AI.busy || AI.deleting || !AI.sessionId;
+}
+
+function aiMsgHtml(m, idx) {
+  if (m.role === "user") {
+    return `<div class="ai-m u">
+      ${m.sel ? `<div class="ai-why">引用：${esc(m.sel.slice(0, 46))}${m.sel.length > 46 ? "…" : ""}</div>` : ""}
+      <div class="ai-q">${esc(m.text)}</div></div>`;
+  }
+  const cites = (m.cites || []).filter((c) => c && (c.chapterId || c.page));
+  return `<div class="ai-m" data-mi="${idx}">
+    <div class="ai-a">${aiMd(m.text)}${m.typing ? '<span class="ai-cur"></span>' : ""}</div>
+    ${cites.length && !m.typing ? `<div class="ai-cites">${cites.map((c) =>
+      `<button class="ai-chip" data-act="ai-cite" data-id="${esc(c.chapterId || "")}" data-page="${c.page || 0}"
+        title="${esc(c.title || c.label || "")}">${esc(c.label || c.title || c.chapterId || ("第 " + c.page + " 页"))}</button>`).join("")}</div>` : ""}
+    ${m.snapshot && !m.typing ? aiWhyHtml(m.snapshot, m.persisted) : ""}
+  </div>`;
+}
+
+/** 检索详情：默认收起，但**必须存在** —— 回答不准时要能区分
+    "没检索到"和"检索到了但答歪了"（契约 §5 的可解释性要求）。 */
+function aiWhyHtml(s, persisted) {
+  const layers = (s.layers || []).join(" → ") || "—";
+  const deg = (s.degraded || []).length ? `\n降级：${(s.degraded || []).join(", ")}` : "";
+  const info = `层：${layers}\n预算：${s.usedTokens || 0}/${s.budgetTokens || 0} token`
+    + (s.chapterIdUsed ? `\n本章：${s.chapterIdUsed}` : "")
+    + `\n书内命中：${(s.bookHits || []).length} · 全库命中：${(s.libraryHits || []).length}`
+    + (s.vectorModel ? `\n向量模型：${s.vectorModel}` : "")
+    + deg
+    + (persisted === false ? "\n⚠ 这轮对话没有存进历史" : "");
+  return `<details class="ai-why"><summary>检索详情</summary><pre>${esc(info)}</pre></details>`;
+}
+
+/** 极小的 Markdown：只认 **粗体** 与 `> 引用`。
+    先转义再套标签 —— 模型输出不可信，绝不能让它的 < > 变成 HTML。 */
+function aiInline(s) { return s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>"); }
+function aiMd(src) {
+  return String(src || "").split(/\n{2,}/).map((block) => {
+    const lines = block.split("\n");
+    if (lines.length && lines.every((l) => /^>\s?/.test(l))) {
+      return `<blockquote>${lines.map((l) => aiInline(esc(l.replace(/^>\s?/, "")))).join("<br />")}</blockquote>`;
+    }
+    return `<p>${lines.map((l) => aiInline(esc(l))).join("<br />")}</p>`;
+  }).join("");
+}
+
+/* ───────── 发送 + SSE 流式 ───────── */
+async function aiSend() {
+  if (AI.busy || !AI.itemId) return;
+  const ta = $("aiQ");
+  const q = (ta?.value || "").trim() || (AI.sel ? "这段在讲什么？" : "");
+  if (!q) { toast(t("Type a question first")); return; }
+  // ⚠ 这里**故意不做**"文章有没有正文"的前端预检。
+  // 曾经做过一次，猜的字段名（content/body/fulltext）跟接口实际的 `bodyHtml` 对不上，
+  // 于是把有正文的文章判成"没有可读正文"，白白拦住了一个好问题 —— 而服务端自己
+  // 的判据是对的（`Items.Content` 为空才回 409 `ARTICLE_NO_TEXT`，见 AiReading.cs）。
+  // 教训：同一件事的判据**只能有一份**。前端猜一份 = 迟早漂移，且漂移时症状是
+  // "明明有正文却问不了"，比不做预检更糟。判据归服务端，前端只负责把服务端的话显示好。
+
+  const selSnapshot = AI.sel;          // ⚠ 划词只活这一轮
+  AI.sel = ""; aiSyncSel();
+  if (ta) ta.value = "";
+  AI.busy = true;
+
+  const um = { role: "user", text: q, sel: selSnapshot };
+  AI.messages.push(um);
+  const am = { role: "assistant", text: "", cites: [], snapshot: null, typing: true };
+  AI.messages.push(am);
+  aiRenderPanel();
+  const orb = $("aiOrb"); orb?.classList.remove("has", "pulse");
+
+  // anchor：把"我现在读到哪儿 + 我划了哪段"一起带给服务端（契约 §5.1）。
+  // 没有划词、也不在电子书里 → 不带锚点（服务端会退化成整篇/整库检索）。
+  //
+  // ⚠ 必须把 selSnapshot **显式传进去**：AI.sel 在上面已经被清空（那是"划词只活一轮"的
+  // 实现方式，也是面板里引用框消失的原因），而 aiBuildAnchor() 读的正是 AI.sel ——
+  // 于是它算出来的锚点里 selection 恒为空。曾经的症状：**面板里明明显示着引用，
+  // AI 却回"本轮划词段为空"**（引用框走的是 um.sel 这条渲染路径，与发出去的锚点不是同一条）。
+  const anchor = aiBuildAnchor(selSnapshot);
+  const body = { question: q, sessionId: AI.sessionId || undefined, library: false };
+  // 带锚点的条件里要有 `#`：A45 之后 chapterId 是 `#<节序号>`（不是章名），
+  // 漏了它会让"当前节"这条线索根本不发出去 —— 那正是 A45 要修的症状。
+  if (selSnapshot || (anchor && (anchor.chapterId || anchor.sectionLead || anchor.locType === "page"))) body.anchor = anchor;
+
+  try {
+    const res = await fetch(`/api/imports/${AI.itemId}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok || !(res.headers.get("Content-Type") || "").includes("text/event-stream")) {
+      // 挡位 403 / 没配 AI / body 过大 —— 服务端在**开流之前**回 JSON，
+      // 所以这里读得到结构化的错误（不会出现"半截流"）。
+      let err = null; try { err = (await res.json())?.error; } catch { }
+      aiFail(am, err?.message || res.statusText || "请求失败", err?.code);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      // SSE 帧以空行分隔
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        aiHandleFrame(frame, am);
+      }
+    }
+    aiFinish(am);
+  } catch (e) {
+    aiFail(am, e.message || "网络错误");
+  }
+}
+
+function aiHandleFrame(frame, am) {
+  let ev = "message", data = "";
+  frame.split("\n").forEach((line) => {
+    if (line.startsWith("event:")) ev = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  });
+  if (!data) return;
+  let obj = null; try { obj = JSON.parse(data); } catch { return; }
+
+  if (ev === "session") {
+    AI.sessionId = obj.sessionId || AI.sessionId;
+  } else if (ev === "delta") {
+    am.text += obj.text || "";
+    aiPatchStreaming(am);          // 逐字：只改最后一屏，不整块重渲染
+  } else if (ev === "cites") {
+    am.cites = obj.cites || [];
+    AI.lastCites = am.cites;
+  } else if (ev === "done") {
+    AI.persisted = obj.persisted;
+    am.persisted = obj.persisted;
+  } else if (ev === "error") {
+    am.errCode = obj.code || "";
+    if (obj.message) am.text += `\n\n（${obj.message}）`;
+  }
+}
+
+/** 流式过程中只更新最后一条助手消息的正文 —— 整块重渲染会闪、也会打断滚动。 */
+function aiPatchStreaming(am) {
+  const box = $("aiMsgs");
+  if (!box) return;
+  const el = box.querySelector(`.ai-m[data-mi="${AI.messages.length - 1}"] .ai-a`);
+  if (el) { el.innerHTML = aiMd(am.text) + '<span class="ai-cur"></span>'; box.scrollTop = box.scrollHeight; }
+}
+
+function aiFinish(am) {
+  am.typing = false;
+  AI.busy = false;
+  aiRenderPanel();
+  if (am.persisted === false) toast("回答出来了，但这轮对话没存进历史");
+}
+
+function aiFail(am, msg, code) {
+  am.typing = false;
+  AI.busy = false;
+  // 错误码要翻译成人能读懂、且知道下一步做什么的话（契约 §5.5 / §8.3）。
+  // 文案走 t()：键=英文原文，缺键时回落成英文原文而不是空白。
+  const HINT_KEY = {
+    SIMON_BLOCKED: "Simon blocked this web write (question history is written to disk) — lower the level from a real terminal first.",
+    AI_NOT_CONFIGURED: "AI is not configured yet — set it up from the AI panel, or run sip --init in a real terminal.",
+    SSE_BUSY: "Too many questions at once — try again in a moment.",
+    EMPTY_QUERY: "先写个问题",
+    ITEM_NOT_FOUND: "This item is not in the library.",
+    SESSION_BOOK_MISMATCH: "That chat belongs to another book — a new one was started.",
+    // 契约 §12.1-A40① 新增的两个：它们以前会掉进"显示原始 message"那条路，
+    // 而原始 message 是英文字面量，用户看到的就是一句没法行动的英文。
+    ARTICLE_NO_TEXT: "This article has no readable text — the feed only gave a title or summary.",
+    API_KEY_INVALID: "The AI endpoint refused the key (401) — check the key and endpoint in the AI panel.",
+    MODEL_UNAVAILABLE: "The AI endpoint could not be reached — check the endpoint address in the AI panel.",
+  }[code];
+  const hint = HINT_KEY ? t(HINT_KEY) : "";
+  if (!am.text) am.text = hint || msg;
+  else am.text += `\n\n（${hint || msg}）`;
+  if (code === "SESSION_BOOK_MISMATCH") AI.sessionId = null;
+  aiRenderPanel();
+}
+
+/* ───────── AI 配置面板（契约 §12.1-A40②）─────────
+   三级结构对应契约里的三条硬要求：
+     1. 开关关着（默认）→ 只显示"去终端配"的说明，不给一个点了就报错的表单
+     2. 开着 → 表单；**key 永不回显**，留空 = 不改，输入 = 覆盖
+     3. 改端点要二次确认 —— 它决定"你的问题和文段被发到哪儿"
+   注意 AI.cfgYesOnce：确认只对**那一次提交**有效，不留在任何地方。 */
+async function aiCfgOpen() {
+  const box = $("aiCfgBox"), body = $("aiCfgBody"), panel = $("aiPanel");
+  if (!box || !body) return;
+  panel?.classList.add("on");
+  box.hidden = false;
+  if ($("aiCfgTitle")) $("aiCfgTitle").textContent = t("AI settings");
+  body.innerHTML = `<div class="ai-empty">${esc(t("Loading…"))}</div>`;
+  try {
+    const d = await api("/api/ai/config");
+    AI.cfg = d || {};
+    aiCfgRender();
+  } catch (e) {
+    body.innerHTML = `<div class="ai-empty">${esc(t("Could not read the AI settings"))}：${esc(e.message || "")}</div>`;
+  }
+}
+
+function aiCfgClose() {
+  const box = $("aiCfgBox");
+  if (box) box.hidden = true;
+}
+
+function aiCfgRender() {
+  const body = $("aiCfgBody");
+  if (!body) return;
+  const c = AI.cfg || {};
+  const on = !!c.webWriteEnabled;
+
+  // ① 开关关着：说清"为什么"和"怎么打开"，而不是禁用一堆输入框
+  if (!on) {
+    body.innerHTML = `
+      <div class="ai-cfg-warn">${esc(t("Configuring AI from the web is turned off."))}</div>
+      <div class="ai-f"><div class="sub">${esc(t("Turn it on in sip_settings.json (AiConfigWebWrite: true), or run sip --init in a real terminal."))}</div></div>
+      <div class="ai-f"><label>${esc(t("Current LLM endpoint"))}</label>
+        <input type="text" value="${esc(c.llm?.apiEndpoint || "")}" readonly /></div>
+      <div class="ai-f"><label>${esc(t("Current model"))}</label>
+        <input type="text" value="${esc(c.llm?.model || "")}" readonly /></div>
+      <div class="ai-f"><label>${esc(t("API key"))}</label>
+        <input type="text" value="${esc(c.llmApiKeySet ? t("set") : t("not set"))}" readonly /></div>`;
+    return;
+  }
+
+  const local = !!c.llmEndpointIsLocal;
+  body.innerHTML = `
+    <div class="ai-f">
+      <label>${esc(t("LLM endpoint"))}</label>
+      <input type="text" id="cfgLlmEp" value="${esc(c.llm?.apiEndpoint || "")}" placeholder="https://api.deepseek.com/v1" />
+      <div class="sub">${esc(t("Your questions and the passages they quote are sent to this address."))}${local ? " " + esc(t("(looks local)")) : ""}</div>
+    </div>
+    <div class="ai-f">
+      <label>${esc(t("Model"))}</label>
+      <input type="text" id="cfgLlmModel" value="${esc(c.llm?.model || "")}" placeholder="deepseek-chat" />
+    </div>
+    <div class="ai-f">
+      <label>${esc(t("API key"))}</label>
+      <input type="password" id="cfgLlmKey" value="" autocomplete="off"
+        placeholder="${c.llmApiKeySet ? esc(t("(already set — leave empty to keep it)")) : esc(t("paste your key"))}" />
+      <div class="sub">${esc(t("Stored in the OS credential store. It is never sent back to this page."))}</div>
+    </div>
+    <div class="ai-f">
+      <label>${esc(t("Embedding endpoint"))} <span style="color:var(--faint)">${esc(t("(optional — needed for semantic search)"))}</span></label>
+      <input type="text" id="cfgEmbEp" value="${esc(c.embedding?.apiEndpoint || "")}" placeholder="http://localhost:11434/v1" />
+    </div>
+    <div class="ai-f">
+      <label>${esc(t("Embedding model"))}</label>
+      <input type="text" id="cfgEmbModel" value="${esc(c.embedding?.model || "")}" placeholder="nomic-embed-text" />
+    </div>
+    <div class="ai-cfg-acts">
+      <button class="btn pri" data-act="ai-cfg-save" id="cfgSave">${esc(t("Save"))}</button>
+    </div>
+    <div class="ai-f" style="margin-top:12px">
+      <div class="sub" id="cfgMsg"></div>
+    </div>`;
+}
+
+async function aiCfgSave(btn) {
+  const c = AI.cfg || {};
+  const v = (id) => ($(id)?.value ?? "").trim();
+  const payload = {};
+  const newLlmEp = v("cfgLlmEp"), newEmbEp = v("cfgEmbEp");
+  const newLlmModel = v("cfgLlmModel"), newEmbModel = v("cfgEmbModel"), newKey = v("cfgLlmKey");
+  if (newLlmEp && newLlmEp !== (c.llm?.apiEndpoint || "")) payload.llmEndpoint = newLlmEp;
+  if (newEmbEp && newEmbEp !== (c.embedding?.apiEndpoint || "")) payload.embeddingEndpoint = newEmbEp;
+  if (newLlmModel && newLlmModel !== (c.llm?.model || "")) payload.llmModel = newLlmModel;
+  if (newEmbModel && newEmbModel !== (c.embedding?.model || "")) payload.embeddingModel = newEmbModel;
+  if (newKey) payload.llmApiKey = newKey;
+
+  const msg = $("cfgMsg");
+  if (!Object.keys(payload).length) { if (msg) msg.textContent = t("nothing to change"); return; }
+
+  // ③ 改端点要确认 —— 这是"你的问题和文段会被发到哪儿"的那个决定，不能靠一次手滑完成
+  const touchesEndpoint = !!(payload.llmEndpoint || payload.embeddingEndpoint);
+  if (touchesEndpoint) {
+    const to = payload.llmEndpoint || payload.embeddingEndpoint;
+    const ok = window.confirm(
+      `${t("Changing the endpoint sends your questions and the text they quote to that address.")}\n\n${to}\n\n${t("Continue?")}`);
+    if (!ok) return;
+  }
+
+  setBusy(btn, true, t("Saving…"));
+  try {
+    // ?yes=1 只在"这一次确实改了端点"时带 —— 与服务端 CONFIRM_REQUIRED 对齐
+    const url = "/api/ai/config" + (touchesEndpoint ? "?yes=1" : "");
+    const r = await api(url, { method: "POST", body: JSON.stringify(payload) });
+    const done = (r?.changed || []).length;
+    toast(done ? t("Saved") : t("nothing to change"));
+    // key 输入框必须清掉：留着就等于把它挂在 DOM 上（下一个截图/插件就能读到）
+    if ($("cfgLlmKey")) $("cfgLlmKey").value = "";
+    await aiCfgOpen();          // 重新拉一次，以服务端为准
+  } catch (e) {
+    if (msg) msg.textContent = e.message || t("Could not save the AI settings");
+    setBusy(btn, false);
+  }
+}
+
+/* ───────── 引用跳转 ───────── */
+/** 点引用胶囊 → 跳到对应章节/页码。**跳不过去就不该出现这个胶囊**（契约 I4），
+    所以这里遇到找不到的情况要明确说一句，而不是静静地什么都不发生。 */
+async function aiJumpTo(chapterId, page) {
+  if (!AI.itemId) return;
+  if (page > 0) {
+    // PDF：走既有的分页器（它按 `p<N>` / 页码跳）
+    if (state.view !== "ebook") { await openEbook(AI.itemId); }
+    state.ebookPage = page; ebookGo(page);
+    return;
+  }
+  if (!chapterId) return;
+  try {
+    if (state.view !== "ebook") await openEbook(AI.itemId);
+    const d = await api(`/api/imports/${AI.itemId}/chapters/${encodeURIComponent(chapterId)}`);
+    // 章节正文拿到手 → 用它替换当前节的显示，并把位置记进阅读进度
+    const html = d?.html || d?.bodyHtml || "";
+    if (!html) { toast(t("That chapter no longer exists.")); return; }
+    state.ebookText = { ...(state.ebookText || {}), itemId: AI.itemId,
+      sections: [{ title: d.title || chapterId, html }], section: 0 };
+    saveReadingPosition(AI.itemId, 0);
+    render();
+    toast(d.title ? `已跳到「${d.title}」` : "已跳转");
+  } catch (e) {
+    toast(e.code === "CHAPTER_NOT_FOUND" ? t("That chapter no longer exists.") : (e.message || "跳转失败"));
+  }
+}
+
