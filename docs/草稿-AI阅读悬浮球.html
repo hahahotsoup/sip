@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="day">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>sip · 划词问 AI — 交互草图</title>
+<!--
+  ══════════════════════════════════════════════════════════════════
+  这是**交互草图**，不是产品代码。目的是让人在浏览器里点一遍、
+  在实现之前把手感定下来。它不进 exe、不被内嵌、不参与构建。
+
+  配色与排版刻意照抄 web/index.html 的三套主题变量（Day/Paper/Night）
+  与 .prose 阅读排版 —— 草图用别的颜色看，等于没看。
+
+  里面所有 AI 回答都是**写死的演示文本**：没有网络请求、不调用任何模型。
+  ══════════════════════════════════════════════════════════════════
+-->
+<style>
+:root{
+  --serif:"Source Han Serif SC","Noto Serif SC","Songti SC",Georgia,serif;
+  --sans:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --reading-size:17px; --reading-leading:1.9;
+  --radius:12px; --radius-sm:8px;
+  --ease:cubic-bezier(.22,1,.36,1);
+}
+[data-theme=day]{
+  --bg:#F4F1EA; --elev:#fff; --soft:#EDE8DF; --ink:#1C1917; --muted:#78716C; --faint:#A8A29E;
+  --line:rgba(28,25,23,.10); --line2:rgba(28,25,23,.16); --accent:#B45309; --accent-soft:rgba(180,83,9,.12);
+  --side:#EDE8DF; --good:#15803D; --bad:#B91C1C; --mark:rgba(251,191,36,.35);
+  --shadow:0 8px 30px rgba(28,25,23,.08);
+}
+[data-theme=paper]{
+  --bg:#F7F3EB; --elev:#FFFCF6; --soft:#EFE8DA; --ink:#292524; --muted:#78716C; --faint:#A8A29E;
+  --line:rgba(41,37,36,.10); --line2:rgba(41,37,36,.18); --accent:#A16207; --accent-soft:rgba(161,98,7,.12);
+  --side:#F0E9DB; --good:#15803D; --bad:#B91C1C; --mark:rgba(253,230,138,.5);
+  --shadow:0 8px 30px rgba(28,25,23,.08);
+}
+[data-theme=night]{
+  --bg:#1C1917; --elev:#292524; --soft:#23201E; --ink:#E7E5E4; --muted:#A8A29E; --faint:#78716C;
+  --line:rgba(231,229,228,.08); --line2:rgba(231,229,228,.14); --accent:#F59E0B; --accent-soft:rgba(245,158,11,.14);
+  --side:#201D1B; --good:#4ADE80; --bad:#F87171; --mark:rgba(251,191,36,.22);
+  --shadow:0 8px 30px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.6}
+a{color:var(--accent)}
+
+/* ── 顶部：草图自己的控制条（真产品里没有这一条，它是给我切换场景用的） ── */
+header.bar{
+  position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:9px 16px;background:var(--elev);border-bottom:1px solid var(--line);
+}
+.brand{font-family:var(--serif);font-weight:600;letter-spacing:.1em;font-size:15px;margin-right:2px}
+.tag{font-size:11px;color:var(--muted);border:1px dashed var(--line2);border-radius:999px;padding:1px 9px}
+.bar .sp{flex:1}
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:999px;overflow:hidden}
+.seg button{
+  border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;
+  padding:4px 11px;cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease);
+}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--accent);color:#fff}
+.sw{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+.sw input{accent-color:var(--accent)}
+
+/* ── 骨架：左目录 + 右正文（对应真产品的侧栏与阅读区） ── */
+.shell{display:grid;grid-template-columns:268px 1fr;min-height:calc(100vh - 46px)}
+@media (max-width:900px){ .shell{grid-template-columns:1fr} aside.toc{display:none} }
+aside.toc{background:var(--side);border-right:1px solid var(--line);padding:16px 12px 40px}
+.toc h3{margin:0 0 3px;font-family:var(--serif);font-size:14px;font-weight:600;letter-spacing:.04em}
+.toc .src{font-size:11px;color:var(--faint);margin-bottom:14px}
+.toc ol{list-style:none;margin:0;padding:0}
+.toc li{margin:1px 0}
+.toc button{
+  display:block;width:100%;text-align:left;border:0;background:transparent;color:var(--ink);
+  font:inherit;font-size:13px;line-height:1.45;padding:6px 9px;border-radius:var(--radius-sm);
+  cursor:pointer;transition:background .15s var(--ease),color .15s var(--ease);
+}
+.toc button:hover{background:var(--accent-soft)}
+.toc button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.toc .sub{padding-left:16px;font-size:12.3px;color:var(--muted)}
+.toc .pg{margin-left:6px;font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.toc .x{font-size:11.5px;color:var(--muted);padding:2px 9px}
+
+main{min-width:0;padding:34px 40px 140px}
+@media (max-width:900px){ main{padding:22px 18px 140px} }
+.crumb{font-size:11.5px;letter-spacing:.14em;color:var(--faint);text-transform:uppercase;margin-bottom:8px}
+h1.book{font-family:var(--serif);font-size:23px;font-weight:600;letter-spacing:.04em;margin:0 0 20px}
+.sec{max-width:720px}
+.sec h2{font-family:var(--serif);font-size:19px;font-weight:600;letter-spacing:.03em;margin:34px 0 14px;scroll-margin-top:70px}
+.prose{font-family:var(--serif);font-size:var(--reading-size);line-height:var(--reading-leading);max-width:720px}
+.prose p{margin:0 0 1.15em;text-align:justify}
+.prose mark{background:var(--mark);padding:0 .12em}
+.note{font-size:12.5px;color:var(--muted);border-left:2px solid var(--line2);padding:2px 0 2px 12px;margin:18px 0}
+
+/* PDF 页：阅读时仍然是栅格化的图；文字层是 sip 另外抽出来给 AI 用的 */
+.pageimg{
+  position:relative;max-width:560px;aspect-ratio:1/1.414;border:1px solid var(--line2);border-radius:6px;
+  background:repeating-linear-gradient(180deg,var(--soft) 0 22px,var(--elev) 22px 34px);
+  box-shadow:var(--shadow);overflow:hidden;
+}
+.pageimg .lbl{
+  position:absolute;left:0;right:0;bottom:0;padding:8px 12px;font-size:12px;color:var(--muted);
+  background:linear-gradient(transparent,var(--elev));
+}
+.pageimg .cnt{position:absolute;inset:0;display:grid;place-items:center;color:var(--faint);font-size:12.5px;text-align:center;padding:30px}
+
+/* ── 悬浮球 ── */
+#orb{
+  position:fixed;right:26px;bottom:26px;width:52px;height:52px;border-radius:50%;
+  border:1px solid var(--line2);background:var(--accent);color:#fff;
+  box-shadow:0 10px 26px rgba(0,0,0,.22);cursor:grab;touch-action:none;
+  display:grid;place-items:center;z-index:120;transition:transform .18s var(--ease);
+}
+#orb:hover{transform:scale(1.06)}
+#orb:active{cursor:grabbing}
+#orb svg{width:24px;height:24px}
+#orb .dot{
+  position:absolute;top:-2px;right:-2px;min-width:17px;height:17px;border-radius:999px;
+  background:var(--bad);color:#fff;font-size:10.5px;display:none;place-items:center;padding:0 4px;
+}
+#orb.has .dot{display:grid}
+#orb.pulse{animation:pulse 1.6s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 var(--accent-soft)}70%{box-shadow:0 0 0 12px transparent}100%{box-shadow:0 0 0 0 transparent}}
+#tip{
+  position:fixed;right:26px;z-index:119;background:var(--elev);border:1px solid var(--line2);
+  border-radius:999px;padding:5px 12px;font-size:12px;color:var(--muted);box-shadow:var(--shadow);
+  opacity:0;transform:translateY(6px);transition:.2s var(--ease);pointer-events:none;
+}
+#tip.on{opacity:1;transform:translateY(0)}
+
+/* ── 对话抽屉 ── */
+#drawer{
+  position:fixed;top:0;right:0;bottom:0;width:422px;max-width:100vw;z-index:130;
+  background:var(--elev);border-left:1px solid var(--line);box-shadow:var(--shadow);
+  display:flex;flex-direction:column;transform:translateX(103%);transition:transform .26s var(--ease);
+}
+#drawer.on{transform:translateX(0)}
+@media (max-width:900px){
+  #drawer{top:auto;left:0;width:auto;height:78vh;border-left:0;border-top:1px solid var(--line);
+    border-radius:16px 16px 0 0;transform:translateY(103%)}
+  #drawer.on{transform:translateY(0)}
+}
+.dh{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.dh .t{flex:1;min-width:0}
+.dh .t b{display:block;font-family:var(--serif);font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dh .t span{font-size:11.5px;color:var(--muted)}
+.ib{border:1px solid var(--line2);background:transparent;color:var(--muted);border-radius:var(--radius-sm);
+  width:28px;height:28px;cursor:pointer;font-size:14px;line-height:1;transition:.15s var(--ease)}
+.ib:hover{background:var(--soft);color:var(--ink)}
+.meta{display:flex;flex-wrap:wrap;gap:5px;padding:9px 14px 0}
+.b{font-size:11px;color:var(--muted);background:var(--soft);border-radius:999px;padding:2px 8px;white-space:nowrap}
+.b.acc{background:var(--accent-soft);color:var(--accent)}
+.msgs{flex:1;overflow:auto;padding:12px 14px 4px;scroll-behavior:smooth}
+.m{margin-bottom:14px;display:flex;flex-direction:column;gap:6px}
+.m.u{align-items:flex-end}
+.q{background:var(--accent-soft);color:var(--ink);border-radius:12px 12px 3px 12px;padding:8px 12px;max-width:88%;font-size:13.5px;white-space:pre-wrap}
+.a{font-family:var(--serif);font-size:15.2px;line-height:1.82;max-width:100%}
+.a p{margin:0 0 .7em}
+.a blockquote{
+  margin:0 0 .8em;padding:2px 0 2px 12px;border-left:2px solid var(--line2);
+  color:var(--muted);font-size:14.4px;
+}
+.a blockquote b{color:var(--ink)}
+.a .cur{display:inline-block;width:7px;height:15px;background:var(--accent);vertical-align:-2px;animation:blink .9s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.cites{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.chip{
+  border:1px solid var(--line2);background:var(--soft);color:var(--accent);border-radius:999px;
+  font:inherit;font-size:11.5px;padding:3px 10px;cursor:pointer;transition:.15s var(--ease);
+}
+.chip:hover{background:var(--accent-soft);border-color:var(--accent)}
+.snap{font-size:11px;color:var(--faint);margin-top:3px}
+.sel{display:flex;gap:8px;align-items:flex-start;margin:0 14px 8px;padding:8px 10px;background:var(--soft);
+  border-left:2px solid var(--accent);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+.sel .q2{font-family:var(--serif);font-size:12.6px;line-height:1.6;color:var(--muted);flex:1;max-height:62px;overflow:auto}
+.sel .x{border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:14px;line-height:1}
+.inp{display:flex;gap:8px;padding:10px 14px 14px;border-top:1px solid var(--line)}
+.inp textarea{
+  flex:1;resize:none;height:42px;max-height:120px;border:1px solid var(--line2);border-radius:var(--radius-sm);
+  background:var(--bg);color:var(--ink);font:inherit;font-size:13.5px;padding:10px 11px;
+}
+.inp textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.inp button.pri{
+  border:0;background:var(--accent);color:#fff;border-radius:var(--radius-sm);padding:0 16px;
+  font:inherit;font-size:13.5px;cursor:pointer;transition:.15s var(--ease)
+}
+.inp button.pri:disabled{opacity:.45;cursor:not-allowed}
+.hint{font-size:11.5px;color:var(--faint);padding:0 14px 10px}
+.noai{margin:14px;padding:12px;border:1px dashed var(--line2);border-radius:var(--radius-sm);font-size:12.8px;color:var(--muted);line-height:1.75}
+.noai b{color:var(--ink)}
+kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;background:var(--soft);border:1px solid var(--line);
+  border-radius:4px;padding:0 4px}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <span class="brand">sip</span>
+  <span class="tag">交互草图 · 不是产品代码</span>
+  <span class="seg" id="bookSeg"></span>
+  <span class="sp"></span>
+  <label class="sw"><input type="checkbox" id="aiOn" checked /> AI 已配置</label>
+  <span class="seg" id="thSeg">
+    <button data-th="day" class="on">白昼</button><button data-th="paper">羊皮纸</button><button data-th="night">夜读</button>
+  </span>
+</header>
+
+<div class="shell">
+  <aside class="toc">
+    <h3 id="tocTitle">目录</h3>
+    <div class="src" id="tocSrc"></div>
+    <ol id="tocList"></ol>
+  </aside>
+  <main>
+    <div class="crumb">EBOOK · 本地导入</div>
+    <h1 class="book" id="bookTitle"></h1>
+    <div id="bookBody"></div>
+  </main>
+</div>
+
+<div id="tip">划词问问 AI →</div>
+<button id="orb" title="问问 AI（可拖动）" aria-label="问问 AI">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 12a8 8 0 0 1-8 8H7l-4 3 1.2-4.2A8 8 0 1 1 21 12z"/><path d="M9 11h6M9 14h4"/>
+  </svg>
+  <span class="dot" id="orbDot">1</span>
+</button>
+
+<section id="drawer" aria-label="AI 对话">
+  <div class="dh">
+    <div class="t"><b id="dTitle">—</b><span id="dPos">—</span></div>
+    <button class="ib" id="btnNew" title="新会话">↺</button>
+    <button class="ib" id="btnClose" title="关闭（Esc）">✕</button>
+  </div>
+  <div class="meta" id="dMeta"></div>
+  <div class="msgs" id="msgs"></div>
+  <div id="noai" class="noai" hidden>
+    <b>AI 还没配置。</b><br />
+    目录和跳章现在就能用（不依赖 AI）。要问问题，请先在真实终端跑一次
+    <span style="font-family:ui-monospace,Consolas,monospace">sip --init</span> 配好模型与 Key，然后刷新本页。
+  </div>
+  <div class="sel" id="selBox" hidden>
+    <div class="q2" id="selText"></div>
+    <button class="x" id="selClear" title="去掉这段引用">✕</button>
+  </div>
+  <div class="inp">
+    <textarea id="q" placeholder="问点什么…（划词后打开会自动带上你选的那段）"></textarea>
+    <button class="pri" id="send">发送</button>
+  </div>
+  <div class="hint">Enter 发送 · Shift+Enter 换行 · 回答里的胶囊可以点，直接跳到对应章节</div>
+</section>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════
+   全部是演示用的假数据 —— 没有 fetch、没有模型、没有网络。
+   ══════════════════════════════════════════════════════════════════ */
+
+const BOOKS = {
+  epub: {
+    seg: "EPUB · 中国哲学简史",
+    title: "中国哲学简史",
+    kind: "epub",
+    tocSrc: "目录来自书里的 toc.ncx（出版方目录，不是猜的）",
+    intro: "下面这几章是节选。划中任意一句，然后点右下角那个球 —— 你会看到「你选的那段」已经自动带进面板了。",
+    chapters: [
+      { id: "c1", n: "第一章", t: "中国哲学的精神", pages: "1-24", html: `
+        <p>哲学在中国文化中所占的地位，历来可以与宗教在其他文化中的地位相比。在中国，哲学是每一个受过教育的人都关切的领域。从前在中国，一个人如果受教育，首先就是受哲学方面的启蒙教育。儿童入学，首先要读的就是《论语》《孟子》《大学》《中庸》。</p>
+        <p>我所说的哲学，就是对于人生的有系统的反思的思想。每一个人，只要他没有死，他都在人生中。但是对于人生有反思的思想的人并不多，其反思的思想有系统的人就更少。<mark>哲学家必须进行哲学化；这就是说，他必须对于人生反思地思想，然后有系统地表达他的思想。</mark></p>
+        <p>这种思想，所以谓之反思的，因为它以人生为对象。人生论、宇宙论、知识论都是从这个类型的思想产生的。宇宙论的产生，是因为宇宙是人生的背景，是人生戏剧演出的舞台。</p>` },
+      { id: "c2", n: "第二章", t: "中国哲学的背景", pages: "25-58", html: `
+        <p>从《吕氏春秋》中可以看出，上农、中商、下兵，是当时的一般看法。这种看法，反映了一个农业社会的价值观。中国是一个大陆国家，在传统上，中国人以为他们的国家就是世界。</p>
+        <p>农民要待在一块土地上，从事农业劳作，因此他们世世代代定居在同一片土地上。他们不能像商人那样到处流动，也不能像游牧民族那样逐水草而居。<mark>土地是固定的，所以依附于土地的人也是固定的。</mark>由此产生了中国哲学中「不变」与「常」的观念。</p>
+        <p>这种社会结构，也解释了为什么中国哲学里「反者道之动」这样的循环观念如此根深蒂固：农业生活的节奏本身就是循环的 —— 春耕、夏耘、秋收、冬藏，周而复始。</p>` },
+      { id: "c3", n: "第三章", t: "各家的起源", pages: "59-86", html: `
+        <p>在第一章里我们已经说过，中国哲学的传统，它的功用不在于增加积极的知识，而在于提高心灵的境界 —— 达到超乎现世的境界，获得高于道德价值的价值。</p>
+        <p>刘歆在《七略》中，把各家分为十家，其中最重要的是六家。他试图为每一家找出它的起源，认为它们都出于王官。<mark>这个说法未必尽然，但它说明了一个事实：这些思想流派并非凭空出现，而是从同一个文化母体中分化出来的。</mark></p>
+        <p>司马谈在《论六家要旨》中，则把各家放在一起比较，指出它们各自的得失。这是中国最早的比较哲学。</p>` },
+      { id: "c4", n: "第四章", t: "孔子：第一位教师", pages: "87-128", html: `
+        <p>孔子（公元前五五一年至前四七九年）是中国的第一位私人教师。在他之前，教育为贵族所垄断；从他开始，任何人只要愿意，都可以来学。</p>
+        <p>孔子说：「有教无类。」这句话的意思是说，在教育面前，人不分种类、不分贵贱。他收学生，只要交一束干肉就可以。<mark>教育的门第一次向普通人打开，这是孔子对中国文化最大的贡献之一。</mark></p>
+        <p>孔子的「仁」，说到底就是「爱人」。但「爱人」不是无原则的滥爱 —— 它必须通过「礼」来落实，通过「义」来判断。</p>` },
+      { id: "c5", n: "第五章", t: "人生的境界", pages: "129-160", html: `
+        <p>我在《新原人》一书中曾说，人与其他动物的不同，在于人做某事时，他了解他在做什么，并且自觉他在做。正是这种觉解，使他正在做的事对于他有了意义。<mark>他做各种事，有各种意义，各种意义合成一个整体，就构成他的人生境界。</mark></p>
+        <p>我们可以把各种不同的人生境界划分为四个等级：自然境界、功利境界、道德境界、天地境界。这四种人生境界之中，自然境界、功利境界的人，是人现在就是的人；道德境界、天地境界的人，是人应该成为的人。</p>
+        <p>前两者是自然的产物，后两者是精神的创造。自然境界是最低的，似乎不必加以解释了；天地境界是最高的，只有极少数人才能达到。</p>
+        <p>哲学的任务，就是帮助人达到道德境界和天地境界，特别是达到天地境界。<mark>哲学不报告任何事实，所以不能用具体的、物理的方法解决任何问题；它只给予我们一种观点、一种态度，借此可以更好地理解人生。</mark></p>` }
+    ]
+  },
+  pdf: {
+    seg: "PDF · 有书签",
+    title: "中国哲学简史（排版版）",
+    kind: "pdf",
+    tocSrc: "目录来自 PDF 自带的书签大纲（章名 + 起始页）",
+    intro: "这一本 PDF 有书签，所以 AI 能说得出「第几章在第几页」。它的文字层 sip 已经抽出来了（逐页），所以问内容也答得上——回答里会带页码和原文片段。注意：抽取是否可用**逐份而定**，扫描件仍然抽不出任何字。点目录跳页看看。",
+    chapters: [
+      { id: "p1", n: "第一章", t: "中国哲学的精神", pages: "1", html: null },
+      { id: "p2", n: "第二章", t: "中国哲学的背景", pages: "25", html: null },
+      { id: "p3", n: "第三章", t: "各家的起源", pages: "59", html: null },
+      { id: "p4", n: "第四章", t: "孔子：第一位教师", pages: "87", html: null },
+      { id: "p5", n: "第五章", t: "人生的境界", pages: "129", html: null }
+    ]
+  },
+  pdfnb: {
+    seg: "PDF · 无书签",
+    title: "物理错题精选精析",
+    kind: "pdfnb",
+    tocSrc: "这份 PDF 没有书签 —— 只能按页码走，不猜章节名",
+    intro: "没有书签的 PDF，我们不会去「猜」章节标题（猜错了比没有更糟）。AI 只能说到页码。这是刻意的降级，不是缺陷。",
+    chapters: Array.from({ length: 12 }, (_, i) => ({ id: "n" + (i + 1), n: "第 " + (i + 1) + " 页", t: "", pages: String(i + 1), html: null }))
+  },
+  scan: {
+    seg: "PDF · 扫描件",
+    title: "扫描版古籍（无文字层）",
+    kind: "scan",
+    tocSrc: "扫描件：整本都是图片，没有任何可提取的文字",
+    intro: "扫描件里连一个字都读不出来。AI 会明说读不到，而不是编一个页码给你 —— 这一条是产品态度，不是技术限制。",
+    chapters: [
+      { id: "s1", n: "第 1 页", t: "", pages: "1", html: null },
+      { id: "s2", n: "第 2 页", t: "", pages: "2", html: null },
+      { id: "s3", n: "第 3 页", t: "", pages: "3", html: null }
+    ]
+  }
+};
+
+const REPLIES = [
+  {
+    match: /负的方法|直观|区别|方法/,
+    text: "你说的这段在第 1 章讲「反思的思想」那里，但「负的方法」本身要到后面才展开。简单说：\n\n**正的方法**是告诉人「对象是什么」，用概念去规定它；**负的方法**是只说「它不是什么」，靠不断否定把不属于它的东西剥掉。前者能说清楚，但说到最后总隔一层；后者说不清楚，却逼人自己去看。\n\n冯友兰的意思是这两者不可偏废：一个哲学家若只用正的方法，他讲的是**关于**宇宙的话；只有加上负的方法，他才可能不落言筌。",
+    cites: [{ c: "c1", label: "第 1 章 · 中国哲学的精神" }, { c: "c5", label: "第 5 章 · 人生的境界" }],
+    snap: "检索：本书命中 3 段（第 1 章 · 语义 0.81 / 第 5 章 · 关键词命中）· 全库未启用"
+  },
+  {
+    match: /境界|四个|等级|天地/,
+    text: "这段就是你划的那一处，它讲的是**觉解**——人做事时知道自己正在做什么，这件事对他才有意义；把各种意义合成整体，就是「人生境界」。\n\n四个等级：自然境界（顺着本能做）、功利境界（为着自己的利做）、道德境界（为着社会的义做）、天地境界（为着宇宙做）。前两个是「现在就是的人」，后两个是「应该成为的人」。\n\n要注意：这不是四种人，是同一个人在不同事上可能处在不同等级。",
+    cites: [{ c: "c5", label: "第 5 章 · 人生的境界（本节）" }, { c: "c1", label: "第 1 章 · 中国哲学的精神" }],
+    snap: "检索：划词段（命中原文）· 第 5 章 全文 · 本书向量 2 段 · 全库未启用"
+  },
+  {
+    match: /仁|孔子|礼|教师/,
+    text: "孔子的「仁」在书里被放在第 4 章讲，核心是「爱人」，但它不是无原则的滥爱——它要靠「礼」来落实、靠「义」来判断。\n\n另有一处值得对照：第 4 章开头说孔子是「第一位私人教师」，教育与「有教无类」的关系，恰好解释了为什么「仁」这种普遍性的观念会在那个时代出现。",
+    cites: [{ c: "c4", label: "第 4 章 · 孔子：第一位教师" }, { c: "c3", label: "第 3 章 · 各家的起源" }],
+    snap: "检索：本书命中 4 段（第 4 章 ×3 · 第 3 章 ×1）· 全库未启用"
+  },
+  {
+    match: /背景|农业|土地|为什么/,
+    text: "第 2 章给的答案是社会结构层面的：中国是大陆国家、以农立国，农民世代定居在同一片土地上。\n\n依附于土地的人是固定的，于是「不变」「常」成了中国哲学里很重的观念；农业生活的节奏本身又是循环的（春耕秋收、周而复始），这正好对上「反者道之动」那种循环观。\n\n换句话说，这一章不是讲哲学观点，是讲**这些观点为什么长成这样**。",
+    cites: [{ c: "c2", label: "第 2 章 · 中国哲学的背景" }],
+    snap: "检索：本书命中 2 段（第 2 章 · 语义 0.77）· 全库未启用"
+  }
+];
+
+const PDF_REPLY = {
+  text: "在第 **87 页**（第 4 章开头）读到这段：\n\n> 孔子（公元前五五一年至前四七九年）是中国的第一位私人教师。在他之前，教育为贵族所垄断；从他开始，任何人只要愿意，都可以来学。\n\n这段和你问的「有教无类」是同一处：紧接着它就说了「有教无类」——教育的门第一次向普通人打开。\n\n补一句我知道的边界：**这份 PDF 的 1–24 页抽不出文字**（那几页是影印图），所以那部分我只能给你页码，说不了内容。",
+  cites: [
+    { c: "p4", label: "第 4 章 · 孔子：第一位教师（p.87）" },
+    { c: "p4", label: "原文：p.87 第 3 段" }
+  ],
+  snap: "检索：本书命中 3 段（第 4 章 · 关键词「有教无类」+ 语义 0.79）· 无文字层的 1–24 页已跳过"
+};
+const SCAN_REPLY = {
+  text: "这一本是**扫描件**，整页都是图片，没有任何文字层可读。\n\n所以我只能告诉你：它在阅读器里是**逐页栅格化**显示的，第 3 页你能看到图像，但我说不出第 3 页写了什么——任何说得出的人都只是在猜。\n\n要我能读，需要先做 OCR（本轮不做）。",
+  cites: [{ c: "s3", label: "第 3 页" }],
+  snap: "检索：无文字层 → 未执行检索"
+};
+
+/* ── 状态 ── */
+const S = { book: "epub", chapter: "c1", sel: "", busy: false, ai: true, msgs: [] };
+const $ = (id) => document.getElementById(id);
+
+/* ── 主题 ── */
+$("thSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-th]"); if (!b) return;
+  document.documentElement.dataset.theme = b.dataset.th;
+  [...$("thSeg").children].forEach((x) => x.classList.toggle("on", x === b));
+});
+
+/* ── 场景切换 ── */
+const seg = $("bookSeg");
+Object.entries(BOOKS).forEach(([k, b], i) => {
+  const btn = document.createElement("button");
+  btn.textContent = b.seg; btn.dataset.b = k;
+  if (i === 0) btn.classList.add("on");
+  seg.appendChild(btn);
+});
+seg.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-b]"); if (!b) return;
+  [...seg.children].forEach((x) => x.classList.toggle("on", x === b));
+  loadBook(b.dataset.b);
+});
+
+function loadBook(key) {
+  S.book = key; S.sel = ""; S.msgs = [];
+  const bk = BOOKS[key];
+  S.chapter = bk.chapters[0].id;
+  $("bookTitle").textContent = bk.title;
+  $("tocTitle").textContent = "目录 · " + bk.chapters.length + (bk.kind === "epub" ? " 章" : " 页");
+  $("tocSrc").textContent = bk.tocSrc;
+  renderToc(); renderBody(); renderMsgs(); syncDrawer(); hideSel();
+  $("q").value = "";
+}
+
+function renderToc() {
+  const bk = BOOKS[S.book], ol = $("tocList");
+  ol.innerHTML = "";
+  if (bk.kind === "pdfnb" || bk.kind === "scan") {
+    const li = document.createElement("li");
+    li.innerHTML = '<div class="x">没有章节目录 —— 只能按页码翻</div>';
+    ol.appendChild(li);
+  }
+  bk.chapters.forEach((c) => {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.innerHTML = (c.t ? `<b>${c.n}</b> ${c.t}` : c.n) +
+      (c.pages ? `<span class="pg">${bk.kind === "epub" ? "p." + c.pages.split("-")[0] : "p." + c.pages}</span>` : "");
+    if (c.id === S.chapter) btn.classList.add("on");
+    btn.onclick = () => gotoChapter(c.id);
+    li.appendChild(btn); ol.appendChild(li);
+  });
+}
+
+function renderBody() {
+  const bk = BOOKS[S.book], ch = bk.chapters.find((x) => x.id === S.chapter);
+  const host = $("bookBody");
+  if (bk.kind === "epub") {
+    host.innerHTML = `<div class="note">${bk.intro}</div>` +
+      bk.chapters.map((c) => `<section class="sec" id="sec-${c.id}">
+        <h2>${c.n}　${c.t}</h2><div class="prose">${c.html}</div></section>`).join("");
+  } else {
+    const pg = ch.pages;
+    const cnt = bk.kind === "scan"
+      ? "（扫描件：这里是纸张的图像，没有可选中的文字）"
+      : "（PDF 逐页栅格化：这一页是渲染出来的图，不能选字、不能搜索 —— 但它的文字层 sip 已经抽出来给 AI 用了）";
+    host.innerHTML = `<div class="note">${bk.intro}</div>
+      <div class="pageimg"><div class="cnt">${cnt}</div><div class="lbl">${ch.n}${ch.t ? "　" + ch.t : ""} · 第 ${pg} 页</div></div>
+      <div class="note">真产品里这一页旁边还有「用浏览器打开原文件」——那才是能选字能搜索的路。</div>`;
+  }
+  const on = document.querySelector(`#sec-${S.chapter}`);
+  if (on) on.scrollIntoView({ block: "start" });
+  else window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function gotoChapter(id) {
+  S.chapter = id; renderToc(); renderBody(); syncDrawer();
+}
+
+/* ── 划词 ── */
+document.addEventListener("selectionchange", () => {
+  const sel = window.getSelection();
+  const t = sel ? String(sel).trim() : "";
+  const inProse = sel && sel.anchorNode && sel.anchorNode.parentElement &&
+    !!sel.anchorNode.parentElement.closest(".prose");
+  if (t && inProse && t.length > 2) {
+    S.sel = t.replace(/\s+/g, " ").slice(0, 400);
+    $("orb").classList.add("has", "pulse");
+    $("orbDot").textContent = "问";
+    showSel();
+    const tip = $("tip");
+    tip.classList.add("on");
+    const r = $("orb").getBoundingClientRect();
+    tip.style.bottom = (window.innerHeight - r.top + 10) + "px";
+    clearTimeout(window._tipT); window._tipT = setTimeout(() => tip.classList.remove("on"), 2600);
+  }
+});
+
+function showSel() { $("selBox").hidden = !S.sel; $("selText").textContent = S.sel; }
+function hideSel() { $("selBox").hidden = true; $("selText").textContent = ""; }
+$("selClear").onclick = () => { S.sel = ""; hideSel(); $("orb").classList.remove("has", "pulse"); };
+
+/* ── 悬浮球：拖动 + 打开 ── */
+const orb = $("orb");
+let drag = null;
+try { const p = JSON.parse(localStorage.getItem("sip-mock-orb") || "null"); if (p) place(p.r, p.b); } catch (e) { }
+function place(r, b) { orb.style.right = r + "px"; orb.style.bottom = b + "px"; }
+orb.addEventListener("pointerdown", (e) => {
+  drag = { x: e.clientX, y: e.clientY, r: parseFloat(getComputedStyle(orb).right), b: parseFloat(getComputedStyle(orb).bottom), moved: false };
+  orb.setPointerCapture(e.pointerId);
+});
+orb.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+  const r = Math.min(Math.max(6, drag.r - dx), window.innerWidth - 62);
+  const b = Math.min(Math.max(6, drag.b - dy), window.innerHeight - 62);
+  place(r, b);
+});
+orb.addEventListener("pointerup", () => {
+  if (!drag) return;
+  const moved = drag.moved, r = parseFloat(orb.style.right || "26"), b = parseFloat(orb.style.bottom || "26");
+  drag = null;
+  localStorage.setItem("sip-mock-orb", JSON.stringify({ r, b }));
+  if (!moved) openDrawer();
+  else $("tip").classList.remove("on");
+});
+
+/* ── 抽屉 ── */
+function openDrawer() {
+  $("drawer").classList.add("on");
+  orb.classList.remove("has", "pulse");
+  syncDrawer();
+  setTimeout(() => $("q").focus(), 260);
+}
+function closeDrawer() { $("drawer").classList.remove("on"); }
+$("btnClose").onclick = closeDrawer;
+$("btnNew").onclick = () => { S.msgs = []; S.sel = ""; hideSel(); renderMsgs(); $("q").value = ""; };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+
+function currentAnchor() {
+  const bk = BOOKS[S.book], ch = bk.chapters.find((x) => x.id === S.chapter);
+  if (bk.kind === "epub") return `${ch.n} · ${ch.t}　p.${ch.pages.split("-")[0]}`;
+  return `第 ${ch.pages} 页`;
+}
+function syncDrawer() {
+  const bk = BOOKS[S.book];
+  $("dTitle").textContent = bk.title;
+  $("dPos").textContent = "会话按书保存 · 现在在 " + currentAnchor();
+  const meta = [];
+  meta.push(`<span class="b">${bk.kind === "epub" ? "EPUB" : "PDF"}</span>`);
+  meta.push(`<span class="b acc">${currentAnchor()}</span>`);
+  if (bk.kind === "epub") meta.push(`<span class="b">目录 ${bk.chapters.length} 章 · 来自 NCX</span>`);
+  if (bk.kind === "pdf") meta.push(`<span class="b">书签 ${bk.chapters.length} 章</span>`);
+  if (bk.kind === "pdfnb") meta.push(`<span class="b">无书签 · 仅页码</span>`);
+  if (bk.kind === "scan") meta.push(`<span class="b">无文本层</span>`);
+  $("dMeta").innerHTML = meta.join("");
+  $("noai").hidden = S.ai;
+  $("send").disabled = !S.ai || S.busy;
+  $("q").placeholder = S.ai ? "问点什么…（划词后打开会自动带上你选的那段）" : "先配置 AI 才能提问";
+}
+
+/* ── 对话 ── */
+function renderMsgs() {
+  const host = $("msgs");
+  host.innerHTML = "";
+  if (!S.msgs.length) {
+    const div = document.createElement("div");
+    div.className = "m";
+    div.innerHTML = '<div style="font-size:12.6px;color:var(--muted);line-height:1.8">' +
+      "㊀ 直接问：整本书、当前章节都可以问。<br />" +
+      "㊁ 划词再点球：「这段」会自动带进来，不用你复制粘贴。<br />" +
+      "㊂ 回答里的胶囊点一下就跳章。</div>";
+    host.appendChild(div);
+    return;
+  }
+  S.msgs.forEach((m) => {
+    const div = document.createElement("div");
+    div.className = "m " + (m.role === "u" ? "u" : "a");
+    if (m.role === "u") {
+      div.innerHTML = m.sel ? `<div class="snap">引用：${esc(m.sel.slice(0, 46))}${m.sel.length > 46 ? "…" : ""}</div>` : "";
+      const q = document.createElement("div"); q.className = "q"; q.textContent = m.text; div.appendChild(q);
+    } else {
+      const a = document.createElement("div"); a.className = "a";
+      a.innerHTML = md(m.text) + (m.typing ? '<span class="cur"></span>' : "");
+      div.appendChild(a);
+      if (m.cites && m.cites.length && !m.typing) {
+        const cs = document.createElement("div"); cs.className = "cites";
+        m.cites.forEach((c) => {
+          const b = document.createElement("button"); b.className = "chip"; b.textContent = c.label;
+          b.onclick = () => gotoChapter(c.c);
+          cs.appendChild(b);
+        });
+        div.appendChild(cs);
+      }
+      if (m.snap && !m.typing) {
+        const s = document.createElement("div"); s.className = "snap"; s.textContent = "ⓘ " + m.snap; div.appendChild(s);
+      }
+    }
+    host.appendChild(div);
+  });
+  host.scrollTop = host.scrollHeight;
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/* 极小 Markdown：只认 **粗体** 与 `> 引用`。
+   先转义再套标签 —— 演示文本里的 < > 不会被当成 HTML 吃掉。 */
+function inlineMd(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+}
+function md(src) {
+  return String(src).split(/\n{2,}/).map((block) => {
+    const lines = block.split("\n");
+    if (lines.every((l) => /^>\s?/.test(l))) {                       // 整块引用
+      const body = lines.map((l) => inlineMd(esc(l.replace(/^>\s?/, "")))).join("<br />");
+      return `<blockquote>${body}</blockquote>`;
+    }
+    return `<p>${lines.map((l) => inlineMd(esc(l))).join("<br />")}</p>`;
+  }).join("");
+}
+
+function pickReply(question) {
+  const bk = BOOKS[S.book];
+  if (bk.kind === "scan") return SCAN_REPLY;
+  if (bk.kind === "pdf" || bk.kind === "pdfnb") return PDF_REPLY;
+  const q = question + " " + S.sel;
+  for (const r of REPLIES) if (r.match.test(q)) return r;
+  return REPLIES[1];
+}
+
+async function send() {
+  if (!S.ai || S.busy) return;
+  const text = $("q").value.trim() || (S.sel ? "这段在讲什么？" : "这本书讲了什么？");
+  if (!text) return;
+  S.busy = true; $("send").disabled = true;
+  S.msgs.push({ role: "u", text, sel: S.sel });
+  $("q").value = "";
+  const reply = pickReply(text);
+  const ai = { role: "a", text: "", cites: reply.cites, snap: reply.snap, typing: true };
+  S.msgs.push(ai);
+  renderMsgs();
+  await typeOut(ai, reply.text);
+  ai.typing = false;
+  S.busy = false; $("send").disabled = !S.ai;
+  renderMsgs();
+  $("q").focus();
+}
+
+/* 逐字流出：真产品里是 SSE 每个 delta 到达就写一格，
+   这里用同样的节奏模拟，好让你看清"是不是边想边出字" */
+async function typeOut(msg, full) {
+  const step = 3;
+  for (let i = 0; i <= full.length; i += step) {
+    msg.text = full.slice(0, i);
+    const host = $("msgs");
+    const last = host.querySelector(".m:last-child .a");
+    if (last) { last.innerHTML = md(msg.text) + '<span class="cur"></span>'; host.scrollTop = host.scrollHeight; }
+    await new Promise((r) => setTimeout(r, 16));
+  }
+  msg.text = full;
+}
+
+$("send").onclick = send;
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("aiOn").onchange = (e) => { S.ai = e.target.checked; syncDrawer(); };
+
+/* 启动 */
+loadBook("epub");
+</script>
+</body>
+</html>
