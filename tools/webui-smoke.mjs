@@ -453,6 +453,41 @@ try {
   if (total !== 80 * 400) failures.push(`分节: 字数对不上（${total} != ${80 * 400}），有内容被丢了`);
 } catch (e) { failures.push("sectionsFromNodes() 抛异常: " + (e && e.message)); }
 
+// ⑥ 逐行差异：大段没改的段落要折起来（只留变更点上下各 3 段做上下文），折叠行能点开。
+//    不折的话，"改了哪一段"得在整篇正文里自己找 —— 而且整篇 HTML 只报成一删一插时，
+//    页面就是"一大块红接一大块绿"（用户报的"比对功能严重问题"）。
+try {
+  const line = (type, text) => ({ type, text });
+  const changes = [];
+  for (let i = 1; i <= 40; i++) changes.push(line("Unchanged", `第 ${i} 段没变`));
+  changes.push(line("Deleted", "旧的一段"));
+  changes.push(line("Inserted", "新的一段"));
+  for (let i = 41; i <= 80; i++) changes.push(line("Unchanged", `第 ${i} 段没变`));
+  for (const entry of CANNED) {
+    if (entry[0].test("/api/articles/12/diff"))
+      entry[1] = { article: 12, from: 1, to: 2, titleOld: "标题", titleNew: "标题", titleChanged: false, added: 1, removed: 1, changes };
+  }
+
+  Object.assign(state, { view: "edits", editsId: 12, editFrom: null, editTo: null, diffOpen: {} });
+  getEl("view").innerHTML = "";
+  await render();
+  let html = getEl("view").innerHTML;
+  if (!html.includes("段未改动")) failures.push("差异折叠：80 段没变的部分没有折起来");
+  if (html.includes("第 20 段没变")) failures.push("差异折叠：折叠区间里的段落还在渲染（等于没折）");
+  if (!html.includes("第 3 段没变") || !html.includes("第 40 段没变"))
+    failures.push("差异折叠：变更点上下各 3 段应当留作上下文");
+  const foldCount = (s) => (s.match(/data-act="diff-more"/g) || []).length;
+  if (foldCount(html) !== 2) failures.push(`差异折叠：变更点前后各一段没变 → 应当折成 2 行，实际 ${foldCount(html)}`);
+  if (!html.includes("旧的一段") || !html.includes("新的一段")) failures.push("差异折叠：删/插的行被折没了");
+
+  state.diffOpen[0] = true;         // 点开第一段折叠
+  getEl("view").innerHTML = "";
+  await render();
+  html = getEl("view").innerHTML;
+  if (foldCount(html) !== 1) failures.push(`差异展开：展开一段后应当只剩 1 个折叠行，实际 ${foldCount(html)}`);
+  if (!html.includes("第 20 段没变")) failures.push("差异展开：展开后中间的段落没有渲染出来");
+} catch (e) { failures.push("差异折叠 抛异常: " + (e && e.stack ? e.stack.split("\n")[0] : e)); }
+
 if (failures.length) {
   console.error("✗ Web 前端冒烟失败：");
   for (const f of failures) console.error("  - " + f);

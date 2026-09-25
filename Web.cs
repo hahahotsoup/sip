@@ -1808,17 +1808,9 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
             if (m.Body != null || m.Title != null) newer = m;
         }
 
-        var model = new DiffPlex.DiffBuilder.InlineDiffBuilder(new DiffPlex.Differ())
-            .BuildDiffModel(older.Body, newer.Body);
-        int added = 0, removed = 0;
-        var changes = new List<object>();
-        foreach (var line in model.Lines)
-        {
-            string kind = line.Type.ToString();
-            if (kind == "Inserted") added++;
-            else if (kind == "Deleted") removed++;
-            changes.Add(new { type = kind, text = line.Text ?? "" });
-        }
+        // 按段落比（DiffParagraphs 内部先 DiffNormalize）：RSS 的正文常常整篇只有一行 HTML，
+        // 直接按行 diff 会得到"整篇删除 + 整篇插入"，看着像作者重写了全文 —— 那是假象。
+        var (added, removed, changes) = DiffParagraphs(older.Body ?? "", newer.Body ?? "");
 
         WriteJson(res, 200, new
         {

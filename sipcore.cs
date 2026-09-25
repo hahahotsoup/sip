@@ -1981,7 +1981,9 @@ static TodayModified? ChangeOverview(string guid, string dbPath)
 
         var oldV = rows[rows.Count - 2];
         var newV = rows[rows.Count - 1];
-        var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(oldV.Body, newV.Body);
+        // 归一化后比：否则一行 HTML 会被当成"全文重写"，今日摘要里的 ±行数与字数全是假的
+        string oldBody = DiffNormalize(oldV.Body), newBody = DiffNormalize(newV.Body);
+        var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(oldBody, newBody);
         int added = 0, removed = 0;
         foreach (var l in diff.Lines)
         {
@@ -1996,7 +1998,7 @@ static TodayModified? ChangeOverview(string guid, string dbPath)
             TitleChanged = oldV.T != newV.T,
             AddedLines = added,
             RemovedLines = removed,
-            WordDelta = OldChars(newV.Body) - OldChars(oldV.Body)
+            WordDelta = OldChars(newBody) - OldChars(oldBody)
         };
     }
     catch { return null; }
@@ -2180,6 +2182,15 @@ static List<string> NormalizeParagraphs(string text)
         if (p.Length > 0) list.Add(p);
     }
     return list;
+}
+
+// 行级 diff 的**输入归一化**。RSS 的 Content 常常一整篇只有一行（正文里没有换行），
+// 直接按行比就是"整篇删除 + 整篇插入"—— 看起来像作者把全文重写了一遍，其实只是没换行。
+// 先剥标签、按段落切开再比；去重比对一直是这么做的，文章比对漏了这一步。
+static string DiffNormalize(string raw)
+{
+    var paras = NormalizeParagraphs(raw);
+    return paras.Count == 0 ? (raw ?? "").Trim() : string.Join("\n", paras);
 }
 
 // 段落重合度 = 较小段落集在较大段落集中的匹配数 / 较大段落数（0~1）
@@ -2607,7 +2618,8 @@ static string PadCols(string s, int width)
 // GitHub 式左右分栏 diff：左边旧版、右边新版，改动行用 - / + 标出，逐行对齐
 static string SideBySideDiff(string a, string b, int width)
 {
-    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(a, b);
+    // 传进来的多半是 Content 原文（一行 HTML）—— 先归一化，否则左右两边各是一大坨
+    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(DiffNormalize(a), DiffNormalize(b));
     var rows = new List<(string L, string R, bool Chg)>();
     var ls = diff.Lines;
     for (int i = 0; i < ls.Count; i++)
@@ -5114,7 +5126,8 @@ static void DiffCli(string[] args, string dbPath)
         return;
     }
 
-    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(rowA.Text, rowB.Text);
+    var diff = new InlineDiffBuilder(new Differ()).BuildDiffModel(
+        DiffNormalize(rowA.Text), DiffNormalize(rowB.Text));
 
     if (json)
     {

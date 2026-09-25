@@ -375,6 +375,43 @@ async function loadDiff(itemId, from, to) {
   return await api(`/api/articles/${itemId}/diff${q.length ? "?" + q.join("&") : ""}`);
 }
 
+/* 逐行差异的行渲染：把**大段没变的段落折起来**，只留变更点上下各 3 段。
+   整篇贴出来的话，改了哪一段还得自己找 —— 折起来一眼就能看到变了几处。
+   run = 未变段落的第几段连片（0,1,2…），展开状态记在 state.diffOpen 里。 */
+const DIFF_CTX = 3;
+function diffRowsHtml(changes) {
+  // 展开状态用普通对象（不用 Set）：跨 realm 的 instanceof 会失效，测试里就翻过这个坑
+  const open = state.diffOpen || (state.diffOpen = {});
+  changes = changes || [];
+  const out = [];
+  let i = 0, run = 0;
+  const fold = (from, to, r) =>
+    `<div class="diff-skip" data-act="diff-more" data-run="${r}">⋯ 中间 ${to - from} 段未改动 · 点开看 ⋯</div>`;
+  while (i < changes.length) {
+    if (changes[i].type !== "Unchanged") {
+      const c = changes[i];
+      out.push(c.type === "Deleted" ? `<div class="diff-del">${esc(c.text)}</div>`
+        : c.type === "Inserted" ? `<div class="diff-add">${esc(c.text)}</div>`
+          : `<div>${esc(c.text) || "&nbsp;"}</div>`);
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < changes.length && changes[j].type === "Unchanged") j++;
+    const n = j - i;
+    if (n <= DIFF_CTX * 2 + 1 || open[run]) {
+      for (let k = i; k < j; k++) out.push(`<div>${esc(changes[k].text) || "&nbsp;"}</div>`);
+    } else {
+      for (let k = i; k < i + DIFF_CTX; k++) out.push(`<div>${esc(changes[k].text) || "&nbsp;"}</div>`);
+      out.push(fold(i + DIFF_CTX, j - DIFF_CTX, run));
+      for (let k = j - DIFF_CTX; k < j; k++) out.push(`<div>${esc(changes[k].text) || "&nbsp;"}</div>`);
+    }
+    run++; i = j;
+    if (out.length > 3000) { out.push(`<div class="diff-skip">⋯ 差异过长，后续省略 ⋯</div>`); break; }
+  }
+  return out.join("");
+}
+
 /* ───────── 跨源去重 ───────── */
 async function loadDedup(scan) {
   const d = scan
@@ -737,11 +774,16 @@ const PAGER_MAX_HEIGHT = 240000;   // px，约等于"一节"的上限；超过�
 let _pagerPending = 0;
 
 /** 合并连续的测量请求：图片是**一张一张**加载完的，每张都全量重排一次
- *  等于把一次卡顿拆成几十次。攒到下一帧只做一次。 */
+ *  等于把一次卡顿拆成几十次。攒到下一帧只做一次。
+ *
+ *  ⚠️ 必须走**保位**的那条路（repaginateKeepingPlace），不能直接 pagerMeasure ——
+ *  后者只保住"第几页"这个序号，而图片加载会把页边界整体推移，
+ *  于是"第 3 页"在新边界下对应更靠前的内容，读起来就是"突然翻回上一页"。
+ *  平板最明显：图更慢、地址栏一隐一现又反复触发 resize。 */
 function pagerMeasureSoon() {
   if (_pagerPending) return;
   const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
-  _pagerPending = raf(() => { _pagerPending = 0; pagerMeasure(); });
+  _pagerPending = raf(() => { _pagerPending = 0; repaginateKeepingPlace(); });
 }
 
 function pagerReset() {
@@ -820,9 +862,22 @@ async function gotoSection(i, edge) {
    先抓住当前这一页开头的那一段，重排后再回到包含它的那一页。
    量不到段落时退回"按比例"，总之不把人打回第一页。 */
 function pagerAnchor() {
-  if (!pager.on || !pager.art) return null;
+  if (!pager.art) return null;
   try {
     const kids = pager.art.children;
+    if (!pager.on) {
+      // 滚动模式：锚点 = 当前视口顶部那一段（用 #content 的滚动位置换算到正文坐标）。
+      // 有了它，"滚动 → 分页"的切换才能落在原地，而不是把人甩回第一页。
+      const el = $("content");
+      if (!el) return null;
+      const artTop = pager.art.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const targetY = (el.scrollTop || 0) - artTop + 4;
+      let best = null;
+      for (const k of kids) {
+        if ((k.offsetTop || 0) <= targetY) best = k; else break;
+      }
+      return best;
+    }
     if (pager.axis === "y") {
       const y0 = pager.offsets[pager.page] || 0;
       for (const k of kids) if ((k.offsetTop || 0) >= y0 - 2) return k;
@@ -861,7 +916,15 @@ function pagerRestoreTo(anchor, ratio) {
 function repaginateKeepingPlace() {
   const anchor = pagerAnchor();
   const ratio = (pager.on && pager.pages > 1) ? pager.page / (pager.pages - 1) : 0;
+  const wasOn = pager.on;
   pagerMeasure();
+  if (!wasOn && pager.on) {
+    // 刚从**滚动**切到**翻页**（内容变长 / 版式变了）：按锚点落到对应的那一页，
+    // 并把滚动位置归零 —— 否则画面会"唰"地回到第一页。
+    pagerRestoreTo(anchor, 0);
+    const el = $("content"); if (el) el.scrollTop = 0;
+    return;
+  }
   pagerRestoreTo(anchor, ratio);
 }
 function pagerMeasure() {
@@ -1192,8 +1255,8 @@ function setImmersive(on) {
     b.textContent = state.immersive ? "⤡" : "⛶";
     b.title = state.immersive ? "退出全屏阅读（Esc）" : "全屏阅读";
   }
-  // 宽度变了 → 重新分页（否则页数还是按旧宽度算的，会裁掉内容）
-  if (state.view === "article" || state.view === "ebook") pagerMeasure();
+  // 宽度变了 → 重新分页（保位：进/退全屏不该把读到的地方弄丢）
+  if (state.view === "article" || state.view === "ebook") repaginateKeepingPlace();
 }
 
 function navTo(view) {
@@ -1210,6 +1273,12 @@ async function render() {
   if (!v) return;
   const V = state.view;
   syncChrome();
+  // 「刚进这一篇」还是「同一篇重渲染」：前者才该套用**存下来的**阅读位置；
+  // 后者要用锚点保位（存下来的位置是 400ms 前的，重渲染时套用会把画面往回拽 ——
+  // 平板上尤其明显：一翻页就"跳回上一页"）。
+  const entryKey = V + ":" + (V === "article" ? (state.articleId ?? "") : V === "ebook" ? (state.ebookId ?? "") : "");
+  const freshEntry = state._entryKey !== entryKey;
+  state._entryKey = entryKey;
   // 离开"可翻页"的视图就彻底关掉分页状态：否则 pager.on 会残留为 true，
   // 新页面上的滚轮事件还会被它接管（表现为"这一页滚不动"）。
   if (V !== "article" && V !== "ebook") { pagerReset(); closeReadDrawer(); }
@@ -1405,11 +1474,11 @@ async function render() {
       const kids = pager.art ? pager.art.children : null;
       const anchor = (kids && keepAnchorIdx >= 0 && keepAnchorIdx < kids.length) ? kids[keepAnchorIdx] : null;
       pagerRestoreTo(anchor, keepRatio);
-    } else if (rs && typeof rs.p === "number" && pager.on) {
+    } else if (freshEntry && rs && typeof rs.p === "number" && pager.on) {
       // 上次是翻页读的 → 回到那一页
       pager.page = Math.min(pager.pages - 1, Math.max(0, rs.p));
       pagerApply();
-    } else if (rs && typeof rs.y === "number" && rs.y > 0 && !pager.on) {
+    } else if (freshEntry && rs && typeof rs.y === "number" && rs.y > 0 && !pager.on) {
       // 上次是滚动读的 → 回到那个位置（服务端那份 rp 也还在，作为兜底）
       $("content").scrollTop = rs.y;
     }
@@ -1594,7 +1663,7 @@ async function render() {
         pagerApply();
       }
       clearTimeout(window._pagerImgT);
-      window._pagerImgT = setTimeout(() => { if (state.view === "ebook") pagerMeasure(); }, 300);
+      window._pagerImgT = setTimeout(() => { if (state.view === "ebook") repaginateKeepingPlace(); }, 300);
       // 图片是**一张一张**加载完的：每张都全量重排一次 = 把一次卡顿拆成几十次，所以合并到下一帧
       v.querySelectorAll(".pager img").forEach((im) => im.addEventListener("load", () => {
         if (state.view === "ebook") pagerMeasureSoon();
@@ -1659,6 +1728,7 @@ async function render() {
       versions = await loadVersions(state.editsId);
       if (versions.length >= 2) diff = await loadDiff(state.editsId, state.editFrom, state.editTo);
     } catch (e) { err = e; }
+    state._lastDiff = diff;   // 展开折叠段落时要按同一份数据重画
     if (err) { v.innerHTML = `<div class="empty">读不到差异：${esc(err.message || "")}</div>`; return; }
     const active = versions.find((x) => x.current) || versions[0];
     const vList = versions.slice().sort((a, b) => a.version - b.version);
@@ -1674,7 +1744,7 @@ async function render() {
         ${vList.map((x) => `<button class="chip ${x.version === active?.version ? "on" : ""}"
             data-act="view-version" data-id="${state.editsId}" data-version="${x.version}">v${x.version}${x.status !== "active" ? " ·" + esc(x.status) : ""}</button>`).join("")}
       </div>
-      ${diff && diff.changes?.length ? `
+      ${!diff ? `<div class="note">这篇只有一版可比 —— 等下一次改稿。</div>` : `
         <div class="row" style="align-items:center">
           <label class="m">对比
             <select id="diffFrom" data-act="diff-pick">
@@ -1687,12 +1757,9 @@ async function render() {
           <span class="b bad">−${diff.removed}</span><span class="b good">+${diff.added}</span>
           ${diff.titleChanged ? `<span class="b acc">标题也变了</span>` : ""}
         </div>
-        <div class="card diffbox" style="cursor:default">
-          ${diff.changes.map((c) => c.type === "Deleted" ? `<div class="diff-del">${esc(c.text)}</div>`
-      : c.type === "Inserted" ? `<div class="diff-add">${esc(c.text)}</div>`
-        : `<div>${esc(c.text) || "&nbsp;"}</div>`).join("")}
-        </div>`
-      : `<div class="note">这篇只有一版可比 —— 等下一次改稿。</div>`}
+        ${(diff.changes || []).length ? `<div class="card diffbox" style="cursor:default">${diffRowsHtml(diff.changes)}</div>`
+      : `<div class="card" style="cursor:default"><div class="t">v${diff.from} → v${diff.to}</div>
+            <p class="sub" style="margin:6px 0 0">两版<strong>正文文字完全一致</strong> —— 作者大概只动了排版、图片或摘要。</p></div>`}`}
       <div class="card" style="cursor:default;margin-top:12px">
         <div class="t">版本清单</div>
         <table class="dt"><thead><tr><th>版本</th><th>状态</th><th>归档时间</th><th>长度</th><th></th></tr></thead>
@@ -2198,7 +2265,17 @@ document.addEventListener("click", async (e) => {
     case "restore-pos": $("content").scrollTop = +hit.dataset.pos; toast("已跳回上次位置"); return;
     case "edit-open": {
       state.view = "edits"; state.editsId = id; state.editFrom = null; state.editTo = null;
+      state.diffOpen = {};            // 换了文章，折叠状态重来
       EDITS.length = 0; render(); return;
+    }
+    case "diff-more": {
+      // 就地展开这一段未改动的段落：只重画 diff 框，不整页重渲染（别把滚动位置弄丢）
+      const run = +hit.dataset.run;
+      const open = state.diffOpen || (state.diffOpen = {});
+      if (open[run]) delete open[run]; else open[run] = true;
+      const box = hit.closest(".diffbox");
+      if (box && state._lastDiff) box.innerHTML = diffRowsHtml(state._lastDiff.changes || []);
+      return;
     }
     case "edit-back": state.editsId = null; render(); return;
     case "dedup-scan": {
@@ -2276,6 +2353,7 @@ document.addEventListener("change", (e) => {
   if (act === "diff-pick") {
     state.editFrom = +($("diffFrom")?.value || 0);
     state.editTo = +($("diffTo")?.value || 0);
+    state.diffOpen = {};            // 换了对比版本，折叠状态重来
     render();
     return;
   }

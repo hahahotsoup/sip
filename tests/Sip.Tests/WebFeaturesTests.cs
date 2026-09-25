@@ -23,6 +23,8 @@ public sealed class WebFeaturesServer : SipWebServer
     public const int CrossFeedItemB = 102;   // 跨源转载：B 源那一份（Guid 相同）
     public const int EditedV1 = 201;         // 同源改稿：旧版
     public const int EditedV2 = 202;         // 同源改稿：新版（active）
+    public const int HtmlV1 = 401;           // 同源改稿：正文是**一整行 HTML**（RSS 的常态）
+    public const int HtmlV2 = 402;           // 同源改稿：同上一整行 HTML，只改了一段
     public const int DupItemA = 301;         // 跨源重复：A 源
     public const int DupItemB = 302;         // 跨源重复：B 源
 
@@ -37,6 +39,14 @@ public sealed class WebFeaturesServer : SipWebServer
 
     private const string DupBody =
         "这是一段足够长的正文，用来做段落重合度检测；它在两个不同的源里重复出现，重合度应当超过阈值。\n\n第二段同样逐字一致，确保整体重合度高于 0.8。";
+
+    // 真实 RSS 的样子：整篇正文在一行里，段落靠 <p> 分隔、行内**没有换行**。
+    // 按行 diff 这种输入 = 一行变一行 = "整篇删除 + 整篇插入"，所以要按段落比。
+    public const string HtmlBodyOld =
+        "<p>开头这段两版一模一样，用来确认 diff 没把整篇当成重写。</p><p>第二段：结论是清缓存就好。</p><p>结尾这段也一样。</p>";
+
+    public const string HtmlBodyNew =
+        "<p>开头这段两版一模一样，用来确认 diff 没把整篇当成重写。</p><p>第二段：更正——是 DNS split-horizon，清缓存没用。</p><p>结尾这段也一样。</p>";
 
     public WebFeaturesServer() : base(passwordMode: true)
     {
@@ -59,9 +69,16 @@ public sealed class WebFeaturesServer : SipWebServer
         s.InsertItem(DupItemA, FeedA, "重复内容 A", "http://a.example/3", DupBody, "g-dup-a");
         s.InsertItem(DupItemB, FeedB, "重复内容 B", "http://b.example/3", DupBody, "g-dup-b");
 
+        // ④ 同源改稿，但正文是「一行 HTML」（RSS 常态）—— 差异该落在段落上，不是整篇
+        s.InsertItem(HtmlV1, FeedA, "一行 HTML 的改稿", "http://a.example/4", HtmlBodyOld, "g-html");
+        s.Exec("UPDATE Items SET Version=1, Status='archived', ArchivedAt=@now WHERE Id=@id",
+            ("@now", DateTime.Now.AddHours(-2).ToString("O")), ("@id", HtmlV1));
+        s.InsertItem(HtmlV2, FeedA, "一行 HTML 的改稿", "http://a.example/4", HtmlBodyNew, "g-html");
+        s.Exec("UPDATE Items SET Version=2 WHERE Id=@id", ("@id", HtmlV2));
+
         // 去重扫描只看窗口内的**发布时间**：InsertItem 没写 PublishDate，这里补上（否则整批被窗口滤掉）
         string now = DateTime.Now.ToString("O");
-        s.Exec("UPDATE Items SET PublishDate=@now WHERE Id IN (101,102,201,202,301,302)", ("@now", now));
+        s.Exec("UPDATE Items SET PublishDate=@now WHERE Id IN (101,102,201,202,301,302,401,402)", ("@now", now));
     }
 }
 
@@ -191,6 +208,45 @@ public class WebFeaturesTests : IClassFixture<WebFeaturesServer>
         Assert.True(data.GetProperty("added").GetInt32() >= 1);
         Assert.True(data.GetProperty("removed").GetInt32() >= 1);
         Assert.Contains("更正", await Body(res));
+    }
+
+    [Fact]
+    public async Task Diff_OneLineHtml_ComparesParagraphs_NotWholeArticle()
+    {
+        // 回归：RSS 的 Content 常常整篇只有一行 HTML。按行 diff 会变成
+        // "整篇删除 + 整篇插入"（页面上就是一大块红接一大块绿），
+        // 正确的行为是：没改的段落仍是 Unchanged，只报改掉的那一段。
+        using var client = await ClientAsync();
+        using var res = await client.GetAsync($"/api/articles/{WebFeaturesServer.HtmlV2}/diff");
+        string body = await Body(res);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+        using var doc = JsonDocument.Parse(body);
+        var data = doc.RootElement.GetProperty("data");
+        Assert.Equal(1, data.GetProperty("from").GetInt32());
+        Assert.Equal(2, data.GetProperty("to").GetInt32());
+
+        var changes = data.GetProperty("changes").EnumerateArray()
+            .Select((x) => (Type: x.GetProperty("type").GetString(), Text: x.GetProperty("text").GetString()))
+            .ToList();
+
+        // ① 两版共有的段落必须留在 Unchanged 里（不是被删了再插一遍）
+        Assert.Contains(changes, (c) => c.Type == "Unchanged" && c.Text!.Contains("开头这段两版一模一样"));
+        Assert.Contains(changes, (c) => c.Type == "Unchanged" && c.Text!.Contains("结尾这段也一样"));
+        Assert.DoesNotContain(changes, (c) => c.Text!.Contains("<p>"));   // 标签不该出现在差异文本里
+
+        // ② 改动集中在第二段：删/插都只涉及这一段，量级不是整篇
+        var deleted = changes.Where((c) => c.Type == "Deleted").ToList();
+        var inserted = changes.Where((c) => c.Type == "Inserted").ToList();
+        Assert.NotEmpty(deleted);
+        Assert.NotEmpty(inserted);
+        Assert.Contains("清缓存就好", string.Join(" ", deleted.Select((c) => c.Text)));
+        Assert.Contains("split-horizon", string.Join(" ", inserted.Select((c) => c.Text)));
+        Assert.True(deleted.Count <= 3 && inserted.Count <= 3,
+            $"只该报第二段，实际 -{deleted.Count} / +{inserted.Count}");
+        Assert.True(data.GetProperty("added").GetInt32() + data.GetProperty("removed").GetInt32() <= 4);
+        // 整篇长度级的"假差异"：改动文本不该逼近全文
+        Assert.True(deleted.Sum((c) => c.Text!.Length) < WebFeaturesServer.HtmlBodyOld.Length / 2,
+            "删除的行加起来接近全文长度 —— 又变成整篇重写了");
     }
 
     [Fact]
