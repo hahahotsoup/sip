@@ -15,6 +15,15 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Runtime.Serialization;
+// 章节锚点用：EPUB 的 container.xml/OPF/NCX 一律走 XmlReader(关外部实体，见 SafeXmlSettings)，
+// 不去用正则硬啃 XML —— 正则啃不出结构，也挡不住 DTD。
+using System.Xml;
+using System.Xml.Linq;
+using System.IO.Compression;
+using System.Security.Cryptography;
+// PDF 结构（书签树 / 逐页文本）。纯托管，和 PDFtoImage 的原生 pdfium 互不干扰。
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.Outline;
 using CodeHollow.FeedReader;
 using DiffPlex;
 using DiffPlex.DiffBuilder;
@@ -47,7 +56,9 @@ EnsureDefaultLanguages(baseDir, dataDir);
 
 string dbPath = Path.Combine(dataDir, "rss.db");
 InitDatabase(dbPath);
-
+// 对话历史另起一个文件(契约 §1.1);与 InitDatabase 并列放在启动引导段,
+// 保证 CLI / Web / TUI 三条入口都建表 —— 只有 Web 启动路径建表会让纯 CLI 用户永远没有这两张表。
+InitChatDatabase(Path.Combine(dataDir, "chat.db"));
 // 全局选项解析（任意位置均可，解析后从参数中剔除）
 // --ignoresafeannouncement：跳过安全横幅等多余输出（供脚本/Agent 使用）
 // --lang <代码>：指定语言文件（如 zh-CN / en-US）
@@ -905,9 +916,18 @@ static string? ImageExtFromMagic(byte[] b)
         {
             string opfXml;
             using (var s = opf.Open()) using (var r = new StreamReader(s)) opfXml = r.ReadToEnd();
+            // manifest: 先整体匹配 <item .../>，再分别取 id / href —— **不能**用
+            // "<item[^>]*id=...href=" 这种把两者绑在一个正则里的写法：XML 的属性顺序
+            // 是无约束的，只要某个打包工具把 href 写在 id 前面，该正则就零命中，
+            // manifest 变空 → spine 的每个 idref 都查不到 → 正文全空 → EMPTY_FILE。
+            // 实测踩到过：《中国哲学简史》就是 `href="..." id="..."` 的顺序。
             var manifest = new Dictionary<string, string>();
-            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(opfXml, @"<item\b[^>]*\bid=""([^""]+)""[^>]*\bhref=""([^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                manifest[m.Groups[1].Value] = m.Groups[2].Value;
+            foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(opfXml, @"<item\b[^>]*/?>", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            {
+                var idM = System.Text.RegularExpressions.Regex.Match(m.Value, @"\bid=""([^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var hrefM = System.Text.RegularExpressions.Regex.Match(m.Value, @"\bhref=""([^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (idM.Success && hrefM.Success) manifest[idM.Groups[1].Value] = hrefM.Groups[1].Value;
+            }
             var order = new List<string>();
             foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(opfXml, @"<itemref\b[^>]*\bidref=""([^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 if (manifest.TryGetValue(m.Groups[1].Value, out var href)) order.Add(href);
@@ -1196,7 +1216,7 @@ static void ImportRmCli(string[] args, string dbPath)
         if (key != "y" && key != "yes") { Console.WriteLine(Lang.T("Cancelled")); return; }
     }
 
-    // 删除动作本身与 Web 的 DELETE /api/imports/{id} 共用（删库行 + 删落地文件）
+    // 删除动作本身与 Web 的 DELETE /api/imports/{id} 共用（删库行 + 删章节 + 删落地文件）
     var del = ImportItemDelete(realId, dbPath);
     if (!del.Ok)
     {
@@ -1205,9 +1225,14 @@ static void ImportRmCli(string[] args, string dbPath)
     }
 
     if (json)
-        JsonOut(new { success = true, deleted = displayId });
+        JsonOut(new { success = true, deleted = displayId, chat = new { sessions = del.ChatSessions, kept = true } });
     else
+    {
         Console.WriteLine(Lang.T("Deleted imported article {0}", displayId));
+        // 明说一句：删书**不**删对话（契约 §1.7）
+        if (del.ChatSessions > 0)
+            Console.WriteLine(Lang.T("Chat history for this book ({0} sessions) is kept", del.ChatSessions));
+    }
 }
 
 // ══════════ 阅读进度记忆（按文章记录滚动位置，文件存储，零改表）══════════
@@ -3376,6 +3401,23 @@ static async Task RunCli(string[] args, string dbPath)
         case "--onboarding":
             OnboardingCli(args.Skip(1).ToArray(), dbPath);
             return;
+        // 章节/页码锚点（契约 §3.1）。四个只读命令 + 一个写命令；
+        // 挡位拦截在更早的 SimonCheckBlock 里做（--chapterize 不在只读白名单，挡位 2 起自动被拦）。
+        case "--toc":
+            TocCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--chapter":
+            ChapterCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--page":
+            PageCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--locate":
+            LocateCli(args.Skip(1).ToArray(), dbPath);
+            return;
+        case "--chapterize":
+            ChapterizeCli(args.Skip(1).ToArray(), dbPath);
+            return;
     }
 
     // 已知但需要参数的命令；不在此列的一律当作"已知命令"但少参数，否则是未知命令
@@ -3495,6 +3537,11 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
     Console.WriteLine(Lang.T("  --import <file> [--title <name>]  import local file (txt/md/pdf/epub/mobi/docx)"));
     Console.WriteLine(Lang.T("  --import-rm <id> [--yes]  remove an imported file"));
+    Console.WriteLine(Lang.T("  --toc <id>  table of contents of an imported book (EPUB chapters / PDF bookmarks)"));
+    Console.WriteLine(Lang.T("  --chapter <id> <chapterId|#ord>  read one chapter (--json, --max-chars N)"));
+    Console.WriteLine(Lang.T("  --page <id> <n>  locate a page; --render also writes a page image"));
+    Console.WriteLine(Lang.T("  --locate <keyword> [--book <id>]  find which chapter a keyword is in"));
+    Console.WriteLine(Lang.T("  --chapterize [<id>|all]  rebuild the chapter anchors"));
     Console.WriteLine(Lang.T("  --like <id> [--ai [reason]]  mark an article (♥ user / 🤖 AI); --likes lists marks"));
     Console.WriteLine(Lang.T("  --today [--json]  today's curated reading list (rule-based; guides daily reading habit)"));
     Console.WriteLine(Lang.T("  telemetry status|show|enable|disable|clear|export  local reading telemetry · Sumenia (default OFF)"));
@@ -4354,6 +4401,52 @@ static void InitDatabase(string dbPath)
         -- 全文检索索引(FTS5 + trigram,中文子串可搜):
         -- 数据在 Items,此表只存索引,rowid = Items.Id,由代码增量维护(见 SyncFtsInsert / 删除路径)
         CREATE VIRTUAL TABLE IF NOT EXISTS ItemsFts USING fts5(Title, Content, Description, Summary, tokenize='trigram');
+
+        -- 章节锚点(契约 §1.2):描述库内内容的结构,与 VectorsChunks / ItemsFts 同级的**派生数据**。
+        -- 放在 rss.db 而不是独立文件,是因为它必须和 Items 同生命周期(删书要连坐,见 ImportItemDelete)。
+        -- CharStart/CharEnd 是相对 Items.Content **原文**的偏移,只给服务端切片用;
+        -- 前端不许拿它去索引净化后的 DOM(两个长度体系,见契约 §2.4)。
+        CREATE TABLE IF NOT EXISTS Chapters (
+            ItemId      INTEGER NOT NULL,                   -- 关联 Items.Id(只对本地导入项建行)
+            ChapterId   TEXT    NOT NULL,                   -- 稳定编码,见契约 §1.3
+            Ord         INTEGER NOT NULL,                   -- 书内顺序,1 基,从 1 连续递增
+            Depth       INTEGER NOT NULL DEFAULT 0,         -- 层级,0 = 顶层
+            ParentId    TEXT    NULL,                       -- 父章 ChapterId(顶层为 NULL)
+            Title       TEXT    NOT NULL DEFAULT '',        -- 章节标题;为空是**合法**的(无书签 PDF 的页)
+            Kind        TEXT    NOT NULL,                   -- 'chapter' | 'page'
+            Source      TEXT    NOT NULL,                   -- 'ncx'|'nav'|'spine'|'bookmark'|'page'|'heading'
+            Locator     TEXT    NOT NULL DEFAULT '{}',      -- 原文件里的定位凭证(JSON),调试/重建用
+            CharStart   INTEGER NULL,                       -- 正文原文偏移,0 基
+            CharEnd     INTEGER NULL,                       -- 结束偏移(不含)
+            PageStart   INTEGER NULL,                       -- PDF 起始页,1 基
+            PageEnd     INTEGER NULL,                       -- PDF 结束页(含),1 基
+            CharCount   INTEGER NOT NULL DEFAULT 0,         -- 该章正文字符数(预算/排序用)
+            FirstBlock  TEXT    NOT NULL DEFAULT '',        -- 首个块级元素纯文本前 60 字(前端切分用)
+            SourceHash  TEXT    NOT NULL DEFAULT '',        -- 建表时 Items.Content 的 SHA-256 前 16 hex
+            RulesVersion INTEGER NOT NULL DEFAULT 1,        -- 抽取规则版本;规则改了 +1 → 全书重建
+            CreatedAt   TEXT    NOT NULL,
+            PRIMARY KEY (ItemId, ChapterId)
+        );
+        CREATE INDEX IF NOT EXISTS idx_chapters_item_ord ON Chapters (ItemId, Ord);
+
+        -- DB 级元数据(版本常量等)。契约 §6.3
+        CREATE TABLE IF NOT EXISTS DbMeta (Key TEXT PRIMARY KEY, Value TEXT NOT NULL);
+
+        -- PDF 逐页文本(契约 §1.5.1,用户拍板的范围变更)。一页一行,建在 rss.db。
+        -- 为什么不塞进 Items.Content:那会重写正文、改掉 SourceHash,把回填判定 R-b 直接搞坏。
+        -- SourceHash 这里存的是 **PDF 文件指纹(大小+mtime)**,不是 Content 的哈希 ——
+        -- PDF 的 Content 是那句永远不变的占位句,拿它当指纹等于永远判「没变」,抽取永远不会刷新。
+        CREATE TABLE IF NOT EXISTS PdfPages (
+            ItemId      INTEGER NOT NULL,               -- Items.Id
+            Page        INTEGER NOT NULL,               -- 1 基,与 BookmarkNode.PageNumber / --page / pdf:p<N> 同一编号
+            Text        TEXT    NOT NULL DEFAULT '',
+            CharCount   INTEGER NOT NULL DEFAULT 0,
+            ExtractedAt TEXT    NOT NULL,
+            SourceHash  TEXT    NOT NULL DEFAULT '',
+            RulesVersion INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (ItemId, Page)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pdfpages_item ON PdfPages (ItemId, Page);
     ";
     cmd.ExecuteNonQuery();
 
@@ -4391,12 +4484,100 @@ static void InitDatabase(string dbPath)
     // 旧库迁移：给 Items 补 PageCount 字段（PDF 导入时记录的页数，供超大 PDF 选择性导出）
     try { cmd.CommandText = "ALTER TABLE Items ADD COLUMN PageCount INTEGER"; cmd.ExecuteNonQuery(); }
     catch (SqliteException) { /* 列已存在则忽略 */ }
+    // 旧库迁移：给 VectorsChunks 补 ChapterId（块→章对齐，契约 §6.3）。
+    // 必须**先加列再建索引**：老库的 VectorsChunks 没有这一列，索引语句会直接报 no such column。
+    try { cmd.CommandText = "ALTER TABLE VectorsChunks ADD COLUMN ChapterId TEXT"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
+    // 契约 §6.2/§6.3（A17）：块的锚点不止一列 —— 合并块要能说出**起止**，还要能区分
+    // "本该有锚点但没算出来"与"这本书本来就没有章节模型"。后者不是错误，是正常；
+    // 混成一个 NULL 会让引用侧无法判断该不该给引用（I4）。
+    try { cmd.CommandText = "ALTER TABLE VectorsChunks ADD COLUMN ChapterSpan TEXT"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
+    try { cmd.CommandText = "ALTER TABLE VectorsChunks ADD COLUMN AnchorState TEXT NOT NULL DEFAULT 'unknown'"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 列已存在则忽略 */ }
+    try { cmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_chunk_chapter ON VectorsChunks (ChapterId)"; cmd.ExecuteNonQuery(); }
+    catch (SqliteException) { /* 建不出来不影响读写,下次启动再试 */ }
+    // 旧库的既有块：全新列一律落默认值，语义就是 AnchorState='unknown'（§6.3.1 第 2 步）。
+    // 原地回填与重建**不在这里做** —— 那是 --index/--reindex 的事，启动路径不碰模型、不花钱。
+}
+
+// 对话历史**独立一个 chat.db**(契约 §1.1/§4.2)。为什么不塞进 rss.db:
+// harness 那条路径要求「对库只读」(I1),而对话是**要写**的 —— 分成两个文件之后,
+// "提问前后 rss.db 一个字节都没变"才是可以拿哈希证明的事实,而不是一句注释里的承诺;
+// 删一本书的对话也只是删一张表的行,不用碰用户的主库。
+// 建表位置与 InitDatabase 并列(同一条启动引导路径),不是 Web 请求路径 ——
+// CLI/Web/TUI 三条入口共用同一份 schema,以后加列只改这一处。
+static void InitChatDatabase(string chatDbPath)
+{
+    try
+    {
+        using var conn = OpenDb(chatDbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            CREATE TABLE IF NOT EXISTS ChatSessions (
+                Id              TEXT    PRIMARY KEY,        -- ""chat:<guid:N>""(不含时间戳:同一秒两次新建会撞名)
+                ItemId          INTEGER NOT NULL,           -- 严格限于一本书
+                ItemTitle       TEXT    NOT NULL DEFAULT '',-- 建会话时的书名快照:书删了会话还能读
+                CreatedAt       TEXT    NOT NULL,
+                UpdatedAt       TEXT    NOT NULL,           -- 每次追加消息更新,会话列表按它倒序
+                TurnCount       INTEGER NOT NULL DEFAULT 0,
+                Title           TEXT    NOT NULL DEFAULT '',-- 取首个提问前 30 字
+                Summary         TEXT    NOT NULL DEFAULT '',-- 滚动压缩摘要
+                SummaryUpToTurn INTEGER NOT NULL DEFAULT 0,
+                SummaryAt       TEXT    NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chatsessions_item ON ChatSessions (ItemId, UpdatedAt DESC);
+
+            CREATE TABLE IF NOT EXISTS ChatMessages (
+                Id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                SessionId    TEXT    NOT NULL,
+                TurnIndex    INTEGER NOT NULL,              -- 1 基,一问一答同号
+                Role         TEXT    NOT NULL,              -- 'user' | 'assistant'
+                Content      TEXT    NOT NULL,
+                AnchorJson   TEXT    NULL,                  -- 本轮引用的阅读位置
+                CitesJson    TEXT    NULL,                  -- 回答里的引用数组
+                SnapshotJson TEXT    NULL,                  -- 检索快照
+                Provider     TEXT    NULL,                  -- 事后对账""这条回答是谁写的""
+                Model        TEXT    NULL,
+                Status       TEXT    NOT NULL,              -- 'ok' | 'error' | 'aborted'
+                ErrorCode    TEXT    NULL,
+                CreatedAt    TEXT    NOT NULL,
+                UNIQUE (SessionId, TurnIndex, Role)         -- 天然给前端一个稳定渲染顺序
+            );
+            CREATE INDEX IF NOT EXISTS idx_chatmessages_session ON ChatMessages (SessionId, TurnIndex);
+        ";
+        cmd.ExecuteNonQuery();
+    }
+    catch (Exception ex)
+    {
+        // 对话存不了**不该**让 sip 起不来:目录/读文/CLI 都不依赖它。
+        // 真要用到时(写会话)还会再报一次,那时候用户才需要知道。
+        Console.Error.WriteLine($"[chat] 初始化 chat.db 失败(不影响其它功能): {ex.Message}");
+    }
+}
+
+// 对话库的位置与"这本书有几个会话"。删书时要用后者告诉用户
+// "聊天记录还在"——契约 §1.7：删的是库里的文件,不是你跟 AI 说过的话。
+static string ChatDbPath() => Path.Combine(dataDir, "chat.db");
+
+static int ChatSessionCount(long itemId)
+{
+    try
+    {
+        using var conn = OpenDb(ChatDbPath());
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM ChatSessions WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+    }
+    catch { return 0; }
 }
 
 // 正常退出标记:下次启动跳过全库 quick_check(大库省 30s+);
 // 进程异常退出/被杀时不写标记,下次启动仍会全检,完整性自愈能力不变
-static void MarkCleanExit(string dataDir)
-{
+static void MarkCleanExit(string dataDir){
     try { File.WriteAllText(Path.Combine(dataDir, ".clean-exit"), DateTime.Now.ToString("O")); } catch { }
 }
 
@@ -4971,6 +5152,1895 @@ static string? ParsePagesArg(string[] args)
             return a.Substring("--pages=".Length);
     }
     return null;
+}
+
+// ══════════ 章节锚点：解析（契约 §1）══════════
+// 这里回答的是「AI 问某段话在第几章/第几页」里的**位置**从哪来。三条纪律：
+//   I3 章节是"读出来的"不是"编出来的" —— 每个章节都记 Source，拿不到就降级并说明，绝不猜标题；
+//   I2 位置不依赖 AI —— 全程纯本地解析，不碰模型、不碰网络、不需要 Key；
+//   只读原文件，绝不写回（这也是 harness 只读的前提）。
+// 分工：PDFtoImage 只管**栅格化**（按页出图），PdfPig 只管**结构**（书签树 + 逐页文本）。
+
+// 抽取规则版本：规则改了 +1 → 已建章节全部视为过期并重建（契约 §1.6 的 R-c）
+// v2：EPUB 跨文件边界延续 N3 + 卷首合成章 N7 + 覆盖不变量 N8（区间落在 Items.Content 坐标上）。
+// 老库里的行是 v1 算的（只有一个 spine 文件、没有区间），必须整体重建一次 —— 这正是"旧书自动回填"。
+const int ChapterRulesVersion = 2;
+
+// 目录层级上限：第 7 层及更深压平到 6（契约 §1.4.1）。真实书最深 4 层，
+// 6 是"远超真实需求、但不至于让缩进树失控"的闸门。
+const int ChapterMaxDepth = 6;
+
+// EPUB 解包上限。EPUB 里的条目名与尺寸都是**不可信输入**：
+// 不设上限时，一个几十 KB 的压缩包能靠高压缩比把内存撑爆。
+const int EpubMaxEntries = 10000;
+const long EpubMaxEntryBytes = 16L * 1024 * 1024;
+const long EpubMaxTotalBytes = 128L * 1024 * 1024;
+// 压缩比上限（契约 §1.4.2）。**只看解压后大小挡不住 zip-bomb**：
+// 一个几百 KB 的包可以解出几百 MB，而"解压后大小"只有解完才知道 —— 那时内存已经没了。
+// 压缩比是**解压前**就能算的判据（ZipArchiveEntry.CompressedLength 与 Length 都来自中央目录）。
+const long EpubMaxRatio = 200;
+const long XmlMaxChars = 8_000_000;   // NCX/OPF 也是书里的数据，别无条件信
+
+class ChapterRow
+{
+    public string ChapterId = "";
+    public int Ord;
+    public int Depth;
+    public string? ParentId;
+    public string Title = "";
+    public string Kind = "chapter";     // chapter | page | front
+    public string Source = "";          // ncx|nav|spine|bookmark|page|heading
+    public string Locator = "{}";
+    public int? CharStart, CharEnd;
+    public int? PageStart, PageEnd;
+    public int CharCount;
+    public string FirstBlock = "";
+
+    // ↓ 以下四个字段**只活在抽取期**，不落库：切片要用"文档序"（契约 §1.4.1 N1），
+    //   而文档序 = spine 序号 + 片段内偏移，目录顺序只是最后的打散键。
+    public string? SpineKey;            // EPUB：spine 下标（字符串，便于与 Locator 对齐）；PDF 为 null
+    public string? Anchor;              // EPUB：src 的片段 id（A32）；无片段/消歧行为空
+    public int NavOrder;                // 目录出现顺序（N1 第三排序键、撞键消歧顺序）
+    public int RawDepth;                // 压平前的真实层级（Depth 最多到 6）
+    public bool DepthFlattened;
+}
+
+// 关外部实体。**显式**写出来，不依赖默认值 —— 默认值在不同版本上变过，
+// 而"默认是安全的"这种假设一旦被改就是 XXE（审计约束 #2 会拿 <!ENTITY SYSTEM "file://..."> 实测）。
+//
+// ⚠️ DtdProcessing 必须是 **Ignore，不是 Prohibit**：
+//   Prohibit 会**直接拒绝任何带 DOCTYPE 的文档**，而真实的 EPUB2 `toc.ncx` 几乎都长这样：
+//     <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
+//   那是规范写法，不是可疑输入。用 Prohibit 的后果是 LoadXmlSafe 静默返回 null →
+//   **整本书的目录被丢掉**、无声回退成"按 spine 文件平铺"（实测：《中国哲学简史》
+//   200 节目录被丢成 33 章、"第 3 章第 2 节"这类引用直接说不出来）。
+//   Ignore = 跳过 DTD 声明、既不解析内部子集也不取外部 DTD；配合下面的 XmlResolver = null，
+//   连取的动作都不会发生，防 XXE 的能力与 Prohibit 相同，但不会误杀正常的 ncX/OPF。
+static XmlReaderSettings SafeXmlSettings() => new()
+{
+    DtdProcessing = DtdProcessing.Ignore,
+    XmlResolver = null,
+    MaxCharactersInDocument = XmlMaxChars,
+    MaxCharactersFromEntities = 0,
+    IgnoreComments = true,
+    IgnoreProcessingInstructions = true,
+    IgnoreWhitespace = true,
+};
+
+static XDocument? LoadXmlSafe(string xml)
+{
+    try
+    {
+        using var sr = new StringReader(xml);
+        using var r = XmlReader.Create(sr, SafeXmlSettings());
+        return XDocument.Load(r);
+    }
+    catch { return null; }
+}
+
+// 按 LocalName 取属性/后代：EPUB2 的书经常漏名字空间或写错前缀，
+// 绑死命名空间会让一整批正常书被判定为"没有目录"。
+static string? XmlAttr(XElement e, string local)
+    => e.Attributes().FirstOrDefault(a => a.Name.LocalName.Equals(local, StringComparison.OrdinalIgnoreCase))?.Value;
+
+static IEnumerable<XElement> XmlDesc(XElement root, string local)
+    => root.Descendants().Where(e => e.Name.LocalName.Equals(local, StringComparison.OrdinalIgnoreCase));
+
+static XElement? XmlChild(XElement e, string local)
+    => e.Elements().FirstOrDefault(c => c.Name.LocalName.Equals(local, StringComparison.OrdinalIgnoreCase));
+
+// ZIP 条目名不可信：拒绝绝对路径 / 盘符 / 反斜杠 / 上跳。
+// 另注：别用裸 `StartsWith(root)` 判"在解包目录内"—— `/a/bc` 会被 `/a/b` 误判为在内部
+// （兄弟目录前缀漏洞，审计已把 Web.cs:3441 那处登记为 B1）。这里直接拒绝可疑名字，不靠前缀比较。
+static bool ZipNameUnsafe(string name)
+{
+    if (string.IsNullOrEmpty(name)) return true;
+    if (name.Contains('\\')) return true;
+    if (name.StartsWith('/')) return true;
+    if (name.Length >= 2 && name[1] == ':') return true;
+    foreach (var seg in name.Split('/'))
+        if (seg == "..") return true;
+    return false;
+}
+
+static ZipArchiveEntry? ZipEntryOf(ZipArchive zip, string path)
+    => zip.GetEntry(path) ?? zip.Entries.FirstOrDefault(x => x.FullName.Equals(path, StringComparison.OrdinalIgnoreCase));
+
+// 读一个 ZIP 条目为文本，带单条目 + 累计总量双上限；任何越界都返回 null（降级，不抛）
+static string? ReadZipText(ZipArchive zip, string entryName, ref long budget)
+{
+    if (ZipNameUnsafe(entryName)) return null;
+    var e = ZipEntryOf(zip, entryName);
+    if (e == null || e.Length > EpubMaxEntryBytes) return null;
+    // zip-bomb：压缩比在**解压前**就能判（两个长度都来自 ZIP 中央目录），
+    // 所以在 Open() 之前挡掉，不给它把内存吃满的机会。
+    if (e.CompressedLength > 0 && e.Length / e.CompressedLength > EpubMaxRatio) return null;
+    budget -= e.Length;
+    if (budget < 0) return null;
+    try
+    {
+        using var s = e.Open();
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        if (ms.Length > EpubMaxEntryBytes) return null;
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+    catch { return null; }
+}
+
+static string PosixDir(string path)
+{
+    int i = path.LastIndexOf('/');
+    return i <= 0 ? "" : path[..i];
+}
+
+// 标题清成一行纯文本：NCX 的 <text> 里可能混标签，也可能有换行/多余空白
+static string CleanTitle(string? s)
+{
+    if (string.IsNullOrWhiteSpace(s)) return "";
+    string t = Regex.Replace(s, "<[^>]+>", " ");
+    t = System.Net.WebUtility.HtmlDecode(t);
+    t = Regex.Replace(t, @"\s+", " ").Trim();
+    return t.Length > 300 ? t[..300] : t;
+}
+
+// chapterId 的片段位必须落在契约 §1.3 的正则 [A-Za-z0-9_.:-]{1,64} 内，
+// 否则前端把它当 URL 路径段时会出问题（这也是契约选 ~ 而不是 # 的原因）
+static string SanitizeAnchor(string? s)
+{
+    if (string.IsNullOrEmpty(s)) return "";
+    var sb = new StringBuilder();
+    foreach (char c in s)
+    {
+        if (char.IsAsciiLetterOrDigit(c) || c == '_' || c == '.' || c == ':' || c == '-') sb.Append(c);
+        else sb.Append('_');
+        if (sb.Length >= 64) break;
+    }
+    string t = sb.ToString();
+    return t.All(c => c == '_') ? "" : t;
+}
+
+static int SpineIndexOfId(string chapterId)
+{
+    if (!chapterId.StartsWith("epub:", StringComparison.Ordinal)) return -1;
+    string rest = chapterId[5..];
+    int t = rest.IndexOf('~');
+    if (t >= 0) rest = rest[..t];
+    return int.TryParse(rest, out int n) ? n : -1;
+}
+
+static string? EpubOpfPath(ZipArchive zip, ref long budget)
+{
+    string? container = ReadZipText(zip, "META-INF/container.xml", ref budget);
+    if (container == null) return null;
+    var doc = LoadXmlSafe(container);
+    if (doc?.Root == null) return null;
+    var rootfile = XmlDesc(doc.Root, "rootfile").FirstOrDefault();
+    var full = rootfile == null ? null : XmlAttr(rootfile, "full-path");
+    return string.IsNullOrWhiteSpace(full) ? null : full!.Replace('\\', '/');
+}
+
+// 按 OPF 的 spine 顺序解析出每个 XHTML 的 ZIP 路径。
+// 顺序必须来自 spine 而不是文件名排序 —— spine 顺序才是书里的阅读顺序。
+static (List<string> Spine, string? NcxPath) EpubStructure(ZipArchive zip, string opfPath, ref long budget)
+{
+    var spine = new List<string>();
+    string? ncx = null;
+    string? opfXml = ReadZipText(zip, opfPath, ref budget);
+    if (opfXml == null) return (spine, null);
+    var doc = LoadXmlSafe(opfXml);
+    if (doc?.Root == null) return (spine, null);
+
+    string opfDir = PosixDir(opfPath);
+    var manifest = new Dictionary<string, string>(StringComparer.Ordinal);
+    foreach (var it in XmlDesc(doc.Root, "item"))
+    {
+        var id = XmlAttr(it, "id");
+        var href = XmlAttr(it, "href");
+        if (id == null || string.IsNullOrWhiteSpace(href)) continue;
+        string full = ResolveZipPath(opfDir, href!);
+        manifest[id] = full;
+        string mt = XmlAttr(it, "media-type") ?? "";
+        if (ncx == null && mt.Contains("ncx", StringComparison.OrdinalIgnoreCase)) ncx = full;
+    }
+
+    var spineEl = XmlDesc(doc.Root, "spine").FirstOrDefault();
+    // EPUB2 的 spine 也可以带 toc="ncx-id" 指向目录（不靠 media-type）
+    var tocId = spineEl == null ? null : XmlAttr(spineEl, "toc");
+    if (ncx == null && tocId != null && manifest.TryGetValue(tocId, out var t)) ncx = t;
+
+    if (spineEl != null)
+        foreach (var ir in XmlDesc(spineEl, "itemref"))
+        {
+            var idref = XmlAttr(ir, "idref");
+            if (idref != null && manifest.TryGetValue(idref, out var p)) spine.Add(p);
+        }
+
+    // 没有可用 spine（畸形 OPF）→ 退回按名字排序的 XHTML 列表，至少能读
+    if (spine.Count == 0)
+        spine.AddRange(zip.Entries
+            .Where(e => e.FullName.EndsWith(".xhtml", StringComparison.OrdinalIgnoreCase)
+                     || e.FullName.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+                     || e.FullName.EndsWith(".htm", StringComparison.OrdinalIgnoreCase))
+            .Select(e => e.FullName).OrderBy(x => x, StringComparer.Ordinal));
+    return (spine, ncx);
+}
+
+// 把 NCX 的一条 navPoint 的 src 映射成 chapterId（契约 §1.4.1 / §1.3 / A32）。三条硬规则：
+//   ① 片段位取 **src 的 `#` 之后**（`ch3.xhtml#sec2` → `sec2`）—— **不是** navPoint 的 XML id。
+//      `<navPoint id="np-3">` 那种 id 只活在目录文件内部、目录一重建就全变、**指向不了正文**；
+//      拿它当锚点，`--chapter`/引用跳转在正文里找不到落点，直接违约 I4（引用必须跳得回去）。
+//   ② src 指不到 spine 内（封面/版权等）→ 返回 null：N2(c) **丢弃该目录项**并计 tocDropped，不许猜。
+//   ③ 撞键（同一 spine 被两条无片段目录项指向，真实书《看图自学电吉他》就有）→ 追加 `~n<k>`
+//      **确定性**消歧，k 从 2 起按目录出现顺序；覆盖会让某一节凭空消失，而且消失哪节取决于遍历顺序。
+static string? NcxChapterId(string? src, List<string> spine, string ncxDir,
+    HashSet<string> used, out int spineIndex, out string anchor)
+{
+    spineIndex = -1;
+    anchor = "";
+    if (string.IsNullOrWhiteSpace(src)) return null;
+    string raw = src!.Trim();
+    string frag = "";
+    int h = raw.IndexOf('#');
+    if (h >= 0) { frag = raw[(h + 1)..]; raw = raw[..h]; }
+    string target = ResolveZipPath(ncxDir, raw);
+    int idx = spine.FindIndex(s => s.Equals(target, StringComparison.OrdinalIgnoreCase));
+    if (idx < 0) return null;
+
+    string a = SanitizeAnchor(frag);
+    string id = a.Length > 0 ? $"epub:{idx}~{a}" : $"epub:{idx}";
+    if (used.Contains(id))
+    {
+        int k = 2;
+        while (used.Contains($"epub:{idx}~n{k}")) k++;
+        id = $"epub:{idx}~n{k}";
+        a = "";                       // 消歧位不是真锚点：真锚点留在 Locator 里，切片仍按它走
+    }
+    spineIndex = idx;
+    anchor = a;
+    return id;
+}
+
+// NCX 的 navMap 是**一棵树**。契约要保留层级(Depth/ParentId)，所以递归走，
+// 而不是把所有 <text> 一股脑抓平 —— 拍平之后"第 3 章第 2 节"就跳不回去了。
+static List<ChapterRow> EpubChaptersFromNcx(string ncxXml, List<string> spine, string ncxPath,
+    out int tocDropped)
+{
+    var list = new List<ChapterRow>();
+    int dropped = 0;
+    tocDropped = 0;
+    var doc = LoadXmlSafe(ncxXml);
+    if (doc?.Root == null) return list;
+    var navMap = XmlDesc(doc.Root, "navMap").FirstOrDefault();
+    if (navMap == null) return list;
+
+    string ncxDir = PosixDir(ncxPath);
+    var used = new HashSet<string>(StringComparer.Ordinal);
+    int ord = 0, navOrder = 0;
+
+    void Walk(XElement parent, int rawDepth, string? parentId)
+    {
+        foreach (var np in parent.Elements().Where(e => e.Name.LocalName.Equals("navPoint", StringComparison.OrdinalIgnoreCase)))
+        {
+            navOrder++;                                  // N1 的第 3 排序键：目录出现顺序
+            var labelEl = XmlChild(np, "navLabel");
+            string title = CleanTitle(labelEl == null ? null
+                : (XmlDesc(labelEl, "text").FirstOrDefault()?.Value ?? ""));
+            var contentEl = XmlChild(np, "content");
+            string? src = contentEl == null ? null : XmlAttr(contentEl, "src");
+            string? chapterId = NcxChapterId(src, spine, ncxDir, used,
+                out int spineIdx, out string anchor);
+            if (chapterId != null)
+            {
+                ord++;
+                int depth = Math.Min(rawDepth, ChapterMaxDepth);     // 第 7 层压平到 6
+                bool flattened = rawDepth > ChapterMaxDepth;
+                list.Add(new ChapterRow
+                {
+                    ChapterId = chapterId,
+                    Ord = ord,
+                    Depth = depth,
+                    ParentId = parentId,           // 最近的**被保留**祖先（跳过的不算，见 §1.4.1 / A31）
+                    Title = title,
+                    Kind = "chapter",
+                    Source = "ncx",
+                    SpineKey = spineIdx.ToString(),
+                    Anchor = anchor,
+                    NavOrder = navOrder,
+                    RawDepth = rawDepth,
+                    DepthFlattened = flattened,
+                    Locator = JsonSerializer.Serialize(new
+                    {
+                        spine = spineIdx,
+                        src = src ?? "",
+                        rawLevel = rawDepth,
+                        depthFlattened = flattened ? (bool?)true : null,
+                    }),
+                });
+                used.Add(chapterId);
+                Walk(np, rawDepth + 1, chapterId);
+            }
+            else
+            {
+                // 这一级指不到正文（封面等）→ 自己不入目录，但**继续往下走**，
+                // 否则"顶部挂一个封面 navPoint"会让整本书的目录全丢。
+                // src 非空却对不上 = 契约 N2(c) 的丢弃，计入 tocDropped（无 src 的是纯分组节点，不算丢弃）。
+                if (!string.IsNullOrWhiteSpace(src)) dropped++;
+                Walk(np, rawDepth, parentId);
+            }
+        }
+    }
+    Walk(navMap, 0, null);
+    tocDropped = dropped;
+    return list;
+}
+
+// 没有 NCX 时的兜底：spine 里每个 XHTML 算一节。
+// 标题优先取文档里首个 h1~h3 —— 契约 §9-11 也写了 <title>，
+// 但 EPUB 的 <title> 十有八九是**书名重复**（整本目录会变成 400 行一样的书名），
+// 所以把 <title> 放在标题之后作为次选（已在契约 §12.1 记账）。
+static List<ChapterRow> EpubChaptersFromSpine(List<string> spine, string source)
+{
+    var list = new List<ChapterRow>();
+    for (int i = 0; i < spine.Count; i++)
+        list.Add(new ChapterRow
+        {
+            ChapterId = $"epub:{i}",
+            Ord = i + 1,
+            Depth = 0,
+            ParentId = null,
+            Title = "",
+            Kind = "chapter",
+            Source = source,
+            SpineKey = i.ToString(),
+            NavOrder = i + 1,
+            Locator = JsonSerializer.Serialize(new { spine = i }),
+        });
+    return list;
+}
+
+// ── EPUB 章节区间：**一次开包**按文档序算完全书（契约 §1.4.1 N1–N8）────────
+//
+// 为什么必须一次开包：老做法"读哪一章就开一次 zip"，毛泽东选集 410 章 = 410 次解包。
+//
+// 为什么要跟 Content 对齐：`Chapters.CharStart/CharEnd` 的坐标系是 **Items.Content 原文**（§1.2），
+// 而 Content 是**导入期**拼出来的：图片 src 已被改写成带随机 GUID 的 `file://` URL。
+// 所以抽取期重算正文**不可能逐字节相同**。做法是"重算 + 对齐"：
+// 重算时把图片 src 换成占位符（唯一允许不同的是这个属性值），再与库里的 Content 逐字符比对；
+// 对不上就整体放弃偏移（退回按文件读），**宁缺勿错** —— 错位的 CharStart 会让每一章都读错。
+
+const string AlignImgMarker = "SIPIMGPLACEHOLDER0";
+
+// 重算一篇 XHTML 的 body HTML：与 ExtractEpubHtml 同一套处理（去 style/class、认图片），
+// 但**不落盘**（导入那次已经落过盘了），图片 src 用占位符 —— 直接调 ExtractEpubHtml 会把
+// 图片按新 GUID 再写一遍，既污染 assets 又拿不到与 Content 相同的字符串。
+static string RebuildBodyHtmlForAlign(string html, ZipArchive zip, string xhtmlDir)
+{
+    var doc = new HtmlAgilityPack.HtmlDocument();
+    doc.LoadHtml(html);
+    foreach (var img in (doc.DocumentNode.SelectNodes("//img[@src]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>()).ToList())
+    {
+        var src = img.GetAttributeValue("src", "");
+        if (string.IsNullOrWhiteSpace(src)) continue;
+        var rel = ResolveZipPath(xhtmlDir, src.TrimStart('/'));
+        var entry = zip.GetEntry(rel) ?? zip.GetEntry(rel.TrimStart('/'));
+        if (entry == null) continue;   // 导入期同样"抽不到就保留原 src"（那种情况对齐会失败 → 放弃偏移）
+        img.SetAttributeValue("src", AlignImgMarker);
+        img.Attributes.Remove("style"); img.Attributes.Remove("class"); img.Attributes.Remove("alt");
+    }
+    foreach (var n in (doc.DocumentNode.SelectNodes("//*[@style]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>()).ToList()) n.Attributes.Remove("style");
+    foreach (var n in (doc.DocumentNode.SelectNodes("//*[@class]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>()).ToList()) n.Attributes.Remove("class");
+    var body = doc.DocumentNode.SelectSingleNode("//body") ?? doc.DocumentNode;
+    return body.InnerHtml;
+}
+
+// 占位符处允许 Content 里是**任意**属性值（引号内的内容）：把重算串按占位符切开，
+// 逐段与 Content 比，段与段之间跳到下一个引号 —— 这就是"除了图片 URL 其余必须逐字符相同"。
+static bool ConsumeWithWildcard(string content, int pos, string rebuilt, out int end)
+{
+    end = pos;
+    var parts = rebuilt.Split(AlignImgMarker);
+    for (int k = 0; k < parts.Length; k++)
+    {
+        string part = parts[k];
+        if (part.Length > 0)
+        {
+            if (end + part.Length > content.Length) return false;
+            if (string.CompareOrdinal(content, end, part, 0, part.Length) != 0) return false;
+            end += part.Length;
+        }
+        if (k == parts.Length - 1) break;
+        int q = content.IndexOf('"', end);
+        if (q < 0) return false;
+        end = q;                        // 停在结束引号上，下一段以 `"` 开头，正好接上
+    }
+    return true;
+}
+
+// 把 spine 里的文件按**文档序**读一遍，与 Items.Content 对齐，给出每个文件在 Content 里的 [start,end)。
+// 任一处对不上就返回 false：调用方退回"按文件读"的老行为，不写偏移。
+static bool TryAlignSpineBodies(ZipArchive zip, List<string> spine, string content,
+    out int[] starts, out int[] ends)
+{
+    starts = new int[spine.Count];
+    ends = new int[spine.Count];
+    long budget = EpubMaxTotalBytes;
+    int pos = 0;
+    for (int i = 0; i < spine.Count; i++)
+    {
+        string? html = ReadZipText(zip, spine[i], ref budget);
+        if (html == null) return false;
+        string rebuilt = RebuildBodyHtmlForAlign(html, zip, PosixDir(spine[i]));
+        if (rebuilt.Length == 0) return false;
+        starts[i] = pos;
+        if (!ConsumeWithWildcard(content, pos, rebuilt, out int e)) return false;
+        ends[i] = e;
+        pos = e;
+        if (i < spine.Count - 1)
+        {
+            // ReadEpubFile 在每个文件之后都补了 "\n\n"（含最后一个）
+            if (pos + 2 > content.Length || content[pos] != '\n' || content[pos + 1] != '\n') return false;
+            pos += 2;
+        }
+    }
+    return true;
+}
+
+// 找锚点元素在**给定文本范围内**的起始位置：认 `id="x"` 与 HTML4 风格的 `<a name="x">`（N2(a)）。
+// 不用 HtmlNode.StreamPosition —— 那是**原始文档**下标，而我们要的是返回字符串里的下标（附录 C 第 1 条）。
+static int FindAnchorTagStart(string text, string anchor, int from, int to)
+{
+    if (to > text.Length) to = text.Length;
+    int idx = from;
+    while (idx < to)
+    {
+        int a = text.IndexOf(anchor, idx, to - idx, StringComparison.Ordinal);
+        if (a < 0) return -1;
+        idx = a + 1;
+        if (a <= from) continue;
+        char quote = text[a - 1];
+        if (quote != '"' && quote != '\'') continue;
+        int q = a - 2;
+        while (q >= from && text[q] != '=') q--;
+        if (q < from) continue;
+        int r = q - 1;
+        while (r >= from && char.IsWhiteSpace(text[r])) r--;
+        int s = r;
+        while (s >= from && (char.IsLetterOrDigit(text[s]) || text[s] == '-' || text[s] == '_' || text[s] == ':')) s--;
+        string attr = text[(s + 1)..(r + 1)];
+        if (!attr.Equals("id", StringComparison.OrdinalIgnoreCase)
+            && !attr.Equals("name", StringComparison.OrdinalIgnoreCase)) continue;
+        int lt = text.LastIndexOf('<', a);
+        if (lt < from) return -1;
+        int gt = text.IndexOf('>', lt);
+        if (gt > a || gt < 0) return lt;    // 属性值确实在标签内
+    }
+    return -1;
+}
+
+// 主力：N1 文档序排序 → N3 跨文件终点 → N7 卷首合成章 → N8 覆盖不变量。
+// 就地把 rows 改写为"按 Ord 排序、相邻区间首尾相接、整体覆盖 [0, Content.Length)"。
+static void SliceEpubChapters(ZipArchive zip, List<string> spine, List<ChapterRow> rows, string content)
+{
+    if (rows.Count == 0 || spine.Count == 0 || content.Length == 0) return;
+    if (!TryAlignSpineBodies(zip, spine, content, out var starts, out var ends)) return;
+
+    var located = new List<(int Start, ChapterRow Row)>();
+    var leftover = new List<ChapterRow>();
+    foreach (var r in rows)
+    {
+        if (r.SpineKey == null || !int.TryParse(r.SpineKey, out int si))
+        {
+            leftover.Add(r);
+            continue;
+        }
+        if (si < 0 || si >= starts.Length)
+        {
+            leftover.Add(r);
+            continue;
+        }
+        int start = starts[si];
+        if (!string.IsNullOrEmpty(r.Anchor))
+        {
+            // N2(a)：文件内找到锚点元素 → 该元素起始处；N2(b)：找不到 → 该 spine 片段的起点（降级不丢章）
+            int a = FindAnchorTagStart(content, r.Anchor!, starts[si], ends[si]);
+            if (a >= 0) start = a;
+        }
+        located.Add((start, r));
+    }
+    if (located.Count == 0) return;
+
+    // N1 排序键 = **文档序**（不是目录序）：同一起点再按目录出现顺序打平，保证确定性。
+    located.Sort((x, y) =>
+    {
+        int c = x.Start.CompareTo(y.Start);
+        if (c != 0) return c;
+        c = x.Row.NavOrder.CompareTo(y.Row.NavOrder);
+        return c != 0 ? c : string.CompareOrdinal(x.Row.ChapterId, y.Row.ChapterId);
+    });
+
+    var usedIds = new HashSet<string>(rows.Select(r => r.ChapterId), StringComparer.Ordinal);
+    ChapterRow? front = null;
+    if (located[0].Start > 0)
+    {
+        // N7 卷首合成章：第一个目录项之前的封面/版权/目录页不许丢进黑洞。
+        // chapterId 必须落在 §1.3 的正则内（`epub:<spine>~<anchor>`），所以用 `epub:0~front`。
+        string fid = "epub:0~front";
+        int k = 2;
+        while (usedIds.Contains(fid)) fid = $"epub:0~front{k++}";
+        front = new ChapterRow
+        {
+            ChapterId = fid, Ord = 1, Depth = 0, ParentId = null, Title = "",
+            Kind = "front", Source = rows[0].Source, SpineKey = "0", NavOrder = 0,
+            CharStart = 0, CharEnd = located[0].Start, CharCount = located[0].Start,
+            Locator = JsonSerializer.Serialize(new { synthetic = true, spine = 0 }),
+        };
+    }
+
+    // N3 终点 = **全局下一个已定位目录项的起点**（可跨文件）：一条目录项指向的位置之后、
+    // 下一条目录项目标之前的那些 spine 文件，仍然属于该章。最后一个到 Content 末尾。
+    var ordered = new List<ChapterRow>();
+    if (front != null) ordered.Add(front);
+    for (int i = 0; i < located.Count; i++)
+    {
+        var (start, row) = located[i];
+        int end = i + 1 < located.Count ? located[i + 1].Start : content.Length;
+        if (end < start) end = start;
+        row.CharStart = start;
+        row.CharEnd = end;
+        row.CharCount = end - start;
+        if (end == start && row.Kind == "chapter")
+        {
+            // N4 零长度是合法的（父章自己没有段落）→ 保留行并记账；零长度章永远不会被引用（I4 天然成立）
+            try
+            {
+                using var d = JsonDocument.Parse(row.Locator);
+                var o = new Dictionary<string, object?>();
+                foreach (var p in d.RootElement.EnumerateObject()) o[p.Name] = p.Value.ValueKind == JsonValueKind.True ? true : p.Value.ValueKind == JsonValueKind.False ? false : p.Value.ValueKind == JsonValueKind.Number ? p.Value.GetInt64() : (object?)p.Value.GetString();
+                o["zeroLength"] = true;
+                row.Locator = JsonSerializer.Serialize(o);
+            }
+            catch { /* Locator 坏了不影响切片 */ }
+        }
+        ordered.Add(row);
+    }
+    ordered.AddRange(leftover);
+
+    // Ord 重排：书内顺序从 1 连续（N7 说卷首占 1，其余顺延）
+    for (int i = 0; i < ordered.Count; i++) ordered[i].Ord = i + 1;
+
+    rows.Clear();
+    rows.AddRange(ordered);
+}
+
+// ── PDF：书签树 / 页级降级 ──────────────────────────────────────────
+
+// PDF 的目录**只有**两个来源：书签树，或者退化成"每页一章"。
+// 契约 §11-2 明令不许按字号/加粗猜标题 —— 那看着像目录，实际是编的。
+static (List<ChapterRow> Rows, int PageCount, bool HasTextLayer) ExtractPdfChapters(string pdfPath)
+{
+    var rows = new List<ChapterRow>();
+    int pageCount = 0;
+    bool hasText = false;
+    try
+    {
+        using var doc = PdfDocument.Open(pdfPath);
+        pageCount = doc.NumberOfPages;
+
+        var nodes = new List<(string Title, int Level, int Page)>();
+        try
+        {
+            if (doc.TryGetBookmarks(out var bookmarks) && bookmarks != null)
+                foreach (var n in bookmarks.GetNodes())
+                {
+                    // 只有 DocumentBookmarkNode 有真正的目标页；Container 之类是纯分组节点，跳过
+                    if (n is DocumentBookmarkNode d && d.PageNumber >= 1 && d.PageNumber <= pageCount)
+                        nodes.Add((CleanTitle(d.Title), n.Level, d.PageNumber));
+                }
+        }
+        catch { /* 书签坏了就当没有书签，不让整本书的目录陪葬 */ }
+
+        if (nodes.Count > 0)
+        {
+            // 书签页码实测是 **1 基**，与 GetPage(n) 直接对齐（物理/政治/哲学等 6 份真书交叉验证过）。
+            // 同一页可能挂多个书签，而 chapterId 编码 pdf:p<page> 不允许重复 —— 按页去重保留首个。
+            var seen = new HashSet<int>();
+            // 用 ord 做 ParentId 需要先知道每个节点在**去重后**列表里的位置，
+            // 所以两趟：先定层级栈，再编号。
+            var kept = new List<(string Title, int Level, int Page)>();
+            foreach (var n in nodes)
+                if (seen.Add(n.Page)) kept.Add(n);
+
+            var stack = new List<(int Level, string Id)>();
+            // N7 的 PDF 版：第一个书签**之前**的页（封面/版权/前言）单独成一行，
+            // 否则它没有任何章认领 —— 页级覆盖不变量（N8）在这里就断了。
+            // 它的 chapterId 用 pdf:p1；因为所有保留书签的页都 ≥ 第一页，两者不会撞键。
+            bool front = kept[0].Page > 1;
+            if (front)
+                rows.Add(new ChapterRow
+                {
+                    ChapterId = "pdf:p1", Ord = 1, Depth = 0, ParentId = null, Title = "",
+                    Kind = "front", Source = "bookmark",
+                    PageStart = 1, PageEnd = kept[0].Page - 1,
+                    Locator = JsonSerializer.Serialize(new { synthetic = true, page = 1 }),
+                });
+            for (int i = 0; i < kept.Count; i++)
+            {
+                var (title, level, page) = kept[i];
+                while (stack.Count > 0 && stack[^1].Level >= level) stack.RemoveAt(stack.Count - 1);
+                string? parentId = stack.Count > 0 ? stack[^1].Id : null;
+                if (parentId != null && parentId == $"pdf:p{page}") parentId = null;   // 父章与自己在同一页 → 不设父
+                string id = $"pdf:p{page}";
+                rows.Add(new ChapterRow
+                {
+                    ChapterId = id, Ord = (front ? 1 : 0) + i + 1, Depth = level, ParentId = parentId,
+                    Title = title, Kind = "chapter", Source = "bookmark",
+                    PageStart = page,
+                    Locator = JsonSerializer.Serialize(new { page }),
+                });
+                stack.Add((level, id));
+            }
+            // PageEnd = 下一章起始页 - 1；末章 = 总页数。这样"这一章占哪几页"是确定的。
+            for (int i = 0; i < rows.Count; i++)
+                rows[i].PageEnd = (i + 1 < rows.Count ? rows[i + 1].PageStart!.Value - 1 : pageCount);
+        }
+        else if (pageCount > 0)
+        {
+            // 无书签：**每页一章，标题留空**。不写"第 N 页"进 Title ——
+            // 位置由 Kind='page' + PageStart 表达，标题栏该由界面拼，库里存的就是"没有标题"这个事实。
+            for (int p = 1; p <= pageCount; p++)
+                rows.Add(new ChapterRow
+                {
+                    ChapterId = $"pdf:p{p}", Ord = p, Depth = 0, ParentId = null,
+                    Title = "", Kind = "page", Source = "page", PageStart = p, PageEnd = p,
+                    Locator = JsonSerializer.Serialize(new { page = p }),
+                });
+        }
+        hasText = PdfHasTextLayer(doc, pageCount);
+    }
+    catch { /* 打不开/损坏 → 返回空，由调用方给出可读的降级说明；绝不抛到导入路径上 */ }
+    return (rows, pageCount, hasText);
+}
+
+// 抽样判"有没有文本层"。不逐页扫全本：扫描件的判定只需要几页就能看出来，
+// 而一本 700 页的书逐页抽文本会让"打开目录"变成一次几秒的卡顿。
+static bool PdfHasTextLayer(PdfDocument doc, int pageCount)
+{
+    if (pageCount <= 0) return false;
+    int probes = Math.Min(8, pageCount);
+    int withText = 0;
+    for (int k = 0; k < probes; k++)
+    {
+        int p = probes == 1 ? 1 : 1 + (int)((long)k * (pageCount - 1) / (probes - 1));
+        try { if ((doc.GetPage(p).Text ?? "").Trim().Length > 20) withText++; }
+        catch { }
+    }
+    return withText > 0;
+}
+
+// ── PDF 逐页文本落库（契约 §1.5.1）────────────────────────────────────
+
+// 过期判定用**文件指纹**（大小 + mtime），不能用 Items.Content 的哈希：
+// PDF 的 Content 是 ReadPdfFile 写进去的那句永不变化的占位话，
+// 拿它当指纹等于**永远判「没变」**，抽过一次就再也不会刷新。
+static string PdfFingerprint(string path)
+{
+    var fi = new FileInfo(path);
+    return $"{fi.Length}-{fi.LastWriteTimeUtc.Ticks}";
+}
+
+// 抽取并落库一本 PDF 的逐页文本。**全程不调用任何模型**（验收 A33：导入与懒回填必须 0 次 embedding）。
+// 扫描件逐页 0 字是**正常结果** —— 行照样写，这样上层才能区分
+// 「已经抽过了、这一份确实没文字」与「还没抽过」。只写 0 行是分不出这两件事的。
+static (bool Ok, int Pages, string? ErrorCode, string? ErrorMessage) EnsurePdfPages(
+    string dbPath, int itemId, string pdfPath)
+{
+    if (string.IsNullOrWhiteSpace(pdfPath) || !File.Exists(pdfPath))
+        return (false, 0, "FILE_GONE", ChapterErrorText("FILE_GONE"));
+
+    string fp = PdfFingerprint(pdfPath);
+    // 已抽过且文件没变 → 直接返回，不重抽（幂等 + 省时间）。整本 700 页的书重抽要好几秒。
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var c = conn.CreateCommand();
+        c.CommandText = "SELECT COUNT(*), COALESCE(MAX(SourceHash),'') FROM PdfPages WHERE ItemId = @id";
+        c.Parameters.AddWithValue("@id", itemId);
+        using var r = c.ExecuteReader();
+        if (r.Read() && r.GetInt32(0) > 0 && r.GetString(1) == fp)
+            return (true, r.GetInt32(0), null, null);
+    }
+    catch { /* 读不了就当没抽过，下面重抽 */ }
+
+    var texts = new List<string>();
+    try
+    {
+        using var doc = PdfDocument.Open(pdfPath);
+        int pageCount = doc.NumberOfPages;
+        for (int p = 1; p <= pageCount; p++)
+        {
+            string t = "";
+            try { t = (doc.GetPage(p).Text ?? "").Trim(); }
+            catch { /* 单页坏了不连累整本：该页留空，其余照常 */ }
+            texts.Add(t);
+        }
+    }
+    catch (Exception ex)
+    {
+        // 契约 §1.5：异常必须包住。**失败不写行** —— 写半本会把「已抽取」变成假的，
+        // 而这正是扫描件判定与过期判定都依赖的那个事实。
+        Console.Error.WriteLine($"[pdfpages] extract failed (itemId={itemId}): {ex}");
+        return (false, 0, "PDF_UNREADABLE", ChapterErrorText("PDF_UNREADABLE"));
+    }
+
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        using (var del = conn.CreateCommand())
+        {
+            del.Transaction = tx;
+            del.CommandText = "DELETE FROM PdfPages WHERE ItemId = @id";   // 幂等：覆盖旧结果
+            del.Parameters.AddWithValue("@id", itemId);
+            del.ExecuteNonQuery();
+        }
+
+        // 每个参数都**显式绑定**（AddWithValue），不复用命令对象跨两次 CommandText ——
+        // 复用会让参数集合与语句生命周期错位，症状是运行时才炸的
+        // "Must add values for the following parameters"（实测踩到过，构建期完全看不出来）。
+        string now = DateTime.Now.ToString("O");
+        using (var ins = conn.CreateCommand())
+        {
+            ins.Transaction = tx;
+            ins.CommandText = @"
+                INSERT INTO PdfPages (ItemId, Page, Text, CharCount, ExtractedAt, SourceHash, RulesVersion)
+                VALUES (@id, @p, @t, @cc, @now, @fp, @rv)";
+            var pid = ins.Parameters.Add("@id", SqliteType.Integer);
+            var pp = ins.Parameters.Add("@p", SqliteType.Integer);
+            var pt = ins.Parameters.Add("@t", SqliteType.Text);
+            var pcc = ins.Parameters.Add("@cc", SqliteType.Integer);
+            var pnow = ins.Parameters.Add("@now", SqliteType.Text);
+            var pfp = ins.Parameters.Add("@fp", SqliteType.Text);
+            var prv = ins.Parameters.Add("@rv", SqliteType.Integer);
+            pid.Value = itemId;
+            pnow.Value = now;
+            pfp.Value = fp;
+            prv.Value = ChapterRulesVersion;
+            for (int i = 0; i < texts.Count; i++)
+            {
+                pp.Value = i + 1;                 // 1 基，与书签/--page/pdf:p<N> 同一编号
+                pt.Value = texts[i];
+                pcc.Value = texts[i].Length;
+                ins.ExecuteNonQuery();
+            }
+        }
+        tx.Commit();
+        return (true, texts.Count, null, null);
+    }
+    catch (SqliteException ex)
+    {
+        // B2：不回显 ex.Message（它可能带数据目录绝对路径），细节只进服务端日志
+        Console.Error.WriteLine($"[pdfpages] write failed (itemId={itemId}): {ex.Message}");
+        return (false, 0, "DB_WRITE_FAILED", ChapterErrorText("DB_WRITE_FAILED"));
+    }
+}
+
+// 取某一页的文本。返回 null = 还没抽取（与「抽过但没有文字」区分开，后者是空串）。
+static string? PdfPageText(string dbPath, int itemId, int page)
+{
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Text FROM PdfPages WHERE ItemId = @id AND Page = @p";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        cmd.Parameters.AddWithValue("@p", page);
+        var v = cmd.ExecuteScalar();
+        return v == null || v is DBNull ? null : (string)v;
+    }
+    catch { return null; }
+}
+
+// ── 落库 / 懒回填（契约 §1.6）────────────────────────────────────────
+
+static string ContentHash16(string content)
+    => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content ?? "")))[..16].ToLowerInvariant();
+
+// 一本书的"阅读项"信息。**只认本地导入源**（Feeds.FeedUrl='local://import'）——
+// 这是审计约束 #5：新加的按章/按页读取若只按 Items.Id 查，RSS 文章的 id
+// 就能被拿来探文件路径（Link 是任意 URL/路径）。
+static (string Title, string Link, string Ext, int? Pages, string Content)? ImportBookOf(string dbPath, int itemId)
+{
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.Title, i.Link, COALESCE(i.Content,''), i.PageCount
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Id = @id AND f.FeedUrl = 'local://import'";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        string link = r.IsDBNull(1) ? "" : r.GetString(1);
+        string ext = "";
+        try { ext = Path.GetExtension(link).TrimStart('.').ToLowerInvariant(); } catch { }
+        return (r.IsDBNull(0) ? "" : r.GetString(0), link, ext,
+                r.IsDBNull(3) ? (int?)null : r.GetInt32(3),
+                r.IsDBNull(2) ? "" : r.GetString(2));
+    }
+    catch { return null; }
+}
+
+// 抽取一本书的章节。**纯本地、只读原文件**，不联网、不需要 AI 配置（契约 I2）。
+static (List<ChapterRow> Rows, string? Error) ExtractChapters(string link, string ext, string content)
+{
+    if (ext == "pdf")
+    {
+        if (string.IsNullOrWhiteSpace(link) || !File.Exists(link)) return (new(), "FILE_GONE");
+        var (rows, pageCount, _) = ExtractPdfChapters(link);
+        return rows.Count == 0 ? (new(), "PDF_UNREADABLE") : (rows, null);
+    }
+
+    if (ext == "epub")
+    {
+        if (string.IsNullOrWhiteSpace(link) || !File.Exists(link)) return (new(), "FILE_GONE");
+        try
+        {
+            using var zip = ZipFile.OpenRead(link);
+            if (zip.Entries.Count > EpubMaxEntries) return (new(), "EPUB_TOO_MANY_ENTRIES");
+            long budget = EpubMaxTotalBytes;
+            string? opf = EpubOpfPath(zip, ref budget);
+            var (spine, ncxPath) = opf == null ? (new List<string>(), null) : EpubStructure(zip, opf, ref budget);
+
+            List<ChapterRow> rows = new();
+            if (ncxPath != null)
+            {
+                string? ncxXml = ReadZipText(zip, ncxPath, ref budget);
+                if (ncxXml != null) rows = EpubChaptersFromNcx(ncxXml, spine, ncxPath, out _);
+            }
+            // 没有 NCX / NCX 一条都对不上 → 退到 spine（Source='spine'），别把目录功能整体砍掉
+            if (rows.Count == 0) rows = EpubChaptersFromSpine(spine, "spine");
+            // 一次开包，按文档序把全书切完（N1–N8）：跨文件边界延续、卷首合成章、覆盖不变量。
+            // 对齐失败时它什么都不做 —— 行还留着，只是 CharStart/CharEnd 为空，退回按文件读。
+            if (rows.Count > 0) SliceEpubChapters(zip, spine, rows, content);
+            return rows.Count == 0 ? (new(), "ARCHIVE_UNREADABLE") : (rows, null);
+        }
+        catch (InvalidDataException) { return (new(), "ARCHIVE_UNREADABLE"); }
+        catch (IOException) { return (new(), "ARCHIVE_UNREADABLE"); }
+    }
+
+    // mobi/docx/txt/md：没有出版方目录可用 → 按标题切（契约 §11-2 允许的**唯一**启发式，
+    // 且必须如实标 Source='heading'，不许假装是书里的目录）
+    var secs = SectionChaptersFromContent(content);
+    return secs.Count == 0 ? (new(), "NO_HEADINGS") : (secs, null);
+}
+
+// 非 EPUB/PDF 的文本格式按标题切节。key = "sec:<n>"（1 基），契约 §1.3。
+static List<ChapterRow> SectionChaptersFromContent(string content)
+{
+    var list = new List<ChapterRow>();
+    if (string.IsNullOrWhiteSpace(content)) return list;
+    string plain = LooksLikeHtml(content) ? StripHtml(content) : content;
+    var lines = plain.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+    int n = 0;
+    for (int i = 0; i < lines.Length; i++)
+    {
+        string t = lines[i].Trim();
+        // 只有"独立的短行"才算标题：正文里一句以 # 开头的话不该变成章节
+        bool isMd = t.StartsWith("#", StringComparison.Ordinal) && t.TrimStart('#').Trim().Length is > 0 and <= 60;
+        bool isNum = Regex.IsMatch(t, @"^第\s*[0-9一二三四五六七八九十百]+\s*[章节篇部]\b") && t.Length <= 60;
+        if (!isMd && !isNum) continue;
+        string title = CleanTitle(t.TrimStart('#').Trim());
+        if (title.Length == 0) continue;
+        n++;
+        list.Add(new ChapterRow
+        {
+            ChapterId = $"sec:{n}", Ord = n, Depth = 0, ParentId = null,
+            Title = title, Kind = "chapter", Source = "heading",
+            Locator = JsonSerializer.Serialize(new { line = i + 1 }),
+        });
+    }
+    // 给每节算正文区间：本节标题之后到下一节标题之前。
+    // 用**平凡文本**里的偏移，因而这里的 CharStart/CharEnd 对不上 Items.Content 原文（后者是 HTML）。
+    // 这种书的切片改用正文里的标题单调搜索（见 ReadChapterContent），所以这里不填偏移。
+    return list;
+}
+
+// 需不需要（重新）建章节：契约 §1.6 的 R-a / R-b / R-c
+static bool ChaptersNeedBuild(string dbPath, int itemId, string contentHash, out int existing)
+{
+    existing = 0;
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*), COALESCE(MAX(SourceHash),''), COALESCE(MAX(RulesVersion),0) FROM Chapters WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return true;
+        existing = r.GetInt32(0);
+        string hash = r.GetString(1);
+        int rules = r.GetInt32(2);
+        if (existing == 0) return true;                       // R-a 新书
+        if (hash != contentHash) return true;                 // R-b 正文变过
+        if (rules < ChapterRulesVersion) return true;         // R-c 抽取规则升级
+        return false;
+    }
+    catch { return true; }
+}
+
+// 懒回填：第一次有人要目录时才建，**一次只处理一本书**（契约 §1.6 明令禁止全库回填 ——
+/// 一本 30 万字的书就是一次解包 + 解析，全库就是卡死）。
+// 失败时**不写任何行**：写"空目录"会让 R-a 永久为假，等于把一次偶发失败固化下来。
+static (bool Backfilled, int Count, string? ErrorCode, string? ErrorMessage) EnsureChapters(
+    string dbPath, int itemId, string content, string link, string ext, bool force = false)
+{
+    string hash = ContentHash16(content);
+    // PDF 的逐页文本与章节目录**同一趟懒回填**（契约 §1.5.1）：两者都只读原文件、都不碰模型。
+    // 放在**早退之前**：一本书的目录可能早就建好了，但页文本是后加的、还没抽过。
+    // 它自己按文件指纹判过期，所以这里无条件调是安全的（幂等且不重抽）。
+    if (ext == "pdf") EnsurePdfPages(dbPath, itemId, link);
+    if (!force && !ChaptersNeedBuild(dbPath, itemId, hash, out int _))
+        return (false, ChapterCount(dbPath, itemId), null, null);
+
+    var (rows, err) = ExtractChapters(link, ext, content);
+    if (err != null) return (false, 0, err, ChapterErrorText(err));
+
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        using var tx = conn.BeginTransaction();
+        var cmd = conn.CreateCommand();
+        // 只动 Chapters 自己的行，绝不碰 Items 的任何一个字段（I1 的锚点侧对应物）
+        cmd.CommandText = "DELETE FROM Chapters WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        cmd.ExecuteNonQuery();
+
+        cmd.CommandText = @"
+            INSERT INTO Chapters (ItemId, ChapterId, Ord, Depth, ParentId, Title, Kind, Source, Locator,
+                                  CharStart, CharEnd, PageStart, PageEnd, CharCount, FirstBlock,
+                                  SourceHash, RulesVersion, CreatedAt)
+            VALUES (@itemId, @cid, @ord, @depth, @parent, @title, @kind, @src, @loc,
+                    @cs, @ce, @ps, @pe, @cc, @fb, @hash, @rv, @now)";
+        var pItem = cmd.Parameters.Add("@itemId", SqliteType.Integer);
+        var pCid = cmd.Parameters.Add("@cid", SqliteType.Text);
+        var pOrd = cmd.Parameters.Add("@ord", SqliteType.Integer);
+        var pDepth = cmd.Parameters.Add("@depth", SqliteType.Integer);
+        var pParent = cmd.Parameters.Add("@parent", SqliteType.Text);
+        var pTitle = cmd.Parameters.Add("@title", SqliteType.Text);
+        var pKind = cmd.Parameters.Add("@kind", SqliteType.Text);
+        var pSrc = cmd.Parameters.Add("@src", SqliteType.Text);
+        var pLoc = cmd.Parameters.Add("@loc", SqliteType.Text);
+        var pCs = cmd.Parameters.Add("@cs", SqliteType.Integer);
+        var pCe = cmd.Parameters.Add("@ce", SqliteType.Integer);
+        var pPs = cmd.Parameters.Add("@ps", SqliteType.Integer);
+        var pPe = cmd.Parameters.Add("@pe", SqliteType.Integer);
+        var pCc = cmd.Parameters.Add("@cc", SqliteType.Integer);
+        var pFb = cmd.Parameters.Add("@fb", SqliteType.Text);
+        var pHash = cmd.Parameters.Add("@hash", SqliteType.Text);
+        var pRv = cmd.Parameters.Add("@rv", SqliteType.Integer);
+        var pNow = cmd.Parameters.Add("@now", SqliteType.Text);
+
+        string now = DateTime.Now.ToString("O");
+        foreach (var c in rows)
+        {
+            pItem.Value = itemId;
+            pCid.Value = c.ChapterId;
+            pOrd.Value = c.Ord;
+            pDepth.Value = c.Depth;
+            pParent.Value = (object?)c.ParentId ?? DBNull.Value;
+            pTitle.Value = c.Title;
+            pKind.Value = c.Kind;
+            pSrc.Value = c.Source;
+            pLoc.Value = c.Locator;
+            pCs.Value = (object?)c.CharStart ?? DBNull.Value;
+            pCe.Value = (object?)c.CharEnd ?? DBNull.Value;
+            pPs.Value = (object?)c.PageStart ?? DBNull.Value;
+            pPe.Value = (object?)c.PageEnd ?? DBNull.Value;
+            pCc.Value = c.CharCount;
+            pFb.Value = c.FirstBlock;
+            pHash.Value = hash;
+            pRv.Value = ChapterRulesVersion;
+            pNow.Value = now;
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return (true, rows.Count, null, null);
+    }
+    catch (SqliteException ex)
+    {
+        // B2（审计判定口径）：**新写的 catch 一律返回固定文案 + 错误码，绝不把 ex.Message 回显**。
+        // 这里的 message 会一路进 /toc 的 chaptersError 和 CLI 的 --json，而 SQLite 的异常文本
+        // 可能带出数据目录的绝对路径。细节只进服务端日志。
+        Console.Error.WriteLine($"[chapters] writing chapters failed (itemId={itemId}): {ex.Message}");
+        return (false, 0, "DB_WRITE_FAILED", ChapterErrorText("DB_WRITE_FAILED"));
+    }
+}
+
+// 只读的目录摘要：**刻意不触发回填**。
+// 列表接口要用它 —— 否则"打开书库"会变成"把书架上每一本书都解包解析一遍"，那正是契约明令禁止的。
+// Count=0 表示"还没回填"，界面据此显示"未建目录"，而不是"这本书没有目录"。
+static (int Count, string? Source) ChapterSummary(string dbPath, int itemId)
+{
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*), COALESCE(MIN(Source),'') FROM Chapters WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return (0, null);
+        int n = r.GetInt32(0);
+        string src = r.GetString(1);
+        return (n, n > 0 && src.Length > 0 ? src : null);
+    }
+    catch { return (0, null); }
+}
+
+// 书的种类（契约 §2.2）：前端据此选渲染器，不要靠扩展名自己猜
+static string BookKindOf(string ext) => ext switch
+{
+    "epub" => "epub",
+    "pdf" => "pdf",
+    _ => "text",
+};
+
+static int ChapterCount(string dbPath, int itemId)
+{    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM Chapters WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+    }
+    catch { return 0; }
+}
+
+// 错误码 → 人话（错误码本身是协议，恒定英文、不进语言文件；只有这句人话走 i18n）
+static string ChapterErrorText(string code) => code switch
+{
+    "FILE_GONE" => Lang.T("The original file is gone, so the table of contents cannot be read"),
+    "ARCHIVE_UNREADABLE" => Lang.T("This EPUB could not be read (corrupted or DRM-protected)"),
+    "EPUB_TOO_MANY_ENTRIES" => Lang.T("This EPUB has too many entries to read safely"),
+    "PDF_UNREADABLE" => Lang.T("This PDF could not be read (corrupted or unsupported)"),
+    "DB_WRITE_FAILED" => Lang.T("Could not save the table of contents"),
+    _ => Lang.T("Could not read the table of contents"),
+};
+
+static List<ChapterRow> ChaptersOf(string dbPath, int itemId)
+{
+    var list = new List<ChapterRow>();
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT ChapterId, Ord, Depth, ParentId, Title, Kind, Source, Locator,
+                                   CharStart, CharEnd, PageStart, PageEnd, CharCount, FirstBlock
+                            FROM Chapters WHERE ItemId = @id ORDER BY Ord";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new ChapterRow
+            {
+                ChapterId = r.GetString(0),
+                Ord = r.GetInt32(1),
+                Depth = r.GetInt32(2),
+                ParentId = r.IsDBNull(3) ? null : r.GetString(3),
+                Title = r.IsDBNull(4) ? "" : r.GetString(4),
+                Kind = r.GetString(5),
+                Source = r.GetString(6),
+                Locator = r.IsDBNull(7) ? "{}" : r.GetString(7),
+                CharStart = r.IsDBNull(8) ? null : r.GetInt32(8),
+                CharEnd = r.IsDBNull(9) ? null : r.GetInt32(9),
+                PageStart = r.IsDBNull(10) ? null : r.GetInt32(10),
+                PageEnd = r.IsDBNull(11) ? null : r.GetInt32(11),
+                CharCount = r.GetInt32(12),
+                FirstBlock = r.IsDBNull(13) ? "" : r.GetString(13),
+            });
+        }
+    }
+    catch { }
+    return list;
+}
+
+// ── 读一章 / 读一页 / 关键词定位（契约 §3）────────────────────────────
+
+// 按片段锚点从一份 XHTML 里切出"这一章"。
+// 为什么需要它：中国哲学简史是 33 个 XHTML 却挂了 200 个 navPoint（一个文件好几章），
+// 整篇给出去就等于"问第 5 章，AI 读到的是第 1~7 章"。
+static string SliceHtmlByAnchors(string html, string? startAnchor, string? endAnchor)
+{
+    var doc = new HtmlAgilityPack.HtmlDocument();
+    doc.LoadHtml(html);
+    // 与 ExtractEpubHtml 一致：表现层属性进来就丢掉
+    foreach (var n in (doc.DocumentNode.SelectNodes("//*[@style]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>()).ToList())
+        n.Attributes.Remove("style");
+    foreach (var n in (doc.DocumentNode.SelectNodes("//*[@class]") ?? Enumerable.Empty<HtmlAgilityPack.HtmlNode>()).ToList())
+        n.Attributes.Remove("class");
+    var body = doc.DocumentNode.SelectSingleNode("//body") ?? doc.DocumentNode;
+    if (string.IsNullOrEmpty(startAnchor)) return body.InnerHtml;
+
+    var all = body.Descendants().ToList();
+    int si = all.FindIndex(n => n.GetAttributeValue("id", "") == startAnchor);
+    if (si < 0) return body.InnerHtml;
+    int ei = all.Count;
+    if (!string.IsNullOrEmpty(endAnchor))
+    {
+        int e = all.FindIndex(n => n.GetAttributeValue("id", "") == endAnchor);
+        if (e > si) ei = e;
+    }
+    var picked = new HashSet<HtmlAgilityPack.HtmlNode>();
+    var sb = new StringBuilder();
+    for (int i = si; i < ei && i < all.Count; i++)
+    {
+        var n = all[i];
+        bool covered = false;
+        for (var a = n.ParentNode; a != null; a = a.ParentNode)
+            if (picked.Contains(a)) { covered = true; break; }
+        if (covered) continue;
+        picked.Add(n);
+        sb.Append(n.OuterHtml);
+    }
+    return sb.Length > 0 ? sb.ToString() : body.InnerHtml;
+}
+
+// 从原文件精确取一章的**原始 HTML**（未净化）。拿不到返回 null，由调用方降级。
+static string? RawChapterHtml(string link, string ext, ChapterRow ch, List<ChapterRow> all, string content)
+{
+    if (ext == "epub")
+    {
+        // 章节区间已经算好（Content 坐标系，N1–N8）→ 直接从 Content 切。
+        // 这一步同时解决两件事：① 跨文件章一次切完（N3）；② **不用再开 zip**
+        // （410 章逐章开包的老问题就出在这里）。
+        if (ch.CharStart.HasValue && ch.CharEnd.HasValue
+            && ch.CharEnd.Value >= ch.CharStart.Value && ch.CharEnd.Value <= content.Length)
+            return content.Substring(ch.CharStart.Value, ch.CharEnd.Value - ch.CharStart.Value);
+
+        int spine = SpineIndexOfId(ch.ChapterId);
+        if (spine < 0) return null;
+        string? anchor = null;
+        int t = ch.ChapterId.IndexOf('~');
+        if (t >= 0) anchor = ch.ChapterId[(t + 1)..];
+        // 下一章的锚点（只在**同一个 spine 文件**里才有意义）
+        string? nextAnchor = null;
+        foreach (var o in all)
+        {
+            if (o.Ord <= ch.Ord) continue;
+            if (SpineIndexOfId(o.ChapterId) != spine) break;
+            int u = o.ChapterId.IndexOf('~');
+            if (u >= 0) { nextAnchor = o.ChapterId[(u + 1)..]; break; }
+            break;   // 下一章是整文件 → 本章就切到文件末尾
+        }
+        try
+        {
+            using var zip = ZipFile.OpenRead(link);
+            if (zip.Entries.Count > EpubMaxEntries) return null;
+            long budget = EpubMaxTotalBytes;
+            string? opf = EpubOpfPath(zip, ref budget);
+            if (opf == null) return null;
+            var (spineList, _) = EpubStructure(zip, opf, ref budget);
+            if (spine < 0 || spine >= spineList.Count) return null;
+            string? html = ReadZipText(zip, spineList[spine], ref budget);
+            return html == null ? null : SliceHtmlByAnchors(html, anchor, nextAnchor);
+        }
+        catch { return null; }
+    }
+    return null;   // PDF 本轮不抽文本；mobi/docx 走下面的按标题兜底
+}
+
+// 读一章。返回 (html 净化后, text, 章内字符数)；读不到返回 null。
+// 【必须】html 一律过 ToSafeBodyHtml（审计约束 #3）：EPUB 的 XHTML 是**书里的内容**，
+// 和 RSS 正文一样不可信；CSP 只是第二道防线，判定看服务端。
+static (string Html, string Text, int CharCount)? ReadChapterContent(
+    int itemId, ChapterRow ch, List<ChapterRow> all, string link, string ext, string content)
+{
+    string? raw = RawChapterHtml(link, ext, ch, all, content ?? "");
+
+    if (raw == null && ext != "pdf")
+    {
+        // 兜底 1：库内 Content 的偏移切片（只有算出来的偏移才用）
+        if (ch.CharStart.HasValue && ch.CharEnd.HasValue && ch.CharEnd.Value > ch.CharStart.Value
+            && ch.CharEnd.Value <= content.Length)
+            raw = content.Substring(ch.CharStart.Value, ch.CharEnd.Value - ch.CharStart.Value);
+        // 兜底 2：按标题在正文里单调搜索（heading 节用的就是这条）
+        else if (!string.IsNullOrWhiteSpace(ch.Title))
+        {
+            string probe = ch.Title!.Length > 30 ? ch.Title[..30] : ch.Title;
+            int at = content.IndexOf(probe, StringComparison.OrdinalIgnoreCase);
+            if (at >= 0)
+            {
+                int end = content.Length;
+                foreach (var o in all)
+                {
+                    if (o.Ord <= ch.Ord) continue;
+                    string pn = o.Title!.Length > 30 ? o.Title[..30] : o.Title;
+                    if (pn.Length == 0) continue;
+                    int e2 = content.IndexOf(pn, at + probe.Length, StringComparison.OrdinalIgnoreCase);
+                    if (e2 > at) { end = e2; break; }
+                }
+                raw = content.Substring(at, end - at);
+            }
+        }
+    }
+    if (raw == null) return null;
+
+    string safe = ToSafeBodyHtml(raw, itemId);
+    string text = StripHtml(safe);
+    return (safe, text, text.Length);
+}
+
+// 目录数据对象。CLI 的 --json 与 Web 的 GET /toc **共用这一份**（契约 §2.2）。
+static object TocPayload(string dbPath, int itemId, bool backfilled, string? errCode, string? errMsg)
+{
+    var book = ImportBookOf(dbPath, itemId);
+    string link = book?.Link ?? "";
+    string ext = book?.Ext ?? "";
+    var chapters = ChaptersOf(dbPath, itemId);
+    string? src = chapters.Count > 0 ? chapters[0].Source : null;
+    string kind = ext is "epub" or "pdf" or "text" ? ext : (ext == "pdf" ? "pdf" : "text");
+    bool isPdf = ext == "pdf";
+    int? pageCount = isPdf ? (book?.Pages ?? GetPdfPageCount(link)) : null;
+    if (isPdf && pageCount != null && chapters.Count > 0 && chapters[0].PageEnd.HasValue)
+        pageCount = Math.Max(pageCount.Value, chapters[^1].PageEnd!.Value);
+
+    // PDF 的"能不能读正文"是**逐份、且逐页**的事实（契约 §1.4 / §1.5.1 边界② / A26）：
+    // 判据只有一个 —— `PdfPages` 里 CharCount>0 的页数 > 0。不许再抽一次样本猜。
+    // 三种状态分开报，因为界面与 AI 要说的话完全不同：
+    //   not-extracted → "还没抽取"（可以触发回填，不是错误）
+    //   scanned       → "这一份没有文本层"（正常结果，只能给页码）
+    //   ok            → "能读"，并给出**有字/无字页数**，这样 AI 才说得出
+    //                   "第 1–24 页抽不出文字，那几页我只能给你页码"
+    int textPages = 0, emptyPages = 0, pageRows = 0;
+    if (isPdf)
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT COALESCE(SUM(CASE WHEN CharCount>0 THEN 1 ELSE 0 END),0),
+                                   COALESCE(SUM(CASE WHEN CharCount=0 THEN 1 ELSE 0 END),0),
+                                   COUNT(*)
+                            FROM PdfPages WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (r.Read()) { textPages = r.GetInt32(0); emptyPages = r.GetInt32(1); pageRows = r.GetInt32(2); }
+    }
+    bool pdfHasTextLayer = isPdf && textPages > 0;
+    string pdfTextState = !isPdf ? "n/a"
+        : pageRows == 0 ? "not-extracted"
+        : pdfHasTextLayer ? (emptyPages > 0 ? "partial" : "ok")
+        : "scanned";
+
+    return new
+    {
+        itemId,
+        title = book?.Title ?? "",
+        type = ext,
+        kind,
+        chaptersSource = src,
+        chapterCount = chapters.Count,
+        // textAvailable 表达的是"能不能**读**正文"：非 PDF 恒可读；PDF 取决于有没有抽到字。
+        // 扫描件为 false 是**正常结果**，不是错误 —— 见上面的三段状态。
+        textAvailable = !isPdf || pdfHasTextLayer,
+        pdfHasTextLayer,
+        pdfTextState,
+        textPages,
+        emptyPages,
+        pageCount,
+        indexed = ItemHasChunkVectors(dbPath, itemId),
+        backfilled,
+        chaptersError = errCode == null ? null : new { code = errCode, message = errMsg },
+        chapters = chapters.Select(c => new
+        {
+            chapterId = c.ChapterId,
+            ord = c.Ord,
+            depth = c.Depth,
+            parentId = c.ParentId,
+            title = c.Title,
+            kind = c.Kind,
+            source = c.Source,
+            charCount = c.CharCount,
+            pageStart = c.PageStart,
+            pageEnd = c.PageEnd,
+            firstBlock = c.FirstBlock,
+        }).ToList(),
+    };
+}
+
+// ⚠️ 已被取代，勿在新代码里使用。
+// 它回答的是"**这个文件里**有没有字"（现场开一遍 PDF 抽前几页采样）；
+// 而契约 §1.5.1 边界② 定的判据是"**抽到 `PdfPages` 里**有没有字"
+// （`COUNT(*) WHERE CharCount>0 > 0`）—— 因为前者会把"扫描件"与"还没抽取"
+// 说成同一件事，而那两件事给用户的下一步完全不同（一个只能给页码，一个该去触发回填）。
+// `TocPayload` 与 `--page` 都已改用后者。留着它是为了不让后来人以为还有两条判据。
+static bool? PdfHasTextLayerFile(string pdfPath)
+{
+    if (string.IsNullOrWhiteSpace(pdfPath) || !File.Exists(pdfPath)) return null;
+    try
+    {
+        using var doc = PdfDocument.Open(pdfPath);
+        return PdfHasTextLayer(doc, doc.NumberOfPages);
+    }
+    catch { return null; }
+}
+
+static bool ItemHasChunkVectors(string dbPath, int itemId)
+{
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM VectorsChunks WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0) > 0;
+    }
+    catch { return false; }
+}
+
+// 解析章节写法。**四级回查，顺序固定**（契约 §12.1-A45②）：
+//   1) 精确 ChapterId（脚本/AI 之间的正式写法）
+//   2) `#<ord>`（人手敲的写法，见 §3.1）
+//   3) **标题相等**（去空白后比较；同名取 Ord 最小者）
+//   4) **内容定位**：拿 leadHint（一段正文）去各章文本里找，命中即取那一章
+// 为什么要有 3 和 4：Web 端的"当前节"是**前端自己切出来的**（按 h1~h3 / 每 ~12000 字），
+// 与数据库 `Chapters` 行不是一回事。旧实现只认 1、2，于是前端送来的
+// 「第 N 节」这类兜底名一个都匹配不上 → 本章层整层为空（A45 的实测症状）。
+// 四级都不中 → 返回 null，由调用方降级（`chapter:none`），**不许猜**。
+//
+// resolveText 是可选的内容读取器：只有第 4 级需要它，且只在前面几级都落空时才会被调用
+// （所以 CLI 那种"按 id 查"的路径不会因此多读一次文件）。
+static ChapterRow? FindChapter(List<ChapterRow> list, string spec,
+    string? leadHint = null, Func<ChapterRow, string>? resolveText = null)
+{
+    if (list.Count == 0) return null;
+    if (string.IsNullOrEmpty(spec)) spec = "";
+
+    // 1) 精确 id
+    var hit = list.FirstOrDefault(c => c.ChapterId.Equals(spec, StringComparison.Ordinal));
+    if (hit != null) return hit;
+
+    // 2) #<ord>
+    if (spec.StartsWith('#'))
+    {
+        if (int.TryParse(spec[1..], out int ord))
+        {
+            hit = list.FirstOrDefault(c => c.Ord == ord);
+            if (hit != null) return hit;
+        }
+        // `#` 开头但解析不出 ord：**不再往下走**（它是显式的编号写法，标题/内容都不该兜底）
+        return null;
+    }
+
+    // 3) 标题相等（去空白；同名取 Ord 最小者 —— ord 已排序，First 即可）
+    if (spec.Length > 0)
+    {
+        string want = ChapterTitleKey(spec);
+        if (want.Length > 0)
+        {
+            hit = list.FirstOrDefault(c => ChapterTitleKey(c.Title ?? "") == want);
+            if (hit != null) return hit;
+        }
+    }
+
+    // 4) 内容定位（可选，最贵，放最后）
+    if (resolveText != null && !string.IsNullOrWhiteSpace(leadHint))
+    {
+        string needle = ChapterProbeKey(leadHint!);
+        // 太短的线索容易误命中（比如一整章只有"序"两个字），宁可不猜
+        if (needle.Length >= 8)
+        {
+            foreach (var c in list)
+            {
+                string t;
+                try { t = resolveText(c) ?? ""; } catch { continue; }
+                if (t.Length == 0) continue;
+                if (ChapterProbeKey(t).Contains(needle, StringComparison.Ordinal)) return c;
+            }
+        }
+    }
+    return null;
+}
+
+// 标题比较键：去掉所有空白 + 常见不可见字符（目录里的标题常带全角空格）
+static string ChapterTitleKey(string s)
+{
+    if (string.IsNullOrEmpty(s)) return "";
+    var sb = new StringBuilder(s.Length);
+    foreach (char ch in s)
+        if (!char.IsWhiteSpace(ch) && ch != '\u200B' && ch != '\uFEFF') sb.Append(ch);
+    return sb.ToString();
+}
+
+// 内容定位键：去掉**所有**空白再比。（中文正文的换行/缩进在两次读取之间并不稳定，
+// 留着空白会让"同一段"看起来不同；去干净之后按子串比是稳的。）
+static string ChapterProbeKey(string s)
+{
+    if (string.IsNullOrEmpty(s)) return "";
+    var sb = new StringBuilder(s.Length);
+    foreach (char ch in s)
+        if (!char.IsWhiteSpace(ch) && ch != '\u200B' && ch != '\uFEFF' && ch != '\u00A0') sb.Append(ch);
+    return sb.ToString();
+}
+
+// ── CLI：--toc / --chapter / --page / --locate / --chapterize ──────────
+
+// 打开一本书的目录（必要时懒回填）。四件事共用：查书 → 回填 → 读章节 → 组装。
+static (bool Ok, string Code, string Message, List<ChapterRow> Chapters, string? ErrCode, string? ErrMsg, bool Backfilled) OpenToc(
+    string dbPath, int itemId, bool force = false)
+{
+    var book = ImportBookOf(dbPath, itemId);
+    if (book == null)
+    {
+        // 不是本地导入项 ≠ 参数写错：是"你要的书不在书架上"，重试无用、应换目标 → 退出码 3
+        bool exists = ArticleExists(itemId, dbPath);
+        return (false, exists ? "NOT_IMPORTED" : "ITEM_NOT_FOUND",
+                exists ? Lang.T("This is not an imported book, so it has no chapters")
+                       : Lang.T("Article {0} not found", itemId),
+                new(), null, null, false);
+    }
+    var b = book.Value;
+    var (backfilled, count, errCode, errMsg) = EnsureChapters(dbPath, itemId, b.Content, b.Link, b.Ext, force);
+    var chapters = count > 0 ? ChaptersOf(dbPath, itemId) : new List<ChapterRow>();
+    return (true, "", "", chapters, errCode, errMsg, backfilled);
+}
+
+static void TocCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    var idStr = args.FirstOrDefault(a => !a.StartsWith('-'));
+    if (idStr == null || !int.TryParse(idStr, out int itemId) || itemId <= 0)
+    {
+        ReportError("BAD_ARGUMENT", Lang.T("Usage: sip --toc <article-id> [--json]"), json: json);
+        return;
+    }
+    var t = OpenToc(dbPath, itemId);
+    if (!t.Ok) { ReportError(t.Code, t.Message, json: json); return; }
+
+    if (json)
+    {
+        JsonOut(new { success = true, data = TocPayload(dbPath, itemId, t.Backfilled, t.ErrCode, t.ErrMsg) });
+        return;
+    }
+
+    var book = ImportBookOf(dbPath, itemId)!.Value;
+    if (t.ErrCode != null)
+    {
+        ReportError(t.ErrCode, t.ErrMsg ?? ChapterErrorText(t.ErrCode));
+        return;
+    }
+    if (t.Chapters.Count == 0)
+    {
+        ReportError("NO_CHAPTERS", Lang.T("This book has no table of contents"));
+        return;
+    }
+    string srcText = SourceHumanText(t.Chapters[0].Source, t.Chapters);
+    Console.WriteLine(Lang.T("{0} · {1} · {2}", book.Title, book.Ext.ToUpperInvariant(), srcText));
+    foreach (var c in t.Chapters)
+        Console.WriteLine($"  {c.Ord,-4}{new string(' ', Math.Min(c.Depth, 3) * 2)}{(c.Title.Length > 0 ? c.Title : Lang.T("Page {0}", c.PageStart ?? c.Ord))}");
+    Console.WriteLine(Lang.T("Read a chapter: sip --chapter {0} #1", itemId));
+}
+
+// 目录来源的人话。**必须显示**（契约 §2.1）：用户看到"第三章"时会假定那是书里的第 3 章，
+// 如果其实是按页编的或按标题猜的，他有权利知道。
+static string SourceHumanText(string? src, List<ChapterRow> chapters) => src switch
+{
+    "ncx" => Lang.T("Table of contents from the book's own NCX"),
+    "nav" => Lang.T("Table of contents from the book's own navigation document"),
+    "bookmark" => Lang.T("Table of contents from PDF bookmarks"),
+    "page" => Lang.T("No bookmark — page numbers only"),
+    "spine" => Lang.T("No table of contents in the book — split by reading order"),
+    "heading" => Lang.T("No table of contents in the book — split by headings"),
+    _ => Lang.T("Table of contents"),
+};
+
+static void ChapterCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    int maxChars = 12000;
+    for (int i = 0; i < args.Length; i++)
+        if (args[i].Equals("--max-chars", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length
+            && int.TryParse(args[i + 1], out int mc))
+            maxChars = Math.Clamp(mc, 1, 200000);
+
+    var pos = args.Where(a => !a.StartsWith('-')).ToList();
+    if (pos.Count < 2 || !int.TryParse(pos[0], out int itemId) || itemId <= 0)
+    {
+        ReportError("BAD_ARGUMENT", Lang.T("Usage: sip --chapter <article-id> <chapterId|#ord> [--json] [--max-chars N]"), json: json);
+        return;
+    }
+    string spec = pos[1];
+    var t = OpenToc(dbPath, itemId);
+    if (!t.Ok) { ReportError(t.Code, t.Message, json: json); return; }
+    if (t.ErrCode != null) { ReportError(t.ErrCode, t.ErrMsg ?? ChapterErrorText(t.ErrCode), json: json); return; }
+    if (t.Chapters.Count == 0) { ReportError("NO_CHAPTERS", Lang.T("This book has no table of contents"), json: json); return; }
+
+    var ch = FindChapter(t.Chapters, spec);
+    if (ch == null)
+    {
+        ReportError("CHAPTER_NOT_FOUND", Lang.T("No such chapter: {0}", spec), json: json);
+        return;
+    }
+    var book = ImportBookOf(dbPath, itemId)!.Value;
+    var slice = ReadChapterContent(itemId, ch, t.Chapters, book.Link, book.Ext, book.Content);
+
+    bool isPdf = book.Ext == "pdf";
+    bool textAvailable = slice != null;
+    string text = slice?.Text ?? "";
+    string htmlOut = slice?.Html ?? "";
+    bool truncated = text.Length > maxChars;
+    if (truncated)
+    {
+        // 【必须】从章首截（契约 §3.3）：AI 要能看到开头
+        text = text[..maxChars];
+        htmlOut = "";
+    }
+
+    int idx = t.Chapters.IndexOf(ch);
+    if (json)
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                chapterId = ch.ChapterId,
+                ord = ch.Ord,
+                title = ch.Title,
+                kind = ch.Kind,
+                source = ch.Source,
+                textAvailable,
+                text,
+                html = htmlOut,
+                truncated,
+                charCount = slice?.CharCount ?? 0,
+                pageStart = ch.PageStart,
+                pageEnd = ch.PageEnd,
+                nextChapterId = idx + 1 < t.Chapters.Count ? t.Chapters[idx + 1].ChapterId : null,
+                prevChapterId = idx > 0 ? t.Chapters[idx - 1].ChapterId : null,
+                // 说明只在**真的读不到**时给，而且要说对是哪一种：
+                // "这一份没有文本层" 与 "这一章还没抽取" 给用户的下一步完全不同。
+                note = textAvailable ? null
+                    : (isPdf ? Lang.T("No text layer — the AI can only point at pages, not read them") : null),
+            }
+        });
+    else
+    {
+        Console.WriteLine(Lang.T("Chapter {0}", ch.Ord) + (ch.Title.Length > 0 ? " · " + ch.Title : ""));
+        if (textAvailable) Console.WriteLine(text);
+        else Console.WriteLine(Lang.T("No text layer — the AI can only point at pages, not read them"));
+    }
+}
+
+static void PageCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    bool render = args.Any(a => a.Equals("--render", StringComparison.OrdinalIgnoreCase));
+    var pos = args.Where(a => !a.StartsWith('-')).ToList();
+    if (pos.Count < 2 || !int.TryParse(pos[0], out int itemId) || itemId <= 0
+        || !int.TryParse(pos[1], out int pageNo))
+    {
+        ReportError("BAD_ARGUMENT", Lang.T("Usage: sip --page <article-id> <page> [--json] [--render]"), json: json);
+        return;
+    }
+    var book = ImportBookOf(dbPath, itemId);
+    if (book == null)
+    {
+        bool exists = ArticleExists(itemId, dbPath);
+        ReportError(exists ? "NOT_IMPORTED" : "ITEM_NOT_FOUND",
+            exists ? Lang.T("This is not an imported book, so it has no chapters")
+                   : Lang.T("Article {0} not found", itemId), json: json);
+        return;
+    }
+    var b = book.Value;
+    if (b.Ext != "pdf")
+    {
+        ReportError("NOT_IMPORTED", Lang.T("Only PDFs are read page by page"), json: json);
+        return;
+    }
+    int? pages = b.Pages ?? GetPdfPageCount(b.Link);
+    if (pages == null)
+    {
+        ReportError("NO_PAGE_INDEX", Lang.T("Page count unknown — re-import this file to rebuild it"), json: json);
+        return;
+    }
+    if (pageNo < 1 || pageNo > pages.Value)
+    {
+        ReportError("PAGE_NOT_FOUND", Lang.T("Page {0} is out of range (1-{1})", pageNo, pages.Value), json: json);
+        return;
+    }
+    // 这一页属于哪一章：拿目录里 PageStart <= n <= PageEnd 的那条
+    var t = OpenToc(dbPath, itemId);
+    var ch = t.Chapters.FirstOrDefault(c => c.PageStart.HasValue && c.PageStart <= pageNo
+                                         && (c.PageEnd ?? c.PageStart) >= pageNo);
+
+    string? img = null;
+    string? note = null;
+    if (render)
+    {
+        var imgs = RenderPdfPages(b.Link, pageNo.ToString());
+        img = imgs.Count > 0 ? imgs[0] : null;
+        if (img == null) note = Lang.T("Could not render this page");
+    }
+    // 这一页到底能不能读：**逐页判定**（契约 §1.5.1 边界② / §3.4）。
+    // 同一份 PDF 里可以有"能读的页"和"读不到的页"并存（影印插页很常见），
+    // 所以这里不能用一个整本布尔值代替。
+    string? pageText = PdfPageText(dbPath, itemId, pageNo);   // null = 还没抽取；"" = 抽过但没字
+    bool pageHasText = !string.IsNullOrEmpty(pageText);
+    string pageState = pageText == null ? "not-extracted" : (pageHasText ? "ok" : "scanned");
+
+    if (json)
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                page = pageNo,
+                pageCount = pages,
+                chapterId = ch?.ChapterId,
+                chapterTitle = ch?.Title ?? "",
+                ord = ch?.Ord,
+                textAvailable = pageHasText,   // 契约 §3.4：false 不是错误，是"这一页读不到"
+                pdfTextState = pageState,
+                charCount = pageText?.Length ?? 0,
+                text = pageHasText ? pageText : null,
+                pageImage = img,
+                note = note ?? (pageState == "scanned"
+                    ? Lang.T("No text layer — the AI can only point at pages, not read them")
+                    : pageState == "not-extracted"
+                        ? Lang.T("This PDF's text has not been extracted yet — open the table of contents once")
+                        : null),
+            }
+        });
+    else
+    {
+        Console.WriteLine(ch == null || ch.Title.Length == 0
+            ? Lang.T("Page {0}", pageNo)
+            : Lang.T("Page {0}", pageNo) + " · " + ch.Title);
+        if (img != null) Console.WriteLine(img);
+    }
+}
+
+// 关键词 → 位置（契约 §3.5）。做法是**章级切分后在章内做子串检索**，
+// 不额外建索引（ItemsFts 是整篇粒度的，够不到"第几章"）。
+static void LocateCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    int limit = 20;
+    int? onlyBook = null;
+    string? query = null;
+    for (int i = 0; i < args.Length; i++)
+    {
+        var a = args[i];
+        if (a.Equals("--limit", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length
+            && int.TryParse(args[i + 1], out int l) && l > 0) { limit = Math.Min(l, 200); i++; continue; }
+        if (a.Equals("--book", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length
+            && int.TryParse(args[i + 1], out int bk) && bk > 0) { onlyBook = bk; i++; continue; }
+        if (!a.StartsWith('-') && query == null) query = a;
+    }
+    query = query?.Trim();
+    if (string.IsNullOrEmpty(query))
+    {
+        ReportError("EMPTY_QUERY", Lang.T("Please provide a keyword to locate"), json: json);
+        return;
+    }
+
+    // 候选书：要么指定一本，要么库里的全部本地导入项
+    var books = new List<(int Id, string Title, string Link, string Ext, string Content)>();
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT i.Id, i.Title, COALESCE(i.Link,''), COALESCE(i.Content,'')
+                            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+                            WHERE f.FeedUrl = 'local://import'" + (onlyBook.HasValue ? " AND i.Id = @id" : "");
+        if (onlyBook.HasValue) cmd.Parameters.AddWithValue("@id", onlyBook.Value);
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            string link = r.GetString(2);
+            string ext = "";
+            try { ext = Path.GetExtension(link).TrimStart('.').ToLowerInvariant(); } catch { }
+            books.Add((r.GetInt32(0), r.GetString(1), link, ext, r.GetString(3)));
+        }
+    }
+    catch { }
+
+    var hits = new List<object>();
+    bool truncated = false;
+    bool sawPdfWithoutText = false;   // 见到"确实没字"的 PDF（扫描件）
+    bool sawPdfNotExtracted = false;  // 见到"还没抽取"的 PDF —— 与上一件事的下一步完全不同
+    foreach (var bk in books)
+    {
+        if (hits.Count >= limit) { truncated = true; break; }
+
+        // PDF 走**另一条路**：在 `PdfPages` 上做子串扫描（契约 §3.5）。
+        // 这条是**关键词级、免费、离线、不调模型**的，与 `--search` 的语义路无关。
+        // 页文本是抽取的产物，所以判"能不能查"看的是 `PdfPages`，不是"PDF 有没有文本层"这种
+        // 整体断言 —— 同一份 PDF 里可以有能读的页和读不到的页并存。
+        if (bk.Ext == "pdf")
+        {
+            int rows = 0, textPages = 0;
+            try
+            {
+                using var conn = OpenDb(dbPath);
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = @"SELECT COUNT(*), COALESCE(SUM(CASE WHEN CharCount>0 THEN 1 ELSE 0 END),0)
+                                  FROM PdfPages WHERE ItemId = @id";
+                c.Parameters.AddWithValue("@id", bk.Id);
+                using var rr = c.ExecuteReader();
+                if (rr.Read()) { rows = rr.GetInt32(0); textPages = rr.GetInt32(1); }
+            }
+            catch { }
+            if (rows == 0) { sawPdfNotExtracted = true; continue; }
+            if (textPages == 0) { sawPdfWithoutText = true; continue; }
+
+            try
+            {
+                using var conn = OpenDb(dbPath);
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = @"SELECT Page, Text FROM PdfPages
+                                  WHERE ItemId = @id AND CharCount > 0
+                                    AND instr(lower(Text), lower(@q)) > 0
+                                  ORDER BY Page";
+                c.Parameters.AddWithValue("@id", bk.Id);
+                c.Parameters.AddWithValue("@q", query!);
+                using var rr = c.ExecuteReader();
+                while (rr.Read() && hits.Count < limit)
+                {
+                    int pg = rr.GetInt32(0);
+                    string tx = rr.IsDBNull(1) ? "" : rr.GetString(1);
+                    int at = tx.IndexOf(query!, StringComparison.OrdinalIgnoreCase);
+                    if (at < 0) continue;
+                    int from = Math.Max(0, at - 40);
+                    int len = Math.Min(tx.Length - from, query!.Length + 80);
+                    hits.Add(new
+                    {
+                        itemId = bk.Id,
+                        chapterId = $"pdf:p{pg}",
+                        ord = pg,
+                        title = "",
+                        page = pg,                       // PDF 的位置就是页
+                        pageStart = pg,
+                        snippet = tx.Substring(from, len),
+                        offsetInChapter = at,
+                        reason = "keyword",
+                    });
+                }
+                if (hits.Count >= limit) truncated = true;
+            }
+            catch { }
+            continue;
+        }
+
+        var t = OpenToc(dbPath, bk.Id);
+        if (!t.Ok || t.Chapters.Count == 0) continue;
+        foreach (var c in t.Chapters)
+        {
+            if (hits.Count >= limit) { truncated = true; break; }
+            var slice = ReadChapterContent(bk.Id, c, t.Chapters, bk.Link, bk.Ext, bk.Content);
+            if (slice == null) continue;
+            int at = slice.Value.Text.IndexOf(query!, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) continue;
+            int from = Math.Max(0, at - 40);
+            int len = Math.Min(slice.Value.Text.Length - from, query!.Length + 80);
+            hits.Add(new
+            {
+                itemId = bk.Id,
+                chapterId = c.ChapterId,
+                ord = c.Ord,
+                title = c.Title,
+                page = c.PageStart,
+                pageStart = c.PageStart,
+                snippet = slice.Value.Text.Substring(from, len),
+                offsetInChapter = at,
+                reason = "keyword",
+            });
+        }
+    }
+
+    // 没命中时要说清**是哪一种没命中** —— "这一份没有文本层"（正常结果，只能给页码）
+    // 与"还没抽取"（该去触发一次回填）给用户的下一步完全不同（契约 §3.5 / §11-3）。
+    string? note = hits.Count == 0 && books.Count > 0
+        ? (sawPdfNotExtracted
+            ? Lang.T("This PDF's text has not been extracted yet — open the table of contents once")
+            : sawPdfWithoutText
+                ? Lang.T("This PDF has no text layer, so keyword lookup is not available")
+                : null)
+        : null;
+    if (json)
+        JsonOut(new
+        {
+            success = true,
+            data = new
+            {
+                query,
+                scope = onlyBook.HasValue ? "book" : "library",
+                itemId = onlyBook,
+                hits,
+                count = hits.Count,
+                truncated,
+                note,
+            }
+        });
+    else
+    {
+        if (hits.Count == 0) Console.WriteLine(note ?? Lang.T("No match"));
+        foreach (dynamic h in hits) Console.WriteLine($"{h.chapterId} · {h.title} · {h.snippet}");
+    }
+}
+
+// 显式重建（**写**操作，挡位 2 起拦）。all = 全库本地导入项。
+static void ChapterizeCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    string? spec = args.FirstOrDefault(a => !a.StartsWith('-'));
+    var targets = new List<int>();
+    if (spec == null || spec.Equals("all", StringComparison.OrdinalIgnoreCase))
+    {
+        try
+        {
+            using var conn = OpenDb(dbPath);
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT i.Id FROM Items i JOIN Feeds f ON i.FeedId = f.Id WHERE f.FeedUrl = 'local://import' ORDER BY i.Id";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) targets.Add(r.GetInt32(0));
+        }
+        catch { }
+    }
+    else if (int.TryParse(spec, out int one) && one > 0) targets.Add(one);
+    else { ReportError("BAD_ARGUMENT", Lang.T("Usage: sip --chapterize [<article-id>|all] [--json]"), json: json); return; }
+
+    int ok = 0, failed = 0;
+    var details = new List<object>();
+    foreach (var id in targets)
+    {
+        var book = ImportBookOf(dbPath, id);
+        if (book == null) { failed++; details.Add(new { itemId = id, ok = false, error = "NOT_IMPORTED" }); continue; }
+        var b = book.Value;
+        var (_, count, errCode, _) = EnsureChapters(dbPath, id, b.Content, b.Link, b.Ext, force: true);
+        if (errCode == null) { ok++; details.Add(new { itemId = id, ok = true, chapters = count }); }
+        else { failed++; details.Add(new { itemId = id, ok = false, error = errCode }); }
+    }
+    if (json) JsonOut(new { success = true, data = new { total = targets.Count, ok, failed, items = details } });
+    else Console.WriteLine(Lang.T("Rebuilt chapters: {0} ok, {1} failed", ok, failed));
+    if (failed > 0 && ok == 0) SetExit(1);
 }
 
 // 查看文章版本历史 CLI：--versions <文章Id> [--json]
@@ -6240,6 +8310,12 @@ static int ExitCodeFor(string code) => code switch
     "API_KEY_MISSING" or "API_KEY_INVALID" or "NO_INDEX"
         or "FEED_NOT_FOUND" or "ITEM_NOT_FOUND" or "EMPTY_QUERY"
         or "EVIDENCE_NOT_FOUND" or "EMPTY_STDIN" => 3,
+    // 章节/页码这一批(契约 §3.6)：它们都不是"参数写错了"，而是"你要的东西不在书架上/不在书里"，
+    // 重试无用、应当换目标 —— 所以归 3 而不是 1。
+    // NOT_IMPORTED 从 1 改成 3：目标不是本地导入项时，AI 应当换一个目标而不是改参数重试。
+    "NOT_IMPORTED" or "CHAPTER_NOT_FOUND" or "NO_CHAPTERS" or "PAGE_NOT_FOUND"
+        or "NO_PAGE_INDEX" or "RENDER_FAILED" or "FILE_GONE" or "ARCHIVE_UNREADABLE"
+        or "PDF_UNREADABLE" or "EPUB_TOO_MANY_ENTRIES" => 3,
     _ => 1,
 };
 
@@ -6491,17 +8567,23 @@ static List<string> ChunkText(string text, int sizeTokens, int overlapTokens)
     return result;
 }
 
-// 保存单条 chunk 向量（幂等：同 item+model+index 覆盖）
-static void SaveChunkVector(string dbPath, int feedId, int itemId, int modelId, int chunkIndex, float[] vector, string snippet)
+// 保存单条 chunk 向量（幂等：同 item+model+index 覆盖）。
+// 三列位置回指（契约 §6.2 R8）：没有它们，"检索命中"就只剩一段裸文本 ——
+// AI 依然说不出"第几页"，定位能力的最后一公里断在这里。
+static void SaveChunkVector(string dbPath, int feedId, int itemId, int modelId, int chunkIndex,
+    float[] vector, string snippet, string? chapterId, string? chapterSpan, string anchorState)
 {
     using var conn = OpenDb(dbPath);
     conn.Open();
     var cmd = conn.CreateCommand();
     cmd.CommandText = @"
-        INSERT INTO VectorsChunks (ItemId, FeedId, ModelId, ChunkIndex, Vector, Snippet)
-        VALUES (@i, @f, @m, @ci, @v, @s)
+        INSERT INTO VectorsChunks (ItemId, FeedId, ModelId, ChunkIndex, Vector, Snippet,
+                                   ChapterId, ChapterSpan, AnchorState)
+        VALUES (@i, @f, @m, @ci, @v, @s, @c, @sp, @st)
         ON CONFLICT(ItemId, ModelId, ChunkIndex) DO UPDATE SET
-            FeedId = excluded.FeedId, Vector = excluded.Vector, Snippet = excluded.Snippet
+            FeedId = excluded.FeedId, Vector = excluded.Vector, Snippet = excluded.Snippet,
+            ChapterId = excluded.ChapterId, ChapterSpan = excluded.ChapterSpan,
+            AnchorState = excluded.AnchorState
     ";
     cmd.Parameters.AddWithValue("@i", itemId);
     cmd.Parameters.AddWithValue("@f", feedId);
@@ -6509,7 +8591,159 @@ static void SaveChunkVector(string dbPath, int feedId, int itemId, int modelId, 
     cmd.Parameters.AddWithValue("@ci", chunkIndex);
     cmd.Parameters.AddWithValue("@v", VectorToBytes(vector));
     cmd.Parameters.AddWithValue("@s", snippet);
+    cmd.Parameters.AddWithValue("@c", (object?)chapterId ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@sp", (object?)chapterSpan ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@st", anchorState);
     cmd.ExecuteNonQuery();
+}
+
+// ── 块 → 章/页 的位置回指（契约 §6.2 R1–R8、§6.3.1）──────────────────────
+//
+// 【成本硬边界 R5】这套东西**只在 `--index` / `--reindex` 里被调用**（导入与懒回填 0 次调用，A33）：
+// 重建块 = 重新调 embedding = 花钱，绝不能因为"用户打开了一本书"就自动发生。
+//
+// 一个块**不跨章**（R1）：块跨两章时，命中了也说不清是"第几章"，定位能力就没了。
+// PDF 以**页**为块边界（R7）同理 —— 页才是用户能核对的定位单位。
+class ChunkPlan
+{
+    public string Text = "";
+    public string? ChapterId;        // 起始锚点：EPUB `epub:7~sec2` / PDF `pdf:p87`
+    public string? ChapterSpan;      // 合并块的起止锚点；不合并为 NULL
+    public string AnchorState = "none";   // anchored | unknown | none（§6.3.1）
+}
+
+const int ChunkPlanMinTokensDiv = 5;   // 小章/短页的合并阈值 = SizeTokens/5（R2/R7）
+
+// 取一章的纯文本（按章切块与免费锚点回填**共用**）。
+// EPUB 走 Content 的 CharStart/CharEnd 切片 → StripHtml：ChunkText 切的是纯文本，
+// 而 Chapters 的偏移是 Content **原文**的偏移，两者不是一套坐标系（§6.3.1 的警告）。
+// PDF 走 PdfPages 逐页拼接，页序不变。
+static string ChapterPlainText(string dbPath, int itemId, string ext, string content, ChapterRow ch)
+{
+    if (ext == "pdf")
+    {
+        if (!ch.PageStart.HasValue) return "";
+        int end = ch.PageEnd ?? ch.PageStart.Value;
+        var sb = new StringBuilder();
+        for (int p = ch.PageStart.Value; p <= end; p++)
+        {
+            string? t = PdfPageText(dbPath, itemId, p);
+            if (!string.IsNullOrEmpty(t)) sb.Append(t).Append('\n');
+        }
+        return sb.ToString();
+    }
+    if (ch.CharStart.HasValue && ch.CharEnd.HasValue && ch.CharEnd.Value > ch.CharStart.Value
+        && ch.CharEnd.Value <= content.Length)
+        return StripHtml(content.Substring(ch.CharStart.Value, ch.CharEnd.Value - ch.CharStart.Value));
+    return "";
+}
+
+// EPUB：按章切块（R1）+ 小章合并（R2，**限同一 ParentId 且同一 spine 文件**，绝不跨文件）
+static List<ChunkPlan> EpubChunkPlans(string dbPath, int itemId, string content, List<ChapterRow> chapters, AiConfig cfg)
+{
+    int minTokens = Math.Max(1, cfg.Chunking.SizeTokens / ChunkPlanMinTokensDiv);
+    var plans = new List<ChunkPlan>();
+    string SpineOf(ChapterRow c)
+    {
+        int t = c.ChapterId.IndexOf('~');
+        return t > 0 ? c.ChapterId[..t] : c.ChapterId;
+    }
+    int i = 0;
+    while (i < chapters.Count)
+    {
+        var first = chapters[i];
+        string text = ChapterPlainText(dbPath, itemId, "epub", content, first);
+        int j = i;
+        while (EstimateTokens(text) < minTokens && j + 1 < chapters.Count
+               && chapters[j + 1].CharStart == chapters[j].CharEnd          // 相邻（不吞掉中间的空洞）
+               && SpineOf(chapters[j + 1]) == SpineOf(chapters[j])          // 不跨 spine 文件
+               && chapters[j + 1].ParentId == chapters[j].ParentId)         // 同一父章（不跨节）
+        {
+            j++;
+            text = text + "\n\n" + ChapterPlainText(dbPath, itemId, "epub", content, chapters[j]);
+        }
+        string? span = j > i ? $"{first.ChapterId}..{chapters[j].ChapterId}" : null;
+        AppendChapterPlans(plans, text, first.ChapterId, span, cfg);
+        i = j + 1;
+    }
+    return plans;
+}
+
+// PDF：以**页**为块边界（R7）：单页太短（< SizeTokens/5）才与相邻页合并；
+// 合并后 ChapterId 记**起始页**、ChapterSpan 记起止页。扫描件逐页为空 → 零块（A33 ③）。
+static List<ChunkPlan> PdfChunkPlans(string dbPath, int itemId, AiConfig cfg)
+{
+    int minTokens = Math.Max(1, cfg.Chunking.SizeTokens / ChunkPlanMinTokensDiv);
+    int maxPage = 0;
+    try
+    {
+        using var conn = OpenDb(dbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COALESCE(MAX(Page),0) FROM PdfPages WHERE ItemId = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        maxPage = Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+    }
+    catch { return new List<ChunkPlan>(); }
+
+    var plans = new List<ChunkPlan>();
+    var cur = new StringBuilder();
+    int curFrom = 0, curTo = 0;
+    void Flush()
+    {
+        if (cur.Length == 0) return;
+        string? span = curTo > curFrom ? $"pdf:p{curFrom}..pdf:p{curTo}" : null;
+        AppendChapterPlans(plans, cur.ToString(), $"pdf:p{curFrom}", span, cfg);
+        cur.Clear();
+    }
+    for (int p = 1; p <= maxPage; p++)
+    {
+        string t = (PdfPageText(dbPath, itemId, p) ?? "").Trim();
+        if (t.Length == 0) continue;                       // 抽不出字的页跳过（页级覆盖由 PdfPages 负责）
+        if (cur.Length == 0) { curFrom = p; curTo = p; }
+        else { cur.Append("\n\n"); curTo = p; }
+        cur.Append(t);
+        if (EstimateTokens(cur.ToString()) >= minTokens) Flush();
+    }
+    Flush();
+    return plans;
+}
+
+// 把一个（已合并的）章/页组的文本切开：不超过 SizeTokens 的整块出一块；
+// 超过就**只在本章内**按段落切、重叠也只在本章内取（R3，跨章重叠会让引用出现二义）。
+static void AppendChapterPlans(List<ChunkPlan> plans, string text, string chapterId, string? span, AiConfig cfg)
+{
+    if (string.IsNullOrWhiteSpace(text)) return;
+    if (EstimateTokens(text) <= cfg.Chunking.SizeTokens)
+    {
+        plans.Add(new ChunkPlan { Text = text, ChapterId = chapterId, ChapterSpan = span, AnchorState = "anchored" });
+        return;
+    }
+    foreach (var c in ChunkText(text, cfg.Chunking.SizeTokens, cfg.Chunking.OverlapTokens))
+        plans.Add(new ChunkPlan { Text = c, ChapterId = chapterId, ChapterSpan = span, AnchorState = "anchored" });
+}
+
+// 组装切块计划：有章节模型的导入书按章/页切（R1/R2/R7，带 R8 回指）；
+// 其余（RSS 文章、章节回填失败的书）保持既有整篇切块行为，`AnchorState='none'`（R6）——
+// 「这本书本来就没有章节模型」与「本该有锚点却没算出来」是两件不同的事，不能用一个 NULL 兼表。
+static List<ChunkPlan> BuildChunkPlans(string dbPath, int itemId, string plain, AiConfig cfg)
+{
+    var book = ImportBookOf(dbPath, itemId);
+    if (book != null && !string.IsNullOrWhiteSpace(book.Value.Link))
+    {
+        var chapters = ChaptersOf(dbPath, itemId);
+        if (chapters.Count > 0)
+        {
+            var plans = book.Value.Ext == "pdf"
+                ? PdfChunkPlans(dbPath, itemId, cfg)
+                : EpubChunkPlans(dbPath, itemId, book.Value.Content, chapters, cfg);
+            if (plans.Count > 0) return plans;
+        }
+    }
+    var fallback = new List<ChunkPlan>();
+    foreach (var c in ChunkText(plain, cfg.Chunking.SizeTokens, cfg.Chunking.OverlapTokens))
+        fallback.Add(new ChunkPlan { Text = c, AnchorState = "none" });
+    return fallback;
 }
 
 // 给单篇文章切块嵌入：正文「超长」才切块，短文章单向量已足够，省去无用切块。
@@ -6556,12 +8790,14 @@ static async Task EmbedItemChunks(string dbPath, int feedId, int itemId, int mod
     catch { }
 
     int idx = 0;
-    foreach (var ch in chunks)
+    var plans = BuildChunkPlans(dbPath, itemId, plain, cfg);
+    foreach (var plan in plans)
     {
-        var vec = await SafeEmbed(ch, cfg, articleId: itemId, sourceId: feedId);
+        var vec = await SafeEmbed(plan.Text, cfg, articleId: itemId, sourceId: feedId);
         if (vec == null) continue;
-        string snippet = ch.Length > 200 ? ch.Substring(0, 200) : ch;
-        SaveChunkVector(dbPath, feedId, itemId, modelId, idx++, vec, snippet);
+        string snippet = plan.Text.Length > 200 ? plan.Text.Substring(0, 200) : plan.Text;
+        SaveChunkVector(dbPath, feedId, itemId, modelId, idx++, vec, snippet,
+            plan.ChapterId, plan.ChapterSpan, plan.AnchorState);
     }
 }
 
@@ -8131,6 +10367,11 @@ class SipSettings
     // 起 Web 时自动打开浏览器（真终端下才做）。无密码模式尤其需要：引导令牌只印在终端里，
     // 不自动开浏览器，双击的人还得自己复制粘贴那条带 ?t= 的链接。关闭：--no-open 或这里设 false。
     public bool WebOpenBrowser { get; set; } = true;
+    // 允许**在 Web 端配置 AI**（含写 API Key）。默认 false = 保持原加强：
+    // key 只在真终端输入（终端是别的进程读不到的带外信道）。
+    // 打开它的理由与代价见契约 §12.1-A40②：代价是"抄走会话 cookie 就能改 key/端点"，
+    // 由「密码 + 会话绑浏览器指纹 + 本开关默认关 + 写闸门 + 端点变更审计」共同承担。
+    public bool AiConfigWebWrite { get; set; } = false;
 }
 
 // Source Policy：用户确认的「处理规则」（source_policy.json）。createdBy 永远 user，AI 永不自动写。

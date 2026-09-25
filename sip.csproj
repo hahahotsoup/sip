@@ -78,6 +78,12 @@
     <!-- SQLCipher(挡位 3 加密)已移除,原先把 Microsoft.Data.Sqlite 压到 9.x 的理由随之消失。
          但版本这次不动:升 10.x 会连带换 SQLitePCLRaw 大版本,属于独立改动,单独验证后再动。 -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <!-- PDF 书签 + 逐页文本：契约 §1.5 原本打算自己 P/Invoke 原生 pdfium 取书签，
+         但 PdfPig 能用、且**纯托管**——实测本机缓存已有 0.1.16、离线可还原，
+         net9.0 依赖组为空(零传递依赖)，不会与 PDFtoImage 的原生 pdfium 打架，
+         也不破坏单文件发布。用它可以少写一层 DllImport 和它的跨平台风险。
+         分工：PDFtoImage 仍然只管**栅格化**(按页出图)，PdfPig 只管**结构**(书签/页文本)。 -->
+    <PackageReference Include="PdfPig" Version="0.1.16" />
     <PackageReference Include="PDFtoImage" Version="5.4.0" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
     <!-- 混版修复:core + 原生库 lib.e_sqlite3 升 2.1.13(2.1.x 修复末版,消 GHSA-2m69-gcr7-jv3q)。

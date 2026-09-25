@@ -121,6 +121,10 @@ static int CurrentSimonLevel() => SimonLevelGet();
 static bool SimonIsReadOnly(string cmd, string sub)
     => cmd is "-l" or "--list" or "--show" or "--content" or "--versions" or "--history"
           or "--diff" or "--grep" or "--search" or "--today" or "--feed-info" or "--export-opml"
+          // 章节/页码锚点（契约 §3.1）：这四个都是**只读**命令 ——
+          // 读目录 / 读某一章正文 / 读某一页文本 / 关键词反查位置，都不改库、也不调模型。
+          // 注意 --chapterize **不**在此列：它会重建 Chapters/PdfPages，属写操作，挡位 2 起该被拦。
+          or "--toc" or "--chapter" or "--page" or "--locate"
           or "--help" or "-h" or "--version" or "--insights" or "--insights-interval" or "simon"
           // 界面入口不是"操作"：`sip tui` / `sip pic` 打开的是**真人终端界面**本身，
           // 而挡位 3 的提示语就是"只允许通过 TUI 使用" —— 把自己的入口拦掉就等于死胡同。
