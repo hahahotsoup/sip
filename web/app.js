@@ -1197,9 +1197,12 @@ async function runPaletteLine(line) {
 /* ── 阅读页的细顶栏 + 右侧抽屉 ──
    正文上面只留一行（⋯ 标题 · 位置），动作/元信息/节号全进抽屉：
    信息一条没少，但不再一行行往下挤正文。抽屉展开状态记在偏好里。 */
-function readBarHtml(title, bits) {
+function readBarHtml(title, bits, open) {
+  // open 由调用方给（文章视图里"改稿历史"会把抽屉撑开，那时 metaOpen 还是 false）；
+  // 不给就按偏好算。图标要跟着**实际**开合状态走，否则面板开着、按钮还显示 ⋯。
+  const isOpen = open === undefined ? !!state.metaOpen : !!open;
   return `<div class="rd-bar">
-    <button class="ib" data-act="meta-toggle" title="详情与操作">${state.metaOpen ? "✕" : "⋯"}</button>
+    <button class="ib" data-act="meta-toggle" title="${isOpen ? "收起详情与操作" : "详情与操作"}">${isOpen ? "✕" : "⋯"}</button>
     <span class="rd-title" title="${esc(title)}">${esc(title)}</span>
     ${bits || ""}
   </div>`;
@@ -1218,6 +1221,22 @@ function closeReadDrawer() {
   const d = $("rdDrawer"), s = $("rdScrim");
   if (d) d.hidden = true;
   if (s) s.hidden = true;
+}
+
+/** 抽屉现在是不是开着 —— 两种开法都算：用户展开的（metaOpen）、面板自己撑开的（改稿历史）。 */
+function readDrawerOpen() {
+  const d = $("rdDrawer");
+  return !!(state.metaOpen || state.versions || (d && !d.hidden));
+}
+
+/** 真正把抽屉关上：**两种开法的理由一起清掉**。
+    只置 metaOpen=false 是不够的 —— 面板那条 forceOpen 的理由（state.versions）还在，
+    下一次 render 立刻又把它开回来，用户看到的就是"Esc 关不掉 / 收起没反应"。 */
+function closeReadPanel() {
+  state.metaOpen = false;
+  state.versions = null;          // 「改稿历史」撑开的那条理由
+  savePrefs({ metaOpen: false });
+  render();
 }
 
 function setMetaOpen(on) {
@@ -1426,7 +1445,8 @@ async function render() {
         <span class="b">v${esc(real.version || 1)}${real.versionCount > 1 ? "/" + esc(real.versionCount) : ""}</span>
         ${real.hasFulltext ? `<span class="b acc">全文</span>` : ""}
         <button class="btn ${liked ? "pri" : ""}" data-act="like" data-id="${id}" title="收藏">♥</button>
-        ${real.link ? `<button class="btn" data-act="open-external" data-link="${esc(real.link)}" title="打开原文">↗</button>` : ""}`)}
+        ${real.link ? `<button class="btn" data-act="open-external" data-link="${esc(real.link)}" title="打开原文">↗</button>` : ""}`,
+        !!state.metaOpen || !!state.versions)}
       <div class="pager" id="pager">
         <article class="prose" data-cols="${esc(effectiveCols(+getComputedStyle(document.documentElement).getPropertyValue("--cols").trim() || 1))}">${real.bodyHtml || "<p>（这篇没有正文）</p>"}</article>
         <div class="pager-bar" id="pagerBar" hidden>
@@ -2249,8 +2269,8 @@ document.addEventListener("click", async (e) => {
       if (!/^https?:\/\//i.test(url)) { toast("没有可打开的原文链接"); return; }
       window.open(url, "_blank", "noopener,noreferrer"); return;
     }
-    case "meta-toggle": setMetaOpen(!state.metaOpen); return;
-    case "meta-close": setMetaOpen(false); return;
+    case "meta-toggle": if (readDrawerOpen()) closeReadPanel(); else setMetaOpen(true); return;
+    case "meta-close": closeReadPanel(); return;
     case "versions": {
       if (state.versions) { state.versions = null; render(); return; }
       try { await loadVersions(id); render(); } catch (er) { toast(er.message || "读不到版本"); }
@@ -2377,8 +2397,11 @@ document.addEventListener("keydown", (e) => {
       return;
     }
   }
-  // Esc：先关阅读抽屉，再退全屏阅读（面板打开时上面已经处理掉了）
-  if (e.key === "Escape" && state.metaOpen) { setMetaOpen(false); e.preventDefault(); return; }
+  // Esc：先关阅读抽屉（**包括"改稿历史"自己撑开的那种**），再退全屏阅读。
+  // 只管阅读视图：在列表视图里按 Esc 不该顺手把"抽屉默认展开"这个偏好改掉。
+  if (e.key === "Escape" && (state.view === "article" || state.view === "ebook") && readDrawerOpen()) {
+    closeReadPanel(); e.preventDefault(); return;
+  }
   if (e.key === "Escape" && state.immersive) { setImmersive(false); e.preventDefault(); return; }
   // F：切换全屏阅读（阅读视图内）
   if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey
@@ -2421,7 +2444,7 @@ on("btnHideSide", "click", () => {
   $("side").classList.remove("open");
 });
 on("btnPalette", "click", openPalette);
-on("rdScrim", "click", () => setMetaOpen(false));
+on("rdScrim", "click", () => closeReadPanel());
 on("btnFull", "click", () => setImmersive(!state.immersive));
 on("rtFull", "click", () => setImmersive(!state.immersive));
 

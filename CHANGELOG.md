@@ -119,6 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 现在四处比对的**输入**统一走 `DiffNormalize`：网页改稿追踪（`/api/articles/{id}/diff` 直接复用去重那套段落级 diff）、CLI `sip --diff`、TUI 的左右分栏 diff、以及今日摘要里的"改了几行"（`ChangeOverview` 的 ±行数与字数以前也是拿 HTML 标记在算）。
   - 顺带修界面：**大段没改的段落折起来**（只留变更点上下各 3 段，点一下就地展开），并把"只有一版"与"两版文字一致（只改了排版/摘要）"这两种空差异分开说。
   - 回归：`Diff_OneLineHtml_ComparesParagraphs_NotWholeArticle`（接口必须给出 Unchanged 段落、删/插只涉及改动的那一段）、`Diff_OneLineHtml_PrintsOnlyTheChangedParagraph`（CLI 只打印一条 `-` 一条 `+`，差异文本里不许出现 `<p>`）—— 把归一化去掉，两条立刻红；冒烟测试另钉折叠/展开。
+- **阅读抽屉的「Esc 关不掉 / 收起没反应」**（`web/app.js`）。抽屉有两种开法：用户自己展开的（`metaOpen`）和**面板自己撑开的**（点「改稿历史」时 `forceOpen = state.versions`）。而 Esc / 收起 / 点遮罩此前都只把 `metaOpen` 置 false —— 撑开它的那条理由还在，`render()` 立刻又把它开回来，用户看到的就是"Esc 没反应"（面板还杵在那儿，提示语里却写着"Esc 关掉本面板"）。
+  - 改成统一的 `closeReadPanel()`：**两种理由一起清**（`metaOpen` + `state.versions`），Esc / 收起 / 点遮罩 / 顶栏按钮全走它；顶栏那个按钮也按**实际**开合状态显示 `⋯` / `✕`（此前面板开着、按钮还显示 `⋯`）。
+  - 回归：冒烟测试里点开「改稿历史」后**真的按一次 Esc**（把注册过的 keydown 监听器跑一遍），断言抽屉收起、`state.versions` 被清空、按钮变回 `⋯` —— 换回旧写法立刻红。
 - **删掉 `web/index.html.bak`**（28 KB 的多余备份，`git add web/` 会一并提交）与 `index.html` 里那个**永不显示的登录壳**（`#login` / `#loginForm` / `#skipLogin` —— 真实登录在 `login.html`，留着只让人分不清真假），以及两个死面板（从未有入口的搜索面板、纯模拟的 Web 密码面板）。
 ### Changed
 

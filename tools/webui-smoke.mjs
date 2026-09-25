@@ -244,7 +244,7 @@ sandbox.fetch = async (path) => {
 };
 
 // ── 跑起来 ───────────────────────────────────────────────────
-const instrumented = code + "\n;globalThis.__sip = { render, state, loadRealData, loadDedup, loadPolicies, loadEdits, DEDUP, sectionsFromNodes, setImmersive, setMetaOpen, setPaged, bumpFont, setLeading, setContentWidth, setCols, saveReadState, readStateOf, rememberReadState, api, t, $, esc };";
+const instrumented = code + "\n;globalThis.__sip = { render, state, loadRealData, loadDedup, loadPolicies, loadEdits, DEDUP, sectionsFromNodes, setImmersive, setMetaOpen, setPaged, bumpFont, setLeading, setContentWidth, setCols, saveReadState, readStateOf, rememberReadState, api, t, $, esc, readDrawerOpen, closeReadPanel };";
 const context = vm.createContext(sandbox);
 new vm.Script(instrumented, { filename: "web/app.js" }).runInContext(context);
 
@@ -487,6 +487,32 @@ try {
   if (foldCount(html) !== 1) failures.push(`差异展开：展开一段后应当只剩 1 个折叠行，实际 ${foldCount(html)}`);
   if (!html.includes("第 20 段没变")) failures.push("差异展开：展开后中间的段落没有渲染出来");
 } catch (e) { failures.push("差异折叠 抛异常: " + (e && e.stack ? e.stack.split("\n")[0] : e)); }
+
+// ⑦ 阅读抽屉的**两种开法**都要能被关掉。
+//    「改稿历史」会把抽屉自己撑开（forceOpen），这时 metaOpen 还是 false ——
+//    所以"只把 metaOpen 置 false"的 Esc / 收起 / 点遮罩全都关不掉它，
+//    用户看到的就是"esc 关不掉"（面板还开着，重渲染又把它开回来）。
+{
+  Object.assign(state, {
+    view: "article", articleId: 12, articleVersion: null, versions: VERSIONS,
+    metaOpen: false, jumpKw: "",
+  });
+  getEl("view").innerHTML = "";
+  getEl("rdDrawer").innerHTML = "";
+  await render();
+  if (getEl("rdDrawer").hidden) failures.push("阅读抽屉：「改稿历史」撑开的抽屉应当是打开的");
+  if (!sandbox.__sip.readDrawerOpen()) failures.push("阅读抽屉：readDrawerOpen() 没认出「面板自己撑开」这种开法");
+  if (!getEl("view").innerHTML.includes("✕")) failures.push("阅读抽屉：面板开着时顶栏那个按钮应当是 ✕（不是 ⋯）");
+
+  // 真的按一次 Esc：把注册过的 keydown 监听器跑一遍（其它监听器在桩里可能缺件，单独兜住）
+  const kd = listeners.filter((x) => x.ev === "keydown");
+  if (!kd.length) failures.push("阅读抽屉：一个 keydown 监听器都没有，Esc 无从谈起");
+  for (const l of kd) { try { l.fn({ key: "Escape", preventDefault() { }, target: {} }); } catch (e) { /* 见上 */ } }
+  await new Promise((r) => setTimeout(r, 0));
+  if (!getEl("rdDrawer").hidden) failures.push("阅读抽屉：按了 Esc 还开着（用户报的「esc 关不掉」）");
+  if (state.versions !== null) failures.push("阅读抽屉：Esc 之后 state.versions 没清 —— 重渲染会把抽屉又开回来");
+  if (sandbox.__sip.readDrawerOpen()) failures.push("阅读抽屉：Esc 之后 readDrawerOpen() 仍然是 true");
+}
 
 if (failures.length) {
   console.error("✗ Web 前端冒烟失败：");
