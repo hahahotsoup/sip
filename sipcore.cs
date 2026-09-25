@@ -69,6 +69,10 @@ for (int gi = 0; gi < args.Length - 1; gi++)
 Lang.Init(dataDir, langCode);
 TelemetryService.Init(dataDir);   // 遥测：默认关闭，仅本地，独立 telemetry.db
 
+// 主数据库：第一次运行即认领当前数据目录；在别的位置打开时提示主库在哪（**只提示，不当门**）。
+// 放在 Lang.Init 之后，提示才有译文；放在任何 CLI/TUI/Web 分支之前，三种入口都能看到。
+PrimaryDbStartupCheck();
+
 // 每天首次启动留一份本地快照(放在 Lang.Init 之后,失败提示才有译文)。
 // 静默、不阻塞:备份是兜底,不是启动前置条件。
 BackupDbDaily(dbPath);
@@ -84,19 +88,24 @@ if (args.Length > 0)
     return AiState.ExitCode;
 }
 
-// ══════════ TUI 模式（无参数时进入）══════════
-// TUI 已宣布弃用（见 README 路线预告）：双击 exe 或直接敲 sip 的人，
-// 先被告知还有 --start，再由他自己决定。不禁止使用，只保证信息到位。
-if (!ConfirmDeprecatedTui())
+// ══════════ 无参数：启动内置 Web（v2.0.0 起）══════════
+// 为什么把默认从 TUI 换成 Web：双击 exe 的人要的是"能用"，而 TUI 已经宣布弃用
+// （见 README 路线预告）。与其用弃用横幅去劝人改用 Web，不如让**默认值就等于我们推荐的那个界面**，
+// 再把 TUI 留成显式命令（`sip tui`）—— 一个"默认"，一个"还在"，关系写在帮助里，谁也不用猜。
+//
+// 非交互（管道/脚本/无控制台）时**不启服务**：那种环境下"起一个前台阻塞的服务器"只会把脚本挂住，
+// 而且终端里那条带引导令牌的链接也没人看得见。给帮助、以非零码退出，让调用方立刻知道要带参数。
+if (!HasInteractiveConsole())
 {
+    PrintHelp();
     TelemetryService.Shutdown();
     MarkCleanExit(dataDir);
-    return 0;
+    return 1;
 }
-var tuiExit = await RunTui(dbPath);
+await StartWebFromCliOrPause(dbPath, noOpen: args.Contains("--no-open", StringComparer.OrdinalIgnoreCase));
 TelemetryService.Shutdown();   // 冲刷缓冲 + 检查点
 MarkCleanExit(dataDir);
-return tuiExit;
+return AiState.ExitCode;
 
 public partial class Program
 {
@@ -1016,50 +1025,34 @@ static string? ImageExtFromMagic(byte[] b)
         };
     }
 
-// CLI: sip --import <file> [--title <name>] [--json]
-static void ImportCli(string[] args, string dbPath)
+// 本地文件导入的**共用核心**：CLI（sip --import）与 Web（POST /api/imports）都走这里。
+// 分成两层的原因：CLI 那层要往 stdout 打印进度/结果，Web 那层要的是结构化结果 ——
+// 但"复制文件、抽正文、算页数、写 Items"这套动作只该有一份实现，
+// 否则终端导入和网页导入迟早对同一个文件给出不同结果。
+// 返回 (Ok, ItemId, Title, DestPath, Code, Message)；失败时 Code 为
+// FILE_NOT_FOUND / UNSUPPORTED_FORMAT / EMPTY_FILE / IMPORT_ERROR。
+static (bool Ok, long ItemId, string Title, string DestPath, string Code, string Message)
+    ImportFileCore(string filePath, string? title, string dbPath)
 {
-    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
-    string? filePath = null;
-    string? title = null;
-    for (int i = 0; i < args.Length; i++)
-    {
-        if (args[i] == "--title" && i + 1 < args.Length) title = args[++i];
-        else if (!args[i].StartsWith("-")) filePath = args[i];
-    }
-
-    if (string.IsNullOrEmpty(filePath))
-    {
-        SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [--title <name>] [--json]"));
-        return;
-    }
-
-    if (!File.Exists(filePath))
-    {
-        ReportError("FILE_NOT_FOUND", Lang.T("File not found: {0}", filePath), json: json);
-        return;
-    }
+    if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+        return (false, 0, "", "", "FILE_NOT_FOUND", Lang.T("File not found: {0}", filePath));
 
     var ext = Path.GetExtension(filePath).ToLowerInvariant();
     if (ext is not (".txt" or ".md" or ".markdown" or ".pdf" or ".epub" or ".mobi" or ".docx"))
-    {
-        ReportError("UNSUPPORTED_FORMAT", Lang.T("Unsupported file type: {0}. Supported: txt, md, pdf, epub, mobi, docx", ext), json: json);
-        return;
-    }
+        return (false, 0, "", "", "UNSUPPORTED_FORMAT",
+            Lang.T("Unsupported file type: {0}. Supported: txt, md, pdf, epub, mobi, docx", ext));
 
     try
     {
         // 图片落地目录:imported/assets/<guid>/。EPUB/DOCX/PDF 抽出的图写这里,
-        // <img src> 改写为 file:// 绝对路径,显示层 FetchImageBytes 直接读本地字节。
+        // <img src> 改写为 file:// 绝对路径，显示层 FetchImageBytes 直接读本地字节。
         string importAssetsGuid = $"{Guid.NewGuid():N}";
         string assetDir = Path.Combine(ImportedDir(), "assets", importAssetsGuid);
         Directory.CreateDirectory(assetDir);
         string content = ReadImportedFile(filePath, assetDir);
         if (string.IsNullOrWhiteSpace(content))
-        {
-            ReportError("EMPTY_FILE", Lang.T("File is empty or text could not be extracted: {0}", filePath), json: json);
-            return;
-        }
+            return (false, 0, "", "", "EMPTY_FILE",
+                Lang.T("File is empty or text could not be extracted: {0}", filePath));
 
         string fileName = Path.GetFileNameWithoutExtension(filePath);
         string importedTitle = title ?? fileName;
@@ -1100,20 +1093,47 @@ static void ImportCli(string[] args, string dbPath)
         long itemId = (long)cmd.ExecuteScalar()!;
 
         tx.Commit();
-
-        if (json)
-            JsonOut(new { success = true, id = itemId, title = importedTitle, file = destPath, feed = "本地导入" });
-        else
-            Console.WriteLine(Lang.T("Imported: {0} → #{1}", importedTitle, itemId));
+        return (true, itemId, importedTitle, destPath, "", "");
     }
     catch (NotSupportedException ex)
     {
-        ReportError("UNSUPPORTED_FORMAT", ex.Message, json: json);
+        return (false, 0, "", "", "UNSUPPORTED_FORMAT", ex.Message);
     }
     catch (Exception ex)
     {
-        ReportError("IMPORT_ERROR", ex.Message, json: json);
+        return (false, 0, "", "", "IMPORT_ERROR", ex.Message);
     }
+}
+
+// CLI: sip --import <file> [--title <name>] [--json]
+static void ImportCli(string[] args, string dbPath)
+{
+    bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
+    string? filePath = null;
+    string? title = null;
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] == "--title" && i + 1 < args.Length) title = args[++i];
+        else if (!args[i].StartsWith("-")) filePath = args[i];
+    }
+
+    if (string.IsNullOrEmpty(filePath))
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [--title <name>] [--json]"));
+        return;
+    }
+
+    var r = ImportFileCore(filePath, title, dbPath);
+    if (!r.Ok)
+    {
+        ReportError(r.Code, r.Message, json: json);
+        return;
+    }
+
+    if (json)
+        JsonOut(new { success = true, id = r.ItemId, title = r.Title, file = r.DestPath, feed = "本地导入" });
+    else
+        Console.WriteLine(Lang.T("Imported: {0} → #{1}", r.Title, r.ItemId));
 }
 
 // CLI: sip --import-rm <id> [--yes] [--json]
@@ -1176,28 +1196,12 @@ static void ImportRmCli(string[] args, string dbPath)
         if (key != "y" && key != "yes") { Console.WriteLine(Lang.T("Cancelled")); return; }
     }
 
-    // 获取文件路径并删除
-    using (var conn = OpenDb(dbPath))
+    // 删除动作本身与 Web 的 DELETE /api/imports/{id} 共用（删库行 + 删落地文件）
+    var del = ImportItemDelete(realId, dbPath);
+    if (!del.Ok)
     {
-        conn.Open();
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT Link FROM Items WHERE Id = @id";
-        cmd.Parameters.AddWithValue("@id", realId);
-        var link = cmd.ExecuteScalar()?.ToString();
-        if (!string.IsNullOrEmpty(link) && File.Exists(link))
-        {
-            try { File.Delete(link); } catch { }
-        }
-    }
-
-    // 删除数据库记录
-    using (var conn = OpenDb(dbPath))
-    {
-        conn.Open();
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
-        cmd.Parameters.AddWithValue("@id", realId);
-        cmd.ExecuteNonQuery();
+        ReportError(del.Code, del.Message, json: json);
+        return;
     }
 
     if (json)
@@ -3205,11 +3209,21 @@ static async Task RunCli(string[] args, string dbPath)
 
     // ══════════ 内嵌 Web（进程内，前台阻塞）══════════
     // sip --start  →  固定 http://127.0.0.1:8777，Ctrl+C 退出
+    // （无参数启动走的也是这条路径，见入口区：默认 = Web）
     if (cmd is "--start")
     {
-        HandleWebAuthResetFile();       // 逃生口：存在 web_auth.reset 则清密码
-        FirstRunWebPasswordSetup();     // 首次且真实终端：询问是否设密码
-        await StartWebServer(dbPath);
+        await StartWebFromCli(dbPath, noOpen: args.Contains("--no-open", StringComparer.OrdinalIgnoreCase));
+        return;
+    }
+
+    // ══════════ 终端界面（显式入口）══════════
+    // v2.0.0 起无参数 = Web，TUI 改为显式命令。这里**不再问"你确定要用 TUI 吗"** ——
+    // 敲出 `sip tui` 本身就是答案；再问一遍只是把弃用横幅塞给已经做了选择的人。
+    // 位置在两道门之后、其余命令之前：TUI 是真人通道，但仍不该被程序（Agent 门）拉起来。
+    if (cmd is "tui" or "--tui")
+    {
+        var tuiExit = await RunTui(dbPath);
+        SetExit(tuiExit);
         return;
     }
 
@@ -3303,6 +3317,9 @@ static async Task RunCli(string[] args, string dbPath)
             return;
         case "aikey":
             CliAiKey(args.Skip(1).ToArray());
+            return;
+        case "db":
+            CliDb(args.Skip(1).ToArray(), dbPath);
             return;
         case "--agentok" or "--agentoff" or "--agentstatus":
             AgentModeCli(cmd);
@@ -3449,8 +3466,11 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  -una, --unarchive unarchive a feed"));
     Console.WriteLine(Lang.T("  -r, --remove     delete a feed (add --yes to skip confirmation)"));
     Console.WriteLine(Lang.T("  --start          start built-in web UI at http://127.0.0.1:8777 (Ctrl+C to stop) · 内嵌 Web"));
+    Console.WriteLine(Lang.T("                   (running sip with NO arguments does the same — double-click friendly; --no-open skips the browser)"));
+    Console.WriteLine(Lang.T("  tui              terminal UI (TUI). No longer the default: since v2.0.0 bare `sip` starts the web UI instead"));
     Console.WriteLine(Lang.T("  webpass [clear|status]  set/change/clear Web login password (CLI, no TUI); forgot? create web_auth.reset"));
     Console.WriteLine(Lang.T("  aikey status|set-llm|set-embedding|clear-llm|clear-embedding  manage AI keys in OS credentials (no TUI)"));
+    Console.WriteLine(Lang.T("  db status | set [<dir>|--here] | merge [<dir>] [--yes]  which readwithhotsoup is the main library (recorded in OS credentials); repoint it or merge another copy in"));
     Console.WriteLine(Lang.T("  --agentok | --agentoff | --agentstatus  allow/deny programs calling sip (OFF by default; enabling needs a real terminal + Web password)"));
     Console.WriteLine(Lang.T("  pic              TUI with article images on (sixel); images are OFF by default — terminal sixel detection is unreliable"));
     Console.WriteLine(Lang.T("  --show <id>      fullscreen reading (no sidebar; W = full TUI, Esc = exit); add --json to output raw content; add --vision to download images to temp dir; for PDF add --pages <range> (e.g. 3-7) to rasterize only those pages"));
@@ -4368,26 +4388,10 @@ static void MarkCleanExit(string dataDir)
     try { File.WriteAllText(Path.Combine(dataDir, ".clean-exit"), DateTime.Now.ToString("O")); } catch { }
 }
 
-// ══════════ TUI 弃用确认门（仅无参数启动时调用）══════════
-// 目的不是拦人,而是让「双击 exe」「直接敲 sip」的人知道还有内嵌 Web。
-// 提示写在提问**之前**:他答 N 之后窗口可能立刻关闭,该看到的必须先看到。
-// 非交互(管道/脚本/无控制台)不提问直接放行 —— 那种环境下 TUI 本来就起不来,
-// 提问只会把 ReadLine 的 null 误判成拒绝,反而改变脚本行为。
-static bool ConfirmDeprecatedTui()
-{
-    if (!HasInteractiveConsole()) return true;
-
-    Console.WriteLine();
-    Console.WriteLine(Lang.T("(!) The TUI is planned for deprecation; new work goes to CLI + Web."));
-    Console.WriteLine(Lang.T("    Web UI (recommended): sip --start"));
-    Console.WriteLine(Lang.T("    All commands: sip --help"));
-    Console.WriteLine();
-    Console.Write(Lang.T("Are you sure you want to start the TUI? [y/N] "));
-    if (IsYes(Console.ReadLine())) return true;
-
-    Console.WriteLine(Lang.T("Cancelled. Run sip --start to use the built-in web UI."));
-    return false;
-}
+// ══════════ 无参数启动的各条路径（入口区）══════════
+// 这里曾经有一个 `ConfirmDeprecatedTui()`：无参数启动先问一句"你确定要用 TUI 吗"。
+// v2.0.0 起**删掉**了它 —— 默认值已经等于我们推荐的那个界面（Web），
+// 而 TUI 变成显式命令（`sip tui`）：敲出来本身就是答案，再问一遍是把弃用横幅塞给已经做了选择的人。
 
 // ══════════ FTS5 全文索引维护（百万级 grep 的关键；trigram 中文子串可搜）══════════
 // ItemsFts 只存索引,rowid = Items.Id;数据在 Items,由代码增量维护。
@@ -4966,12 +4970,13 @@ static void ListVersionsCli(string arg, string dbPath, bool json = false)
     using var conn = OpenDb(dbPath);
     conn.Open();
     var gCmd = conn.CreateCommand();
-    gCmd.CommandText = "SELECT Guid, Title FROM Items WHERE Id = @id";
+    gCmd.CommandText = "SELECT Guid, Title, FeedId FROM Items WHERE Id = @id";
     gCmd.Parameters.AddWithValue("@id", itemId);
     using var gr = gCmd.ExecuteReader();
     if (!gr.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return; }
     string guid = gr.IsDBNull(0) ? "" : gr.GetString(0);
     string title = gr.GetString(1);
+    int feedId = gr.GetInt32(2);
     gr.Close();
 
     if (string.IsNullOrEmpty(guid))
@@ -4981,9 +4986,13 @@ static void ListVersionsCli(string arg, string dbPath, bool json = false)
         return;
     }
 
+    // 版本链是**每个源各自一条**（见 ShowDiff 的 FeedId 条件）：不同源可能转载同一篇
+    // （Guid 相同），只按 Guid 取会把两个源的版本混在一起 —— 版本号还会重复，
+    // 于是"看 v1→v2"可能拿的是 B 源的 v1 去比 A 源的 v2。
     var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt, Title FROM Items WHERE Guid = @g ORDER BY Version DESC";
+    cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt, Title FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version DESC";
     cmd.Parameters.AddWithValue("@g", guid);
+    cmd.Parameters.AddWithValue("@f", feedId);
     using var r = cmd.ExecuteReader();
     var list = new List<(long Id, int Version, string Status, string At, string T)>();
     while (r.Read())
@@ -5050,17 +5059,19 @@ static void DiffCli(string[] args, string dbPath)
     var vers = args.Where(a => a.StartsWith("v", StringComparison.OrdinalIgnoreCase) && a.Length > 1 && int.TryParse(a[1..], out _))
                    .Select(a => int.Parse(a[1..])).ToList();
 
-    // 查文章 + 所有版本正文
+    // 查文章 + 所有版本正文（版本链按源隔离，理由同 VersionsCli）
     string guid;
+    int feedId;
     using (var conn = OpenDb(dbPath))
     {
         conn.Open();
         var gCmd = conn.CreateCommand();
-        gCmd.CommandText = "SELECT Guid FROM Items WHERE Id = @id";
+        gCmd.CommandText = "SELECT Guid, FeedId FROM Items WHERE Id = @id";
         gCmd.Parameters.AddWithValue("@id", itemId);
-        var o = gCmd.ExecuteScalar();
-        if (o == null) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return; }
-        guid = o.ToString() ?? "";
+        using var gr = gCmd.ExecuteReader();
+        if (!gr.Read()) { ReportError("ITEM_NOT_FOUND", Lang.T("Article {0} not found", itemId), json: json); return; }
+        guid = gr.IsDBNull(0) ? "" : gr.GetString(0);
+        feedId = gr.GetInt32(1);
     }
     if (string.IsNullOrEmpty(guid))
     {
@@ -5076,8 +5087,9 @@ static void DiffCli(string[] args, string dbPath)
     {
         conn.Open();
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT Version, Content, Description FROM Items WHERE Guid = @g ORDER BY Version";
+        cmd.CommandText = "SELECT Version, Content, Description FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version";
         cmd.Parameters.AddWithValue("@g", guid);
+        cmd.Parameters.AddWithValue("@f", feedId);
         using var r = cmd.ExecuteReader();
         while (r.Read())
             rows.Add((r.GetInt32(0), string.IsNullOrWhiteSpace(r.IsDBNull(1) ? "" : r.GetString(1))
@@ -5913,12 +5925,17 @@ static void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNe
         }
 
         // --- 更新模式：查是否已有 active 状态的同 Guid 文章 ---
+        // ⚠️ **必须带 FeedId 条件**。Guid 是文章级别的标识，不同订阅源完全可能转载同一篇
+        // （Guid 相同）—— 只按 Guid 匹配，则 A 源改稿时会顺手把 B 源那份 active 副本一起
+        // 归档掉（"跨源误归档"），B 源看起来就像文章凭空消失。
+        // 版本链是**每个源各自一条**：A 源 v2 不该让 B 源从 v2 起步。
         var checkCmd = conn.CreateCommand();
         checkCmd.CommandText = @"
             SELECT Id, Version, Title, Content
-            FROM Items WHERE Guid = @guid AND Status = 'active'
+            FROM Items WHERE Guid = @guid AND FeedId = @feedId AND Status = 'active'
         ";
         checkCmd.Parameters.AddWithValue("@guid", guid);
+        checkCmd.Parameters.AddWithValue("@feedId", feedId);
 
         using var reader = checkCmd.ExecuteReader();
 
@@ -5933,14 +5950,16 @@ static void ShowDiff(Feed newFeed, long feedId, SqliteConnection conn, bool isNe
             if (oldContent == (item.Content ?? ""))
                 continue;  // 内容相同 → 跳过
 
-            // 内容不同 → 强制归档该 Guid 下所有 active 的旧版（防止残留多版本）
+            // 内容不同 → 强制归档该 Guid 下所有 active 的旧版（防止残留多版本）。
+            // 同样带 FeedId：只归档**本源的**旧版，别把别的源的转载副本一起下架。
             var archiveCmd = conn.CreateCommand();
             archiveCmd.CommandText = @"
                 UPDATE Items SET Status = 'archived', ArchivedAt = @now
-                WHERE Guid = @guid AND Status = 'active'
+                WHERE Guid = @guid AND FeedId = @feedId AND Status = 'active'
             ";
             archiveCmd.Parameters.AddWithValue("@now", DateTime.Now.ToString("O"));
             archiveCmd.Parameters.AddWithValue("@guid", guid);
+            archiveCmd.Parameters.AddWithValue("@feedId", feedId);
             archiveCmd.ExecuteNonQuery();
 
             // 插入新版本
@@ -8096,6 +8115,9 @@ class SipSettings
     public string WebHost { get; set; } = "127.0.0.1";
     public int WebPort { get; set; } = 8777;
     public bool WebSetupDone { get; set; } = false;
+    // 起 Web 时自动打开浏览器（真终端下才做）。无密码模式尤其需要：引导令牌只印在终端里，
+    // 不自动开浏览器，双击的人还得自己复制粘贴那条带 ?t= 的链接。关闭：--no-open 或这里设 false。
+    public bool WebOpenBrowser { get; set; } = true;
 }
 
 // Source Policy：用户确认的「处理规则」（source_policy.json）。createdBy 永远 user，AI 永不自动写。

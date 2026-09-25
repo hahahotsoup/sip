@@ -17,9 +17,67 @@ public partial class Program
     static HttpListener? webListener;
     static string webDbPath = "";
 
-    // sip --start  前台阻塞；Ctrl+C 退出
+    // sip（无参数）与 sip --start 共用这一条启动路径：
+    // 逃生口 → 首次向导 → 起服务。两处各写一遍迟早只剩一处被改到。
+    //
+    // 返回**有没有真的跑起来**：绑定失败时返回 false，双击路径据此停下来让人看清错误
+    // （控制台窗口在进程退出的瞬间就会关掉，不暂停的话那几行提示一闪而过）。
+    static async Task<bool> StartWebFromCli(string dbPath, bool noOpen)
+    {
+        HandleWebAuthResetFile();       // 逃生口：存在 web_auth.reset 则清密码
+        FirstRunWebPasswordSetup();     // 首次且真实终端：询问是否设密码
+        // 自动开浏览器只在**真终端**里做，且可以在设置里关掉（sip_settings.json 的
+        // WebOpenBrowser）或命令行 --no-open 关掉；测试/脚本环境 stdout 被重定向，
+        // HasInteractiveConsole() 为假，不会弹出浏览器。
+        bool open = !noOpen && LoadSettings().WebOpenBrowser && HasInteractiveConsole();
+        return await StartWebServer(dbPath, openBrowser: open);
+    }
+
+    /// <summary>双击路径专用：起不来就**停下来让人看清错误**再退出。
+    /// 双击开的控制台窗口会在进程退出的瞬间关掉，不暂停的话那几行提示一闪而过 ——
+    /// 用户只看到"窗口闪了一下"，然后什么都不知道。</summary>
+    static async Task StartWebFromCliOrPause(string dbPath, bool noOpen)
+    {
+        if (await StartWebFromCli(dbPath, noOpen)) return;
+        SetExit();
+        if (!HasInteractiveConsole()) return;
+        Console.WriteLine();
+        Console.Write(Lang.T("Press Enter to close this window…"));
+        try { Console.ReadLine(); } catch { }
+    }
+
+    /// <summary>把浏览器开到指定 URL。失败只提示、不抛 —— 打不开浏览器不该让服务起不来。</summary>
+    static void OpenInBrowser(string url)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo { UseShellExecute = true };
+            if (OperatingSystem.IsWindows())
+            {
+                psi.FileName = url;                 // Windows 用 shell 打开 URL
+            }
+            else
+            {
+                psi.FileName = OperatingSystem.IsMacOS() ? "open" : "xdg-open";
+                psi.ArgumentList.Add(url);
+                psi.UseShellExecute = false;
+            }
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(Lang.T("(could not open the browser: {0} — open the link above manually)", ex.Message));
+        }
+    }
+
+    // sip --start / 无参数  前台阻塞；Ctrl+C 退出
     // 绑定/端口来自 sip_settings.json（首次交互初始化写入）；未配置则 127.0.0.1:8777
-    static async Task StartWebServer(string dbPath)
+    //
+    // openBrowser：把浏览器**直接开到那条带引导令牌的链接**上。无密码模式下尤其重要 ——
+    // 令牌只印在终端里，不自动开浏览器的话，双击的人还得自己复制粘贴一次。
+    //
+    // 返回 true = 真的进了接受循环（Ctrl+C 之后从这里返回）；false = 没起来（绑定失败等）。
+    static async Task<bool> StartWebServer(string dbPath, bool openBrowser = false)
     {
         webDbPath = dbPath;
         var st = LoadSettings();
@@ -53,15 +111,17 @@ public partial class Program
             {
                 Console.Error.WriteLine(Lang.T("Hint: make sure {0} is free, or re-run sip --start to change bind/port.", prefix.TrimEnd('/')));
             }
-            return;
+            return false;
         }
 
         bool loopback = IsLoopbackHost(host);
-        Console.WriteLine("========================================================");
-        Console.WriteLine(Lang.T("  🍲 sip web · taste it slow"));
         // 无密码模式：把引导令牌印在 URL 里。这是唯一的带外发放点。
         string uiUrl = displayUrl.TrimEnd('/');
-        Console.WriteLine(Lang.T("  Web UI     : {0}", WebPasswordIsSet() ? uiUrl : $"{uiUrl}/?t={EnsureWebBootToken()}"));
+        string openUrl = WebPasswordIsSet() ? uiUrl : $"{uiUrl}/?t={EnsureWebBootToken()}";
+
+        Console.WriteLine("========================================================");
+        Console.WriteLine(Lang.T("  🍲 sip web · taste it slow"));
+        Console.WriteLine(Lang.T("  Web UI     : {0}", openUrl));
         if (!WebPasswordIsSet())
             Console.WriteLine(Lang.T("               (no password: open the link above — a bare visit is refused on purpose)"));
         Console.WriteLine(Lang.T("  Data folder: {0}", dataDir));
@@ -74,11 +134,18 @@ public partial class Program
         // 「没有数据」却不知道该做什么。终端是唯一能给出可执行下一步的地方。
         if (!TelemetryService.IsEnabled)
             Console.WriteLine(Lang.T("  Telemetry  : off · the reading report will have no data (turn on: sip telemetry enable)"));
+        // 无参数启动现在默认就是 Web（见 sipcore.cs 入口），所以这里要告诉人终端界面还在。
+        Console.WriteLine(Lang.T("  Terminal UI: {0}", "sip tui"));
         Console.WriteLine(Lang.T("  Ctrl+C to stop"));
         Console.WriteLine("========================================================");
         if (!loopback && !WebPasswordIsSet())
         {
             Console.WriteLine(Lang.T("No password and non-local bind — run sip webpass now, or switch back to 127.0.0.1."));
+        }
+        if (openBrowser)
+        {
+            Console.WriteLine(Lang.T("Opening the browser… (disable with --no-open, or WebOpenBrowser=false in sip_settings.json)"));
+            OpenInBrowser(openUrl);
         }
 
         using var cts = new CancellationTokenSource();
@@ -106,6 +173,7 @@ public partial class Program
             try { webListener.Close(); } catch { }
             webListener = null;
         }
+        return true;
     }
 
     static void HandleWebContext(HttpListenerContext ctx)
@@ -118,8 +186,23 @@ public partial class Program
             res.Headers["Referrer-Policy"] = "no-referrer";
             res.Headers["Cache-Control"] = "no-store";
             // 防点击劫持：本机 UI 不该被任何页面套进 iframe
-            // （CSP 的 frame-ancestors 'none' 留到上 CSP 那一步，这里先用覆盖更广的 XFO）
             res.Headers["X-Frame-Options"] = "DENY";
+            // ── CSP：第二道防线（第一道是服务端净化，见 ToSafeBodyHtml）──
+            // 为什么现在才上：`script-src 'self'` 要求页面里**没有内联脚本、没有 onclick=**，
+            // 所以前端先拆成 web/index.html（只有标记）+ web/app.js（全部逻辑）。
+            // 这一条同时掐死"正文里混进 <script>"与"事件属性被激活"两条路：
+            // 就算哪天净化器漏了一个标签，浏览器也不会执行它。
+            //   default-src 'none'      —— 没写的一律不许（白名单思路，与净化器一致）
+            //   script-src 'self'       —— 只有我们自己的 /app.js、/login.js
+            //   style-src  允许 inline  —— 页内 <style> 与 style="" 是排版手段，不构成脚本执行面
+            //   img-src    放行 http(s) —— 正文里的图是订阅源给的**绝对**地址（净化器只放行绝对 URL）
+            //   connect-src 'self'      —— 前端只能打本机 API
+            //   frame-ancestors 'none'  —— 与 XFO 重复是有意的：老浏览器认 XFO，新的认 CSP
+            res.Headers["Content-Security-Policy"] =
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+                "img-src 'self' data: http: https:; media-src http: https:; font-src 'self'; " +
+                "connect-src 'self'; form-action 'self'; frame-ancestors 'none'; " +
+                "base-uri 'none'; object-src 'none'";
 
             string path = req.Url?.AbsolutePath ?? "/";
             string method = (req.HttpMethod ?? "GET").ToUpperInvariant();
@@ -235,6 +318,25 @@ public partial class Program
                 return;
             }
 
+            // ── 静态资源（前端脚本、语言文件、PWA 清单）──
+            // 放在认证检查**之前**：它们本身不含你的数据，而登录页正需要 /login.js 与背景图。
+            // （此前 /languages/*.json 没有路由，于是界面永远回落到 20 个键的内置表 ——
+            //   "多语言"看着有、实际没生效。）
+            if (method is "GET" or "HEAD" && TryServeStatic(res, path)) return;
+
+            // ── 导入文件的「临时链接」出口：/api/imports/{id}/file?k=<临时令牌> ──
+            // 必须在下面那道"/api/* 一律要会话"之前：这条链接的凭据**就是那个令牌**
+            // （进程内、只对一份文件、10 分钟过期），而不是浏览器 cookie ——
+            // 否则"拿去别的标签页 / 别的 PDF 阅读器里打开"根本无从谈起。
+            // 没带令牌或令牌不对时，仍然按会话认证走（所以它也是"登录后用浏览器直接打开"的接口）。
+            if (method is "GET" or "HEAD"
+                && TryMatch(path, "/api/imports/", out int fileItemId, out string fileRest)
+                && fileRest == "/file")
+            {
+                HandleImportFile(req, res, fileItemId);
+                return;
+            }
+
             // 其余 /api/*：必须已认证（密码会话 或 本机 token）
             if (path.StartsWith("/api/", StringComparison.Ordinal) && !WebRequestIsAuthenticated(req))
             {
@@ -265,6 +367,8 @@ public partial class Program
             if (method == "POST" && path == "/api/feeds/opml") { HandleOpmlImport(req, res); return; }
             if (method == "GET" && path == "/api/feeds/opml") { HandleOpmlExport(res); return; }
             if (method == "GET" && path == "/api/progress") { HandleProgress(res); return; }
+            if (method == "GET" && path == "/api/reading-progress") { HandleReadingProgressGet(res); return; }
+            if (method == "POST" && path == "/api/reading-progress") { HandleReadingProgressSet(req, res); return; }
             if (method == "POST" && path == "/api/feeds/sync") { HandleSync(res, onlyDue: true); return; }
             if (method == "POST" && path == "/api/feeds/update-all") { HandleSync(res, onlyDue: false); return; }
 
@@ -275,15 +379,17 @@ public partial class Program
                 if (method == "POST" && rest == "/update") { HandleFeedUpdate(res, feedId); return; }
                 if (method == "POST" && rest == "/archive") { HandleFeedArchive(res, feedId, archive: true); return; }
                 if (method == "POST" && rest == "/unarchive") { HandleFeedArchive(res, feedId, archive: false); return; }
+                if (method == "POST" && rest == "/schedule") { HandleFeedSchedule(req, res, feedId); return; }
                 if (method == "DELETE" && rest == "") { HandleFeedDelete(res, feedId); return; }
             }
 
             // ── articles ──
             if (TryMatch(path, "/api/articles/", out int itemId, out string ar))
             {
-                if (method == "GET" && ar == "") { HandleArticleGet(res, itemId); return; }
+                if (method == "GET" && ar == "") { HandleArticleGet(req, res, itemId); return; }
                 if (method == "GET" && ar == "/versions") { HandleArticleVersions(res, itemId); return; }
                 if (method == "GET" && ar == "/diff") { HandleArticleDiff(req, res, itemId); return; }
+                if (method == "GET" && ar == "/export") { HandleArticleExport(res, itemId); return; }
                 if (method == "POST" && ar == "/like") { HandleArticleLike(res, itemId); return; }
                 if (method == "POST" && ar == "/fulltext") { HandleArticleFulltext(req, res, itemId); return; }
                 if (method == "GET" && ar == "/summary") { HandleArticleSummary(res, itemId, generate: false); return; }
@@ -291,12 +397,68 @@ public partial class Program
             }
 
             // ── today / likes / search ──
-            if (method == "GET" && path == "/api/today") { HandleToday(res, refresh: false); return; }
-            if (method == "POST" && path == "/api/today/refresh") { HandleToday(res, refresh: true); return; }
+            if (method == "GET" && path == "/api/today") { HandleToday(req, res, refresh: false); return; }
+            if (method == "POST" && path == "/api/today/refresh") { HandleToday(req, res, refresh: true); return; }
             if (method == "GET" && path == "/api/likes") { HandleLikes(res); return; }
             if (method == "GET" && path == "/api/grep") { HandleGrep(req, res); return; }
             if (method == "GET" && path == "/api/search") { HandleSearch(req, res); return; }
             if (method == "GET" && path == "/api/insights") { HandleInsights(req, res); return; }
+
+            // ══════════ v2.0.0：补齐的 Web 功能 ══════════
+            // 改稿追踪（列表）
+            if (method == "GET" && path == "/api/edits") { HandleEdits(req, res); return; }
+
+            // 跨源去重
+            if (method == "GET" && path == "/api/dedup") { HandleDedupList(req, res); return; }
+            if (method == "POST" && path == "/api/dedup/scan") { HandleDedupScan(req, res); return; }
+            if (method == "POST" && path == "/api/dedup/hide") { HandleDedupHide(req, res); return; }
+            if (method == "POST" && path == "/api/dedup/hide-cluster") { HandleDedupHideCluster(req, res); return; }
+            if (method == "POST" && path == "/api/dedup/undo") { HandleDedupUndo(req, res); return; }
+            if (method == "GET" && path == "/api/dedup/diff") { HandleDedupDiff(req, res); return; }
+
+            // 源规则（用户确认的处理规则）
+            if (method == "GET" && path == "/api/policies") { HandlePolicyList(res); return; }
+            if (method == "POST" && path == "/api/policies") { HandlePolicySet(req, res); return; }
+            if (TryMatch(path, "/api/policies/", out int polFeedId, out string polRest) && polRest == "")
+            {
+                if (method == "DELETE") { HandlePolicyRemove(res, polFeedId); return; }
+            }
+
+            // 本地导入 / 电子书
+            if (method == "GET" && path == "/api/imports") { HandleImportList(res); return; }
+            if (method == "POST" && path == "/api/imports") { HandleImportUpload(req, res); return; }
+            if (TryMatch(path, "/api/imports/", out int impId, out string impRest))
+            {
+                if (method == "GET" && impRest == "") { HandleImportDetail(res, impId); return; }
+                if (method == "GET" && impRest == "/text") { HandleImportText(req, res, impId); return; }
+                if (method == "GET" && impRest == "/asset") { HandleImportAsset(req, res, impId); return; }
+                if (method == "POST" && impRest == "/link") { HandleImportLink(res, impId); return; }
+                if (method == "GET" && impRest.StartsWith("/page/", StringComparison.Ordinal))
+                {
+                    if (int.TryParse(impRest[6..], out int pageNo)) { HandleImportPage(res, impId, pageNo); return; }
+                }
+                if (method == "DELETE" && impRest == "") { HandleImportDelete(res, impId); return; }
+            }
+
+            // 向量索引
+            if (method == "GET" && path == "/api/index") { HandleIndexStatus(res); return; }
+            if (method == "POST" && path == "/api/index") { HandleIndexRun(req, res); return; }
+
+            // 治理面：挡位 / Agent 门 / 遥测 / 配置 / 推荐源（onboarding）
+            if (method == "GET" && path == "/api/simon") { HandleSimonStatus(res); return; }
+            if (method == "POST" && path == "/api/simon/level") { HandleSimonLevel(req, res); return; }
+            if (method == "GET" && path == "/api/telemetry") { HandleTelemetryStatus(res); return; }
+            if (method == "POST" && path == "/api/telemetry") { HandleTelemetrySet(req, res); return; }
+            if (method == "GET" && path == "/api/telemetry/export") { HandleTelemetryExport(res); return; }
+            if (method == "GET" && path == "/api/config") { HandleConfig(res); return; }
+            if (method == "GET" && path == "/api/onboarding") { HandleOnboardingList(res); return; }
+            if (method == "POST" && path == "/api/onboarding/add") { HandleOnboardingAdd(req, res); return; }
+            if (method == "POST" && path == "/api/insights/interval") { HandleInsightsInterval(req, res); return; }
+            if (method == "POST" && path == "/api/summaries") { HandleSummaryAll(req, res); return; }
+            if (method == "POST" && path == "/api/purge-fulltext") { HandlePurgeFulltext(req, res); return; }
+
+            // 命令面板（只读白名单，不执行任意 CLI）
+            if (method == "POST" && path == "/api/command") { HandleCommand(req, res); return; }
 
             WriteJson(res, 404, new { success = false, error = new { code = "NOT_FOUND", message = path } });
         }
@@ -376,6 +538,22 @@ public partial class Program
         res.StatusCode = 200;
         res.ContentType = contentType;
         res.Headers["Content-Disposition"] = $"attachment; filename=\"{filename}\"";
+        res.ContentLength64 = buf.Length;
+        res.OutputStream.Write(buf, 0, buf.Length);
+        res.OutputStream.Close();
+    }
+
+    /// <summary>带**非 ASCII 文件名**的下载（文章标题常常是中文）。
+    /// HTTP 头只能是 ASCII，所以同时给 <c>filename</c>（回落用）与
+    /// <c>filename*=UTF-8''…</c>（RFC 5987，现代浏览器优先用它）——
+    /// 只给前者的话，中文标题会被压成乱码甚至整条头被拒。</summary>
+    static void WriteDownloadEncoded(HttpListenerResponse res, string contentType, string asciiFilename, string utf8Filename, string body)
+    {
+        byte[] buf = Encoding.UTF8.GetBytes(body);
+        res.StatusCode = 200;
+        res.ContentType = contentType;
+        string encoded = Uri.EscapeDataString(utf8Filename).Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
+        res.Headers["Content-Disposition"] = $"attachment; filename=\"{asciiFilename}\"; filename*=UTF-8''{encoded}";
         res.ContentLength64 = buf.Length;
         res.OutputStream.Write(buf, 0, buf.Length);
         res.OutputStream.Close();
@@ -486,9 +664,78 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         ? "<p class=\"stale\">sip 重启过了（或这张通行证属于另一个浏览器），上一次的链接已经作废 —— 请用终端里新打印的那条。</p>"
         : "");
 
-    static void WriteLoginBg(HttpListenerResponse res)
+    // ══════════ 静态资源 ══════════
+    // 前端脚本与语言文件都来自**内嵌资源**（单文件 exe 不依赖外部目录），
+    // 找不到时回落到源码树/输出目录里的同名文件 —— 开发态改完不用重新打包。
+    //
+    // 为什么把 JS 拆成独立文件而不是留在 <style>/<script> 里：
+    // CSP 的 `script-src 'self'` 不允许内联脚本。拆出去之后，
+    // 「正文里混进 <script>」这条 XSS 路径在浏览器层面就是死的 —— 净化器漏一个标签也不会执行。
+    static readonly Dictionary<string, (string Resource, string ContentType)> WebStaticFiles =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["/app.js"] = ("sip-web.app.js", "application/javascript; charset=utf-8"),
+            ["/login.js"] = ("sip-web.login.js", "application/javascript; charset=utf-8"),
+            ["/manifest.webmanifest"] = ("sip-web.manifest", "application/manifest+json; charset=utf-8"),
+            ["/sw.js"] = ("sip-web.sw.js", "application/javascript; charset=utf-8"),
+            ["/icon.svg"] = ("sip-web.icon.svg", "image/svg+xml; charset=utf-8"),
+        };
+
+    /// <summary>命中并写出一个静态资源；没命中返回 false（调用方继续走后面的路由）。</summary>
+    static bool TryServeStatic(HttpListenerResponse res, string path)
     {
-        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        if (WebStaticFiles.TryGetValue(path, out var asset))
+            return WriteStatic(res, asset.Resource, asset.ContentType, Path.GetFileName(path));
+
+        // /languages/zh-CN.json —— 界面语言词典（与 sip Lang.T 同一批键）。
+        // 只接受 `字母/连字符` 组成的文件名：这里**不做路径拼接**，免得给目录穿越留口子。
+        const string langPrefix = "/languages/";
+        if (path.StartsWith(langPrefix, StringComparison.Ordinal) && path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            string code = path[langPrefix.Length..^5];
+            if (code.Length is > 0 and <= 24 && code.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+                return WriteStatic(res, "sip-lang." + code + ".json", "application/json; charset=utf-8", code + ".json");
+        }
+        return false;
+    }
+
+    static bool WriteStatic(HttpListenerResponse res, string resourceName, string contentType, string diskName)
+    {
+        byte[]? buf = null;
+        using (var rs = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName))
+        {
+            if (rs != null)
+            {
+                using var ms = new MemoryStream();
+                rs.CopyTo(ms);
+                buf = ms.ToArray();
+            }
+        }
+        if (buf == null)
+        {
+            // 开发态：输出目录里的 web/ 或 languages/（两种都试，路径由文件名拼出，不接受调用方给的路径）
+            string[] candidates =
+            {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "web", diskName),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "languages", diskName)
+            };
+            foreach (var c in candidates)
+            {
+                try { if (File.Exists(c)) { buf = File.ReadAllBytes(c); break; } } catch { }
+            }
+        }
+        if (buf == null) return false;
+
+        res.StatusCode = 200;
+        res.ContentType = contentType;
+        res.ContentLength64 = buf.Length;
+        if (res.OutputStream.CanWrite) res.OutputStream.Write(buf, 0, buf.Length);
+        res.OutputStream.Close();
+        return true;
+    }
+
+    static void WriteLoginBg(HttpListenerResponse res)
+    {        var asm = System.Reflection.Assembly.GetExecutingAssembly();
         byte[]? buf = null;
         using (var rs = asm.GetManifestResourceStream("sip-web.login-bg.png"))
         {
@@ -676,6 +923,39 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
             success = true,
             data = new { active, kind = _progKind, done = _progDone, total = _progTotal, current = _progCurrent }
         });
+    }
+
+    // ── 阅读位置记忆（reading_progress.json，与 TUI 共用同一个文件）──
+    // 刻意**不过** WebWriteAllowed：这是界面状态（读到哪儿了），不是对库的改动。
+    // 挡位 2 的本意是拦住"改库"的动作；把滚动位置也拦掉，只会让人没法接着读。
+    static void HandleReadingProgressGet(HttpListenerResponse res)
+    {
+        var map = LoadReadingProgress();
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                positions = map.ToDictionary(k => k.Key.ToString(), v => v.Value)
+            }
+        });
+    }
+
+    static async void HandleReadingProgressSet(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        string body = await ReadBodyAsync(req);
+        long itemId = BodyInt(body, "itemId");
+        int position = BodyInt(body, "position", -1);
+        if (itemId <= 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "itemId required" } });
+            return;
+        }
+        var map = LoadReadingProgress();
+        if (position < 0) map.Remove(itemId);
+        else map[itemId] = position;
+        SaveReadingProgress(map);
+        WriteJson(res, 200, new { success = true, data = new { itemId, position = map.TryGetValue(itemId, out int p) ? p : -1 } });
     }
 
     /// <summary>某个源当前有多少篇文章。用来给出「新增 N 篇」这种真实反馈 ——
@@ -1085,6 +1365,41 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         }
     }
 
+    // 更新计划（CLI: `sip --schedule <id> <expr>`；TUI: schedule 命令）。
+    // 与它们共用 SetFeedSchedule —— 表达式解析、清空语义、遥测留痕都只有一份。
+    static async void HandleFeedSchedule(HttpListenerRequest req, HttpListenerResponse res, int feedRealId)
+    {
+        if (!WebWriteAllowed(res, "schedule")) return;
+        string body = await ReadBodyAsync(req);
+        string expr = BodyString(body, "expr").Trim();
+        if (!FeedExistsReal(feedRealId))
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "FEED_NOT_FOUND", message = Lang.T("Feed number not found") } });
+            return;
+        }
+        // 空串 / manual 都表示"只手动更新"（与 CLI 同一语义）
+        if (expr.Length == 0) expr = "manual";
+        if (!expr.Equals("manual", StringComparison.OrdinalIgnoreCase) && TryParseSchedule(expr) == null)
+        {
+            WriteJson(res, 400, new
+            {
+                success = false,
+                error = new
+                {
+                    code = "BAD_SCHEDULE",
+                    message = Lang.T("Invalid schedule expression: {0}; e.g. 30m / 1h / daily@10:00 / weekly@Mon 08:00 / manual", expr)
+                }
+            });
+            return;
+        }
+        SetFeedSchedule(GetDisplayNum(feedRealId, webDbPath).ToString(), expr, webDbPath);
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new { feedId = feedRealId, schedule = expr.Equals("manual", StringComparison.OrdinalIgnoreCase) ? "" : expr.ToLowerInvariant() }
+        });
+    }
+
     // ══════════ 正文净化：把第三方 HTML 变成「可安全注入浏览器的 DOM」══════════
     // 为什么在服务端做：
     //   ① 一处做对，所有消费方受益（将来原生 App / 别的前端不会漏）
@@ -1135,7 +1450,7 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         catch { return ""; }   // 渲染失败不抛：宁可正文少显示，也不能让接口整体挂掉
     }
 
-    static string ToSafeBodyHtml(string body)
+    static string ToSafeBodyHtml(string body, long importItemId = 0)
     {
         if (string.IsNullOrWhiteSpace(body)) return "";
         if (!LooksLikeHtml(body))
@@ -1153,6 +1468,20 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         {
             var doc = new HtmlAgilityPack.HtmlDocument();
             doc.LoadHtml(body);
+            // 导入的电子书里，图片是**本机 file:// 绝对路径**（EPUB/DOCX 抽取时改写的）。
+            // 净化器只放行绝对 http(s)/data: 地址，于是这些图会被整个丢掉 ——
+            // 所以先把它们改写成我们自己的资产接口（那条接口把路径围在 imported/ 之内）。
+            if (importItemId > 0)
+            {
+                foreach (var img in doc.DocumentNode.Descendants("img").ToList())
+                {
+                    string src = img.GetAttributeValue("src", "");
+                    string? local = LocalPathOf(src);
+                    if (local != null)
+                        img.SetAttributeValue("src",
+                            $"/api/imports/{importItemId}/asset?path={Uri.EscapeDataString(local)}");
+                }
+            }
             var cleaned = SanitizeList(doc.DocumentNode.ChildNodes.ToList());
             doc.DocumentNode.RemoveAllChildren();
             foreach (var n in cleaned) doc.DocumentNode.AppendChild(n);
@@ -1221,39 +1550,102 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         if (u.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return true;
         if (!allowData && u.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase)) return true;
         if (allowData && u.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) return true;
+        // 唯一的相对路径例外：我们自己的导入资产接口。
+        // 它由 ToSafeBodyHtml 从 file:// 改写而来（见那里的注释），
+        // 服务端会把路径围在 readwithhotsoup/imported/ 之内 —— 不是任意本地文件读取口。
+        if (allowData && u.StartsWith("/api/imports/", StringComparison.Ordinal)) return true;
         return false;
     }
 
-    static void HandleArticleGet(HttpListenerResponse res, int itemId)
+    static void HandleArticleGet(HttpListenerRequest req, HttpListenerResponse res, int itemId)
     {
-        using var conn = OpenDb(webDbPath);
-        conn.Open();
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-            SELECT i.Title, i.Content, i.Description, i.Link, i.PublishDate, i.Author, f.Title, i.PageCount, i.Summary
-            FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id
-            WHERE i.Id = @id";
-        cmd.Parameters.AddWithValue("@id", itemId);
-        using var r = cmd.ExecuteReader();
-        if (!r.Read())
+        int? wantVersion = int.TryParse(QueryParam(req, "version"), out int qv) ? qv : null;
+
+        string title, content, desc, link, pub, author, feed, summary, guid, status, archivedAt;
+        int? pageCount;
+        int version, feedId, versionCount;
+        int wantId = itemId;
+        bool imported = false;   // 属于「本地导入」源（界面据此把它交给阅读器）
+
+        using (var conn = OpenDb(webDbPath))
         {
-            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
-            return;
+            conn.Open();
+            var head = conn.CreateCommand();
+            head.CommandText = "SELECT Guid, FeedId, Version FROM Items WHERE Id = @id";
+            head.Parameters.AddWithValue("@id", itemId);
+            using (var hr = head.ExecuteReader())
+            {
+                if (!hr.Read())
+                {
+                    WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
+                    return;
+                }
+                guid = hr.IsDBNull(0) ? "" : hr.GetString(0);
+                feedId = hr.GetInt32(1);
+                version = hr.GetInt32(2);
+            }
+
+            // ?version=N = 看**历史版本**的正文（TUI 里按 V 选一版等价物）。
+            // 版本链按 (Guid, FeedId) 隔离 —— 不同源可能转载同一篇（Guid 相同），
+            // 只按 Guid 取会让两个源的历史混在一起，版本号还会重复。
+            if (wantVersion != null && wantVersion != version && guid.Length > 0)
+            {
+                var vc = conn.CreateCommand();
+                vc.CommandText = "SELECT Id FROM Items WHERE Guid = @g AND FeedId = @f AND Version = @v LIMIT 1";
+                vc.Parameters.AddWithValue("@g", guid);
+                vc.Parameters.AddWithValue("@f", feedId);
+                vc.Parameters.AddWithValue("@v", wantVersion.Value);
+                object? hit = vc.ExecuteScalar();
+                if (hit == null)
+                {
+                    WriteJson(res, 404, new { success = false, error = new { code = "VERSION_NOT_FOUND", message = "version not found" } });
+                    return;
+                }
+                wantId = Convert.ToInt32(hit);
+                version = wantVersion.Value;
+            }
+
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT i.Title, i.Content, i.Description, i.Link, i.PublishDate, i.Author, f.Title,
+                       i.PageCount, i.Summary, i.Status, i.ArchivedAt, f.FeedUrl
+                FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id
+                WHERE i.Id = @id";
+            cmd.Parameters.AddWithValue("@id", wantId);
+            using var r = cmd.ExecuteReader();
+            if (!r.Read())
+            {
+                WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
+                return;
+            }
+            title = r.GetString(0);
+            content = r.IsDBNull(1) ? "" : r.GetString(1);
+            desc = r.IsDBNull(2) ? "" : r.GetString(2);
+            link = r.IsDBNull(3) ? "" : r.GetString(3);
+            pub = r.IsDBNull(4) ? "" : r.GetString(4);
+            author = r.IsDBNull(5) ? "" : r.GetString(5);
+            feed = r.IsDBNull(6) ? "" : r.GetString(6);
+            pageCount = r.IsDBNull(7) ? null : r.GetInt32(7);
+            summary = r.IsDBNull(8) ? "" : r.GetString(8);
+            status = r.GetString(9);
+            archivedAt = r.IsDBNull(10) ? "" : r.GetString(10);
+            // 「本地导入」的文件也在这条接口上（它就是一个普通源）。界面据此把它交给**阅读器**：
+            // 那边按节分页、图片也改写好了；文章视图对整本书既分不了页、图还会被净化器丢掉。
+            imported = !r.IsDBNull(11) && r.GetString(11) == "local://import";
+            r.Close();
+
+            var vcount = conn.CreateCommand();
+            vcount.CommandText = guid.Length == 0
+                ? "SELECT 1"
+                : "SELECT COUNT(*) FROM Items WHERE Guid = @g AND FeedId = @f";
+            vcount.Parameters.AddWithValue("@g", guid);
+            vcount.Parameters.AddWithValue("@f", feedId);
+            versionCount = guid.Length == 0 ? 1 : Convert.ToInt32(vcount.ExecuteScalar() ?? 1);
         }
-        string title = r.GetString(0);
-        string content = r.IsDBNull(1) ? "" : r.GetString(1);
-        string desc = r.IsDBNull(2) ? "" : r.GetString(2);
-        string link = r.IsDBNull(3) ? "" : r.GetString(3);
-        string pub = r.IsDBNull(4) ? "" : r.GetString(4);
-        string author = r.IsDBNull(5) ? "" : r.GetString(5);
-        string feed = r.IsDBNull(6) ? "" : r.GetString(6);
-        int? pageCount = r.IsDBNull(7) ? null : r.GetInt32(7);
-        string summary = r.IsDBNull(8) ? "" : r.GetString(8);
-        r.Close();
 
         string articleContent = string.IsNullOrEmpty(content) ? desc : content;
         string? fulltext = null;
-        string ftPath = FulltextPath(itemId);
+        string ftPath = FulltextPath(wantId);
         if (File.Exists(ftPath))
         {
             try { fulltext = File.ReadAllText(ftPath); } catch { }
@@ -1263,7 +1655,12 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         // 有全文缓存就用全文（Markdown → 先渲染成 HTML），否则用源里的正文/摘要（本来就是 HTML）。
         // **只返回净化后的 HTML**：原先的 content/fulltext 是原始 HTML，前端 innerHTML 直接注入，
         // 等于任何订阅源都能在本机页面上执行脚本（同源 fetch 带 cookie → 把 API 交给订阅源作者）。
-        string bodyHtml = ToSafeBodyHtml(string.IsNullOrEmpty(fulltext) ? articleContent : MarkdownToHtml(fulltext));
+        //
+        // 导入项要带上 importItemId：它的图片是本机 file:// 路径，净化器只放行绝对 http(s)/data:，
+        // 不改写就会被**整个丢掉** —— 用户看到的就是"电子书里没有图"。
+        string bodyHtml = ToSafeBodyHtml(
+            string.IsNullOrEmpty(fulltext) ? articleContent : MarkdownToHtml(fulltext),
+            importItemId: imported ? wantId : 0);
 
         WriteJson(res, 200, new
         {
@@ -1271,8 +1668,17 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
             data = new
             {
                 itemId,
+                shownItemId = wantId,
+                version,
+                versionCount,
+                hasHistory = versionCount > 1,
+                status,
+                archivedAt,
                 title,
                 feed,
+                feedId,
+                imported,
+                guid,
                 link,
                 published = pub,
                 author,
@@ -1292,7 +1698,7 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         using var conn = OpenDb(webDbPath);
         conn.Open();
         var gCmd = conn.CreateCommand();
-        gCmd.CommandText = "SELECT Guid, Title FROM Items WHERE Id = @id";
+        gCmd.CommandText = "SELECT Guid, Title, FeedId FROM Items WHERE Id = @id";
         gCmd.Parameters.AddWithValue("@id", itemId);
         using var gr = gCmd.ExecuteReader();
         if (!gr.Read())
@@ -1302,28 +1708,43 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         }
         string guid = gr.IsDBNull(0) ? "" : gr.GetString(0);
         string title = gr.GetString(1);
+        int feedId = gr.GetInt32(2);
         gr.Close();
+
+        string feed = "";
+        var fCmd = conn.CreateCommand();
+        fCmd.CommandText = "SELECT Title FROM Feeds WHERE Id = @id";
+        fCmd.Parameters.AddWithValue("@id", feedId);
+        feed = fCmd.ExecuteScalar()?.ToString() ?? "";
 
         var versions = new List<object>();
         if (!string.IsNullOrEmpty(guid))
         {
+            // 版本链按 (Guid, FeedId) 隔离：跨源转载不该混进同一条历史
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt, Title FROM Items WHERE Guid = @g ORDER BY Version DESC";
+            cmd.CommandText = @"
+                SELECT Id, Version, Status, ArchivedAt, Title,
+                       LENGTH(COALESCE(NULLIF(Content,''), Description, ''))
+                FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version DESC";
             cmd.Parameters.AddWithValue("@g", guid);
+            cmd.Parameters.AddWithValue("@f", feedId);
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
+                long vid = r.GetInt64(0);
                 versions.Add(new
                 {
-                    id = r.GetInt64(0),
+                    id = vid,
                     version = r.GetInt32(1),
                     status = r.GetString(2),
                     archivedAt = r.IsDBNull(3) ? "" : r.GetString(3),
-                    title = r.GetString(4)
+                    title = r.GetString(4),
+                    length = r.IsDBNull(5) ? 0 : r.GetInt32(5),
+                    current = vid == itemId
                 });
             }
         }
-        WriteJson(res, 200, new { success = true, data = new { itemId, title, versions } });
+        WriteJson(res, 200, new { success = true, data = new { itemId, title, feed, feedId, versions } });
     }
 
     static void HandleArticleDiff(HttpListenerRequest req, HttpListenerResponse res, int itemId)
@@ -1333,84 +1754,131 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
 
         using var conn = OpenDb(webDbPath);
         conn.Open();
-        var gCmd = conn.CreateCommand();
-        gCmd.CommandText = "SELECT Guid FROM Items WHERE Id = @id";
-        gCmd.Parameters.AddWithValue("@id", itemId);
-        var guid = gCmd.ExecuteScalar()?.ToString() ?? "";
+        var head = conn.CreateCommand();
+        head.CommandText = "SELECT Guid, FeedId FROM Items WHERE Id = @id";
+        head.Parameters.AddWithValue("@id", itemId);
+        string guid; int feedId;
+        using (var hr = head.ExecuteReader())
+        {
+            if (!hr.Read())
+            {
+                WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
+                return;
+            }
+            guid = hr.IsDBNull(0) ? "" : hr.GetString(0);
+            feedId = hr.GetInt32(1);
+        }
+
         if (string.IsNullOrEmpty(guid))
         {
-            WriteJson(res, 200, new { success = true, article = itemId, from = 0, to = 0, changes = Array.Empty<object>() });
+            WriteJson(res, 200, new { success = true, data = new { article = itemId, from = 0, to = 0, added = 0, removed = 0, changes = Array.Empty<object>() } });
             return;
         }
 
+        var rows = new List<(int Ver, string Body, string Title)>();
         var cmd = conn.CreateCommand();
-        cmd.CommandText = from != null
-            ? "SELECT Id, Version, Content, Description, Title FROM Items WHERE Guid = @g AND Version = @v"
-            : "SELECT Id, Version, Content, Description, Title FROM Items WHERE Guid = @g ORDER BY Version DESC LIMIT 2";
+        cmd.CommandText = @"
+            SELECT Version, COALESCE(NULLIF(Content,''), Description, ''), Title
+            FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version";
         cmd.Parameters.AddWithValue("@g", guid);
-        if (from != null) cmd.Parameters.AddWithValue("@v", from);
-        var list = new List<(long Id, int Ver, string Content, string Title)>();
+        cmd.Parameters.AddWithValue("@f", feedId);
         using (var r = cmd.ExecuteReader())
         {
             while (r.Read())
-            {
-                string c = r.IsDBNull(2) ? "" : r.GetString(2);
-                if (string.IsNullOrEmpty(c) && !r.IsDBNull(3)) c = r.GetString(3);
-                list.Add((r.GetInt64(0), r.GetInt32(1), c, r.GetString(4)));
-            }
+                rows.Add((r.GetInt32(0), r.IsDBNull(1) ? "" : r.GetString(1), r.GetString(2)));
         }
 
-        if (to != null && from != null)
+        if (rows.Count < 2)
         {
-            var c2 = conn.CreateCommand();
-            c2.CommandText = "SELECT Id, Version, Content, Description, Title FROM Items WHERE Guid = @g AND Version = @v";
-            c2.Parameters.AddWithValue("@g", guid);
-            c2.Parameters.AddWithValue("@v", to);
-            using var r2 = c2.ExecuteReader();
-            if (r2.Read())
-            {
-                string c = r2.IsDBNull(2) ? "" : r2.GetString(2);
-                if (string.IsNullOrEmpty(c) && !r2.IsDBNull(3)) c = r2.GetString(3);
-                list.Clear();
-                list.Add((r2.GetInt64(0), r2.GetInt32(1), c, r2.GetString(4)));
-            }
-        }
-
-        if (list.Count < 2)
-        {
-            WriteJson(res, 200, new { success = true, article = itemId, from = list.Count > 0 ? list[0].Ver : 0, to = list.Count > 0 ? list[0].Ver : 0, changes = Array.Empty<object>() });
+            WriteJson(res, 200, new { success = true, data = new { article = itemId, from = rows.Count > 0 ? rows[0].Ver : 0, to = rows.Count > 0 ? rows[0].Ver : 0, added = 0, removed = 0, changes = Array.Empty<object>() } });
             return;
         }
 
-        // 默认 last two：list[0]=较新，list[1]=较旧
-        var older = list.Count >= 2 && from == null ? list[1] : list[^1];
-        var newer = from == null ? list[0] : list[0];
-        if (from != null && to != null && list.Count >= 1)
+        // 选了哪两版就比哪两版；没选默认**最后两版**（rows 按 Version 升序）
+        var older = rows[^2];
+        var newer = rows[^1];
+        if (from != null)
         {
-            // already filtered
+            var m = rows.FirstOrDefault(x => x.Ver == from.Value);
+            if (m.Body != null || m.Title != null) older = m;
+        }
+        if (to != null)
+        {
+            var m = rows.FirstOrDefault(x => x.Ver == to.Value);
+            if (m.Body != null || m.Title != null) newer = m;
         }
 
-        var diffBuilder = new DiffPlex.DiffBuilder.InlineDiffBuilder(new DiffPlex.Differ());
-        var model = diffBuilder.BuildDiffModel(older.Content, newer.Content);
-        var changes = model.Lines
-            .Select(l => new
-            {
-                type = l.Type.ToString(),
-                text = l.Text ?? ""
-            })
-            .Where(x => x.type is "Unchanged" or "Inserted" or "Deleted" or "Modified")
-            .ToList();
+        var model = new DiffPlex.DiffBuilder.InlineDiffBuilder(new DiffPlex.Differ())
+            .BuildDiffModel(older.Body, newer.Body);
+        int added = 0, removed = 0;
+        var changes = new List<object>();
+        foreach (var line in model.Lines)
+        {
+            string kind = line.Type.ToString();
+            if (kind == "Inserted") added++;
+            else if (kind == "Deleted") removed++;
+            changes.Add(new { type = kind, text = line.Text ?? "" });
+        }
 
         WriteJson(res, 200, new
         {
             success = true,
-            article = itemId,
-            from = older.Ver,
-            to = newer.Ver,
-            titleOld = older.Title,
-            titleNew = newer.Title,
-            changes
+            data = new
+            {
+                article = itemId,
+                from = older.Ver,
+                to = newer.Ver,
+                titleOld = older.Title,
+                titleNew = newer.Title,
+                titleChanged = older.Title != newer.Title,
+                added,
+                removed,
+                changes
+            }
         });
+    }
+
+    // 导出单篇 Markdown：**与 CLI `sip --export <id>` 共用 BuildArticleMarkdown**，
+    // 不另写一套渲染 —— 否则网页下载的文件和终端里的迟早不一样。
+    static void HandleArticleExport(HttpListenerResponse res, int itemId)
+    {
+        if (!ArticleExists(itemId, webDbPath))
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
+            return;
+        }
+        string md;
+        string fileName = $"sip-{itemId}.md";
+        try
+        {
+            md = BuildArticleMarkdown(itemId, true, webDbPath, 90);
+            string title = ItemTitle(itemId);
+            if (!string.IsNullOrWhiteSpace(title))
+                fileName = "sip-" + new string(title.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray()).Trim() + ".md";
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "EXPORT_FAILED", message = ex.Message } });
+            return;
+        }
+        // 文件名可能很长，且必须是**纯 ASCII 安全的** header 值：非 ASCII 交给 filename* 的 RFC 5987 形式
+        string ascii = new string(fileName.Where(c => c < 128 && c != '"' && c != '\\').ToArray());
+        if (string.IsNullOrWhiteSpace(ascii) || ascii.Length < 4) ascii = $"sip-{itemId}.md";
+        WriteDownloadEncoded(res, "text/markdown; charset=utf-8", ascii, fileName, md);
+    }
+
+    static string ItemTitle(int itemId)
+    {
+        try
+        {
+            using var conn = OpenDb(webDbPath);
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Title FROM Items WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", itemId);
+            return cmd.ExecuteScalar()?.ToString() ?? "";
+        }
+        catch { return ""; }
     }
 
     static async void HandleArticleLike(HttpListenerResponse res, int itemId)
@@ -1583,12 +2051,45 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         });
     }
 
-    static void HandleToday(HttpListenerResponse res, bool refresh)
+    static void HandleToday(HttpListenerRequest req, HttpListenerResponse res, bool refresh)
     {
         try
         {
             var (done, target, tracking) = TodayProgress(webDbPath);
             var list = GetTodayList(webDbPath, 5, refresh, out string generatedAt);
+            // 「今日变化」摘要（新增/被改/可能同文）默认**不算**：它要跑一次 48 小时窗口的
+            // 跨源重复检测（上万篇正文读进来做段落比对）。首屏不该为它等几秒，
+            // 所以界面用 ?digest=1 单独要一次。
+            object? digest = null;
+            if (QueryInt(req, "digest", 0, 0, 1) == 1)
+            {
+                var d = BuildTodayDigest(webDbPath, 48);
+                digest = new
+                {
+                    newTotal = d.NewTotal,
+                    sourceCount = d.SourceCount,
+                    newBySource = d.NewBySource.Select(s => new { source = s.Source, count = s.Count, flood = s.Flood }),
+                    modified = d.Modified.Select(m => new
+                    {
+                        itemId = m.ItemId,
+                        title = m.Title,
+                        source = m.Source,
+                        titleChanged = m.TitleChanged,
+                        addedLines = m.AddedLines,
+                        removedLines = m.RemovedLines,
+                        wordDelta = m.WordDelta
+                    }),
+                    dedups = d.Dedups.Select(c => new
+                    {
+                        size = c.Size,
+                        representativeId = c.RepresentativeId,
+                        title = c.Title,
+                        source = c.Source,
+                        minOverlap = c.MinOverlap,
+                        members = c.Members
+                    })
+                };
+            }
             WriteJson(res, 200, new
             {
                 success = true,
@@ -1600,6 +2101,7 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
                     target,
                     done,
                     tracking,
+                    digest,
                     items = list.Select(i => new
                     {
                         itemId = i.ItemId,
@@ -2165,6 +2667,1892 @@ code{background:rgba(28,25,23,.06);padding:2px 6px;border-radius:6px}
         if (System.Net.IPAddress.TryParse(h, out var ip))
             return System.Net.IPAddress.IsLoopback(ip);
         return false;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v2.0.0 · Web 功能对齐：改稿追踪 / 跨源去重 / 源规则 / 本地导入 / 电子书 /
+    //          向量索引 / 治理面（挡位·遥测·配置）/ 导出 / 只读命令面板
+    //
+    // 三条不变的原则（与既有 handler 一致）：
+    //   ① 进程内直接调**核心函数**，不 shell 出 CLI、不解析子进程 stdout。
+    //      尤其**不调 `*Cli` 包装器**：它们往服务器自己的 stdout 打印进度，
+    //      还会用 SetExit() 改**进程级**退出码 —— 那是给一次性命令行进程用的，
+    //      放进长期运行的 HTTP 服务里会让"某个请求失败"污染整个进程。
+    //   ② 与 CLI 共用同一份事实（同一个 FindDuplicateClusters / HideAsDedup /
+    //      LoadSourcePolicy / BuildInsights …），绝不写第二套算法：
+    //      同一个数字在终端和网页上不一致，比没有这个功能更糟。
+    //   ③ 写操作一律先过 WebWriteAllowed（与 CLI 同一套挡位语义）。
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── 小工具：请求体 / 查询串的取值 ──
+    static int QueryInt(HttpListenerRequest req, string key, int def, int min, int max)
+        => int.TryParse(QueryParam(req, key), out int v) ? Math.Clamp(v, min, max) : def;
+
+    static JsonElement? BodyProp(string body, string prop)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty(prop, out var e))
+                return e.Clone();   // 必须 Clone：doc 在 using 结束时释放
+        }
+        catch { }
+        return null;
+    }
+
+    static string BodyString(string body, string prop)
+    {
+        var e = BodyProp(body, prop);
+        if (e == null) return "";
+        return e.Value.ValueKind == JsonValueKind.String ? (e.Value.GetString() ?? "") : e.Value.ToString();
+    }
+
+    static int BodyInt(string body, string prop, int def = 0)
+    {
+        var e = BodyProp(body, prop);
+        if (e == null) return def;
+        if (e.Value.ValueKind == JsonValueKind.Number && e.Value.TryGetInt32(out int n)) return n;
+        if (e.Value.ValueKind == JsonValueKind.String && int.TryParse(e.Value.GetString(), out int s)) return s;
+        return def;
+    }
+
+    static bool BodyBool(string body, string prop)
+    {
+        var e = BodyProp(body, prop);
+        if (e == null) return false;
+        if (e.Value.ValueKind == JsonValueKind.True) return true;
+        if (e.Value.ValueKind == JsonValueKind.False) return false;
+        return e.Value.ValueKind == JsonValueKind.String
+            && bool.TryParse(e.Value.GetString(), out bool b) && b;
+    }
+
+    /// <summary>文章「列表用」摘要（不含正文）。去重成员卡片、导入书单都用它。
+    /// ids 是我们自己从库里读出来的整数，拼进 IN 列表是安全的。</summary>
+    static Dictionary<int, object> ItemBriefs(IEnumerable<int> ids)
+    {
+        var map = new Dictionary<int, object>();
+        var list = ids.Distinct().ToList();
+        if (list.Count == 0) return map;
+        using var conn = OpenDb(webDbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.Id, i.Title, i.FeedId, f.Title, i.Link, i.PublishDate, i.Status, i.Version,
+                   LENGTH(COALESCE(NULLIF(i.Content,''), i.Description, ''))
+            FROM Items i LEFT JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Id IN (" + string.Join(",", list) + ")";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            int id = r.GetInt32(0);
+            map[id] = new
+            {
+                itemId = id,
+                title = r.GetString(1),
+                feedId = r.GetInt32(2),
+                feed = r.IsDBNull(3) ? "" : r.GetString(3),
+                link = r.IsDBNull(4) ? "" : r.GetString(4),
+                published = r.IsDBNull(5) ? "" : r.GetString(5),
+                status = r.GetString(6),
+                version = r.GetInt32(7),
+                length = r.IsDBNull(8) ? 0 : r.GetInt32(8)
+            };
+        }
+        return map;
+    }
+
+    /// <summary>一篇文章的标题 + 原始正文（Content 空则回落到 Description）—— 与
+    /// 去重算法、CLI diff 用的是同一个回落规则。</summary>
+    static (string Title, string Body)? ItemBodyRaw(int itemId)
+    {
+        using var conn = OpenDb(webDbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Title, COALESCE(NULLIF(Content,''), Description, '') FROM Items WHERE Id = @id";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        return (r.GetString(0), r.IsDBNull(1) ? "" : r.GetString(1));
+    }
+
+    /// <summary>两段正文的**段落级**行 diff（先去 HTML 再按段切）。
+    /// 用 NormalizeParagraphs 与去重算法同一套切分：显示的就是算法实际在比的东西。</summary>
+    static (int Added, int Removed, List<object> Lines) DiffParagraphs(string a, string b)
+    {
+        string ta = string.Join("\n", NormalizeParagraphs(a));
+        string tb = string.Join("\n", NormalizeParagraphs(b));
+        var model = new DiffPlex.DiffBuilder.InlineDiffBuilder(new DiffPlex.Differ()).BuildDiffModel(ta, tb);
+        int added = 0, removed = 0;
+        var lines = new List<object>();
+        foreach (var l in model.Lines)
+        {
+            string kind = l.Type.ToString();
+            if (kind == "Inserted") added++;
+            else if (kind == "Deleted") removed++;
+            if (kind is "Unchanged" or "Inserted" or "Deleted" or "Modified")
+                lines.Add(new { type = kind, text = l.Text ?? "" });
+        }
+        return (added, removed, lines);
+    }
+
+    // ══════════ 改稿追踪（跨源之外的那条轴：同一个源里作者改稿）══════════
+    // 列表 = 「哪些文章有历史版本」。详情用既有的 /versions 与 /diff，不重复实现。
+    static void HandleEdits(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        int limit = QueryInt(req, "limit", 50, 1, 200);
+        var rows = new List<object>();
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            // 版本链按 (FeedId, Guid) 分组 —— 与 ShowDiff 的归档范围、/versions 的查询一致。
+            // 不带 FeedId 的话，两个源转载同一篇（Guid 相同）会被算成「这篇改过稿」。
+            cmd.CommandText = @"
+                WITH g AS (
+                    SELECT FeedId, Guid, COUNT(*) AS VerCount, MIN(Version) AS MinVer, MAX(Version) AS MaxVer,
+                           MAX(ArchivedAt) AS LastArch
+                    FROM Items
+                    WHERE Guid IS NOT NULL AND Guid <> ''
+                    GROUP BY FeedId, Guid
+                    HAVING COUNT(*) > 1
+                )
+                SELECT g.FeedId, g.Guid, g.VerCount, g.MinVer, g.MaxVer, g.LastArch,
+                       (SELECT i2.Id FROM Items i2
+                         WHERE i2.FeedId = g.FeedId AND i2.Guid = g.Guid AND i2.Status = 'active'
+                         ORDER BY i2.Version DESC LIMIT 1)                                   AS ActiveId,
+                       (SELECT i3.Id FROM Items i3
+                         WHERE i3.FeedId = g.FeedId AND i3.Guid = g.Guid
+                         ORDER BY i3.Version DESC, i3.Id DESC LIMIT 1)                       AS LatestId,
+                       (SELECT i4.Title FROM Items i4
+                         WHERE i4.FeedId = g.FeedId AND i4.Guid = g.Guid
+                         ORDER BY i4.Version DESC, i4.Id DESC LIMIT 1)                       AS Title,
+                       (SELECT f.Title FROM Feeds f WHERE f.Id = g.FeedId)                   AS FeedTitle
+                FROM g
+                ORDER BY g.LastArch DESC, g.MaxVer DESC
+                LIMIT @lim";
+            cmd.Parameters.AddWithValue("@lim", limit);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                long? activeId = r.IsDBNull(6) ? null : r.GetInt64(6);
+                rows.Add(new
+                {
+                    itemId = activeId ?? r.GetInt64(7),
+                    feedId = r.GetInt32(0),
+                    feed = r.IsDBNull(9) ? "" : r.GetString(9),
+                    title = r.GetString(8),
+                    from = r.GetInt32(3),
+                    to = r.GetInt32(4),
+                    versions = r.GetInt32(2),
+                    lastChangedAt = r.IsDBNull(5) ? "" : r.GetString(5),
+                    stillActive = activeId != null
+                });
+            }
+        }
+        WriteJson(res, 200, new { success = true, data = new { count = rows.Count, items = rows } });
+    }
+
+    // ══════════ 跨源去重 ══════════
+    // 「检测」与「处理」分开：检测只读（可反复跑），处理才有副作用，
+    // 而且**只隐藏、不删除** —— 隐藏是可撤销的，删除不是。
+    static List<object> DedupClusterPayload(List<DedupCluster> clusters)
+    {
+        var briefs = ItemBriefs(clusters.SelectMany(c => c.Members));
+        var outp = new List<object>();
+        foreach (var c in clusters)
+        {
+            outp.Add(new
+            {
+                id = c.RepresentativeId,
+                representativeId = c.RepresentativeId,
+                title = c.Title,
+                source = c.Source,
+                size = c.Size,
+                minOverlap = c.MinOverlap,
+                members = c.Members.Select(m => briefs.TryGetValue(m, out var b) ? b : (object)new { itemId = m }).ToList()
+            });
+        }
+        return outp;
+    }
+
+    static void WriteDedupState(HttpListenerResponse res, int window, bool scanned)
+    {
+        var clusters = FindDuplicateClusters(webDbPath, window);
+        var hidden = ListHiddenDedup(webDbPath)
+            .Select(h => new { itemId = h.Id, title = h.Title, source = h.Source, key = h.Key })
+            .ToList();
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                scanned,
+                windowHours = window,
+                threshold = LoadSettings().DedupThreshold,
+                clusters = DedupClusterPayload(clusters),
+                hidden
+            }
+        });
+    }
+
+    static void HandleDedupList(HttpListenerRequest req, HttpListenerResponse res)
+        => WriteDedupState(res, QueryInt(req, "window", 48, 1, 24 * 30), scanned: false);
+
+    // 扫描 = 同一份检测，只是明确告诉界面「这是一次主动扫描」。
+    // 仍然加并发护栏：检测要把窗口内上万篇正文读进来跑段落比对，
+    // 连点几下就是几倍的 CPU 与内存（同「同步」按钮的道理）。
+    static async void HandleDedupScan(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        string body = await ReadBodyAsync(req);
+        int window = BodyInt(body, "window", QueryInt(req, "window", 48, 1, 24 * 30));
+        window = Math.Clamp(window, 1, 24 * 30);
+        string key = "dedup:scan";
+        string? busy = TryBeginDownload(key);
+        if (busy != null)
+        {
+            WriteJson(res, 409, new { success = false, error = new { code = "ALREADY_RUNNING", message = busy } });
+            return;
+        }
+        try
+        {
+            ProgBegin("dedup");
+            _progCurrent = Lang.T("扫描跨源重复…");
+            WriteDedupState(res, window, scanned: true);
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "DEDUP_FAILED", message = ex.Message } });
+        }
+        finally { ProgEnd(); EndDownload(key); }
+    }
+
+    static async void HandleDedupHide(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "dedup")) return;
+        string body = await ReadBodyAsync(req);
+        int hiddenId = BodyInt(body, "hiddenId");
+        int canonicalId = BodyInt(body, "canonicalId");
+        string? err = HideAsDedup(webDbPath, hiddenId, canonicalId);
+        if (err != null)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "DEDUP_INVALID", message = err } });
+            return;
+        }
+        WriteJson(res, 200, new { success = true, data = new { hiddenId, canonicalId, ok = true } });
+    }
+
+    static async void HandleDedupHideCluster(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "dedup")) return;
+        string body = await ReadBodyAsync(req);
+        int repId = BodyInt(body, "representativeId");
+        if (repId <= 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "representativeId required" } });
+            return;
+        }
+        // 与 CLI `--dedup hide-cluster` 同一套判定：先找到簇，再以代表元为准逐个隐藏
+        var cluster = FindDuplicateClusters(webDbPath, 48)
+            .FirstOrDefault(c => c.RepresentativeId == repId || c.Members.Contains(repId));
+        if (cluster == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "CLUSTER_NOT_FOUND", message = "cluster not found (scan first?)" } });
+            return;
+        }
+        int rep = cluster.Members.Contains(repId) ? repId : cluster.RepresentativeId;
+        int hidden = 0;
+        var fails = new List<string>();
+        foreach (int m in cluster.Members)
+        {
+            if (m == rep) continue;
+            string? err = HideAsDedup(webDbPath, m, rep);
+            if (err == null) hidden++;
+            else fails.Add(err);
+        }
+        WriteJson(res, 200, new { success = true, data = new { representative = rep, hidden, fails } });
+    }
+
+    static async void HandleDedupUndo(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "dedup")) return;
+        string body = await ReadBodyAsync(req);
+        string key = BodyString(body, "key").Trim();
+        if (key.Length == 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "key required" } });
+            return;
+        }
+        bool ok = UndoDedup(webDbPath, key);
+        WriteJson(res, ok ? 200 : 404, new
+        {
+            success = ok,
+            data = new { key, ok },
+            error = ok ? null : new { code = "KEY_NOT_FOUND", message = "no such hidden rule" }
+        });
+    }
+
+    // 并排比较：代表元 vs 某个成员。两篇的 Guid 不同（是转载，不是改稿），
+    // 所以不能复用 /diff —— 那个比的是同一篇的两个版本。
+    static void HandleDedupDiff(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        int a = QueryInt(req, "a", 0, 0, int.MaxValue);
+        int b = QueryInt(req, "b", 0, 0, int.MaxValue);
+        if (a <= 0 || b <= 0 || a == b)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "a and b must be two different item ids" } });
+            return;
+        }
+        var left = ItemBodyRaw(a);
+        var right = ItemBodyRaw(b);
+        if (left == null || right == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "article not found" } });
+            return;
+        }
+        var (added, removed, lines) = DiffParagraphs(left.Value.Body, right.Value.Body);
+        double overlap = ParagraphOverlap(
+            NormalizeParagraphs(left.Value.Body), NormalizeParagraphs(right.Value.Body));
+        var briefs = ItemBriefs(new[] { a, b });
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                a = briefs.GetValueOrDefault(a),
+                b = briefs.GetValueOrDefault(b),
+                titleA = left.Value.Title,
+                titleB = right.Value.Title,
+                overlap = Math.Round(overlap * 100, 0),
+                threshold = Math.Round(LoadSettings().DedupThreshold * 100, 0),
+                added,
+                removed,
+                lines
+            }
+        });
+    }
+
+    // ══════════ 源规则（source_policy.json；createdBy 永远 user）══════════
+    static readonly string[] PolicyActions = { "lower_frequency", "archive", "keep", "tag", "unsubscribe" };
+
+    static void HandlePolicyList(HttpListenerResponse res)
+    {
+        var map = LoadSourcePolicy();
+        var titles = new Dictionary<int, string>();
+        var schedules = new Dictionary<int, string>();
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT Id, Title, Schedule FROM Feeds";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                titles[r.GetInt32(0)] = r.GetString(1);
+                schedules[r.GetInt32(0)] = r.IsDBNull(2) ? "" : r.GetString(2);
+            }
+        }
+        var rows = map.OrderBy(k => k.Key).Select(kv => (object)new
+        {
+            feedId = kv.Key,
+            feed = titles.GetValueOrDefault(kv.Key, Lang.T("(feed deleted)")),
+            action = kv.Value.Action,
+            schedule = kv.Value.Schedule,
+            tag = kv.Value.Tag,
+            note = kv.Value.Note,
+            createdBy = kv.Value.CreatedBy,
+            updatedAt = kv.Value.UpdatedAt,
+            currentSchedule = schedules.GetValueOrDefault(kv.Key, "")
+        }).ToList();
+        WriteJson(res, 200, new { success = true, data = new { count = rows.Count, actions = PolicyActions, policies = rows } });
+    }
+
+    static async void HandlePolicySet(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "policy")) return;
+        string body = await ReadBodyAsync(req);
+        int feedId = BodyInt(body, "feedId");
+        string action = BodyString(body, "action").Trim().ToLowerInvariant();
+        string schedule = BodyString(body, "schedule").Trim();
+        string tag = BodyString(body, "tag").Trim().TrimStart('#');
+        string note = BodyString(body, "note").Trim();
+
+        if (feedId <= 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "feedId required" } });
+            return;
+        }
+        if (!PolicyActions.Contains(action))
+        {
+            WriteJson(res, 400, new
+            {
+                success = false,
+                error = new { code = "UNKNOWN_ACTION", message = Lang.T("未知动作: {0}", action), allowed = PolicyActions }
+            });
+            return;
+        }
+        // 与 CLI 的 `set` 一样：先确认这个源真的存在（用真实 Id，不是显示编号）
+        if (!FeedExistsReal(feedId))
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "FEED_NOT_FOUND", message = Lang.T("Feed number not found") } });
+            return;
+        }
+
+        // lower_frequency 的取值必须与 CLI 认的表达式一致 —— 这里先用**同一个** TryParseSchedule 校验，
+        // 免得网页收下一个终端读不懂的频率，两个通道对同一份配置给出不同结果。
+        if (action == "lower_frequency" && (schedule.Length == 0 || TryParseSchedule(schedule) == null))
+        {
+            WriteJson(res, 400, new
+            {
+                success = false,
+                error = new { code = "BAD_SCHEDULE", message = Lang.T("Invalid schedule: {0}", schedule), hint = "30m / 1h / daily@10:00 / weekly@Mon 08:00" }
+            });
+            return;
+        }
+
+        var map = LoadSourcePolicy();
+        map.TryGetValue(feedId, out var rule);
+        rule ??= new SourcePolicyRule();
+        rule.Action = action;
+        rule.CreatedBy = "user";                         // AI 永不自动写规则：网页也只记 user
+        rule.UpdatedAt = DateTime.Now.ToString("O");
+
+        switch (action)
+        {
+            case "lower_frequency":
+                // 复用 CLI 同一条落地路径（它会写 Feeds.Schedule 并记遥测）
+                SetFeedSchedule(GetDisplayNum(feedId, webDbPath).ToString(), schedule, webDbPath);
+                rule.Schedule = schedule.ToLowerInvariant();
+                if (note.Length > 0) rule.Note = note;
+                break;
+            case "archive":
+                // 「归档」= 给源标题加时间戳后缀（与 CLI/TUI 的 A 键完全同一个动作）
+                AddTimestampForRealId(feedId, webDbPath);
+                if (note.Length > 0) rule.Note = note;
+                break;
+            case "tag":
+                if (tag.Length == 0)
+                {
+                    WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "tag required" } });
+                    return;
+                }
+                rule.Tag = tag;
+                rule.Note = note;
+                break;
+            default:                                      // keep / unsubscribe
+                rule.Note = note;
+                break;
+        }
+
+        map[feedId] = rule;
+        SaveSourcePolicy(map);
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                feedId,
+                action = rule.Action,
+                schedule = rule.Schedule,
+                tag = rule.Tag,
+                note = rule.Note,
+                createdBy = rule.CreatedBy,
+                updatedAt = rule.UpdatedAt
+            }
+        });
+    }
+
+    static void HandlePolicyRemove(HttpListenerResponse res, int feedId)
+    {
+        if (!WebWriteAllowed(res, "policy")) return;
+        var map = LoadSourcePolicy();
+        bool had = map.Remove(feedId);
+        SaveSourcePolicy(map);
+        WriteJson(res, had ? 200 : 404, new
+        {
+            success = had,
+            data = new { feedId, ok = had },
+            error = had ? null : new { code = "POLICY_NOT_FOUND", message = "this feed has no rule" }
+        });
+    }
+
+    static bool FeedExistsReal(int realId)
+    {
+        try
+        {
+            using var conn = OpenDb(webDbPath);
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM Feeds WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", realId);
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 0) > 0;
+        }
+        catch { return false; }
+    }
+
+    // ══════════ 本地导入 / 电子书阅读 ══════════
+    // 导入 = 把文件**复制进数据目录**再抽正文（不是原地引用）：原文件你随时可以删，
+    // 库里的那份不受影响。Web 走的是「字节 → 临时文件 → ImportFileCore」，
+    // 与 CLI `sip --import` 完全同一条实现。
+    //
+    // 电子书：**没有章节模型**。EPUB/DOCX/MOBI/TXT/MD 抽出来的是一整篇 HTML/Markdown；
+    // PDF 则从不解析文本（ReadPdfFile 只放一句占位），真正的"第 N 页"来自
+    // RenderPdfPages 的逐页栅格化。所以这里的阅读模型就是这两条，不假装有章节。
+
+    static void HandleImportList(HttpListenerResponse res)
+    {
+        var rows = new List<object>();
+        long feedId = 0;
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            var fid = conn.CreateCommand();
+            // 「本地导入」源只有一个，用 FeedUrl 标记（Feeds 表没有别的标记列）
+            fid.CommandText = "SELECT Id FROM Feeds WHERE FeedUrl = 'local://import' LIMIT 1";
+            object? f = fid.ExecuteScalar();
+            if (f != null) feedId = Convert.ToInt64(f);
+            if (feedId == 0)
+            {
+                WriteJson(res, 200, new { success = true, data = new { feedId = 0, items = rows } });
+                return;
+            }
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT Id, Title, Link, Description, PublishDate, PageCount, LENGTH(Content)
+                FROM Items WHERE FeedId = @f ORDER BY Id DESC";
+            cmd.Parameters.AddWithValue("@f", feedId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                long id = r.GetInt64(0);
+                string link = r.IsDBNull(2) ? "" : r.GetString(2);
+                // 类型与体积都从**落地的那份文件**读：库里只存路径，不存冗余元数据
+                string ext = "";
+                try { ext = Path.GetExtension(link).TrimStart('.').ToLowerInvariant(); } catch { }
+                long size = 0;
+                try { if (link.Length > 0 && File.Exists(link)) size = new FileInfo(link).Length; } catch { }
+                rows.Add(new
+                {
+                    itemId = id,
+                    title = r.GetString(1),
+                    type = ext,
+                    size,
+                    description = r.IsDBNull(3) ? "" : r.GetString(3),
+                    importedAt = r.IsDBNull(4) ? "" : r.GetString(4),
+                    pages = r.IsDBNull(5) ? (int?)null : r.GetInt32(5),
+                    chars = r.IsDBNull(6) ? 0 : r.GetInt32(6),
+                    isPdf = ext == "pdf"
+                });
+            }
+        }
+        WriteJson(res, 200, new { success = true, data = new { feedId, items = rows } });
+    }
+
+    // 上传：原始字节 + `?name=<文件名>`。用原始 body 而不是 multipart ——
+    // multipart 需要解析边界，多写一段易错的解析器换不来任何东西。
+    static async void HandleImportUpload(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "import")) return;
+
+        string name = (QueryParam(req, "name") ?? "").Trim();
+        // 只取文件名，不接受任何路径成分：这里**不做路径拼接**，Directory 穿越就无从谈起
+        try { name = Path.GetFileName(name); } catch { name = ""; }
+        if (name.Length == 0) name = "upload.txt";
+        string ext = Path.GetExtension(name).ToLowerInvariant();
+        if (ext is not (".txt" or ".md" or ".markdown" or ".pdf" or ".epub" or ".mobi" or ".docx"))
+        {
+            WriteJson(res, 400, new
+            {
+                success = false,
+                error = new { code = "UNSUPPORTED_FORMAT", message = Lang.T("Unsupported file type: {0}. Supported: txt, md, pdf, epub, mobi, docx", ext) }
+            });
+            return;
+        }
+        const long maxBytes = 512L * 1024 * 1024;
+        if (req.ContentLength64 > maxBytes)
+        {
+            WriteJson(res, 413, new { success = false, error = new { code = "TOO_LARGE", message = "文件过大（上限 512 MB）" } });
+            return;
+        }
+
+        string key = "import";
+        string? busy = TryBeginDownload(key);
+        if (busy != null)
+        {
+            WriteJson(res, 409, new { success = false, error = new { code = "ALREADY_RUNNING", message = busy } });
+            return;
+        }
+        string? tmp = null;
+        try
+        {
+            string tmpDir = Path.Combine(Path.GetTempPath(), "sip-web-upload");
+            Directory.CreateDirectory(tmpDir);
+            tmp = Path.Combine(tmpDir, Guid.NewGuid().ToString("N") + ext);
+            await using (var fs = File.Create(tmp))
+                await req.InputStream.CopyToAsync(fs);
+
+            ProgBegin("import");
+            _progCurrent = name;
+            var r = ImportFileCore(tmp, Path.GetFileNameWithoutExtension(name), webDbPath);
+            if (!r.Ok)
+            {
+                WriteJson(res, 400, new { success = false, error = new { code = r.Code, message = r.Message } });
+                return;
+            }
+            WriteJson(res, 200, new
+            {
+                success = true,
+                data = new
+                {
+                    itemId = r.ItemId,
+                    title = r.Title,
+                    file = Path.GetFileName(r.DestPath),
+                    type = ext.TrimStart('.'),
+                    bytes = new FileInfo(tmp).Length
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "IMPORT_ERROR", message = ex.Message } });
+        }
+        finally
+        {
+            if (tmp != null) { try { File.Delete(tmp); } catch { } }
+            ProgEnd();
+            EndDownload(key);
+        }
+    }
+
+    /// <summary>本地文件导入项的元信息（含 PDF 页数）。找不到 / 不属于导入源都返回 null。</summary>
+    static (long FeedId, string Title, string Link, string Ext, int? Pages)? ImportItemInfo(long itemId)
+    {
+        using var conn = OpenDb(webDbPath);
+        conn.Open();
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT i.FeedId, i.Title, i.Link, i.PageCount
+            FROM Items i JOIN Feeds f ON i.FeedId = f.Id
+            WHERE i.Id = @id AND f.FeedUrl = 'local://import'";
+        cmd.Parameters.AddWithValue("@id", itemId);
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        string link = r.IsDBNull(2) ? "" : r.GetString(2);
+        string ext = "";
+        try { ext = Path.GetExtension(link).TrimStart('.').ToLowerInvariant(); } catch { }
+        return (r.GetInt64(0), r.GetString(1), link, ext, r.IsDBNull(3) ? null : r.GetInt32(3));
+    }
+
+    static void HandleImportDetail(HttpListenerResponse res, int itemId)
+    {
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        var v = info.Value;
+        // PDF 的页数：以库里的 PageCount 为准，缺失时现场问一次 pdfium
+        int? pages = v.Pages;
+        if (v.Ext == "pdf" && pages == null)
+        {
+            try { pages = GetPdfPageCount(v.Link); } catch { }
+        }
+        long size = 0;
+        try { if (File.Exists(v.Link)) size = new FileInfo(v.Link).Length; } catch { }
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                title = v.Title,
+                feedId = v.FeedId,
+                type = v.Ext,
+                size,
+                pages,
+                isPdf = v.Ext == "pdf",
+                file = Path.GetFileName(v.Link)
+            }
+        });
+    }
+
+    // 正文：与 /api/articles/{id} 一样走净化器，唯一区别是**把 file:// 图片改写成
+    // 我们自己的资产接口**（否则 EPUB/DOCX 里的图会被净化器整个丢掉 —— 相对路径/
+    // file 协议一律不放行）。
+    static void HandleImportText(HttpListenerRequest req, HttpListenerResponse res, int itemId)
+    {
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        var v = info.Value;
+        string content = "";
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COALESCE(NULLIF(Content,''), Description, '') FROM Items WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", itemId);
+            content = cmd.ExecuteScalar()?.ToString() ?? "";
+        }
+        if (v.Ext == "pdf")
+        {
+            // PDF 从来就没有文本层可读（ReadPdfFile 只写一句占位）。
+            // 与其把占位句当正文给出来，不如直接说"这一份要按页看"。
+            WriteJson(res, 200, new
+            {
+                success = true,
+                data = new
+                {
+                    itemId,
+                    title = v.Title,
+                    type = v.Ext,
+                    isPdf = true,
+                    pages = v.Pages,
+                    bodyHtml = "",
+                    note = Lang.T("PDF 按页栅格化阅读，没有文本层")
+                }
+            });
+            return;
+        }
+        string html = LooksLikeHtml(content) ? content : MarkdownToHtml(content);
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                title = v.Title,
+                type = v.Ext,
+                isPdf = false,
+                pages = (int?)null,
+                bodyHtml = ToSafeBodyHtml(html, importItemId: itemId)
+            }
+        });
+    }
+
+    // 资产（EPUB/DOCX 抽出来的图）：**必须限定在 ImportedDir() 之内**。
+    // 没有这道围栏，正文里一个 src 就能让浏览器读走机器上任意文件。
+    static void HandleImportAsset(HttpListenerRequest req, HttpListenerResponse res, int itemId)
+    {
+        string raw = (QueryParam(req, "path") ?? "").Trim();
+        if (raw.Length == 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "path required" } });
+            return;
+        }
+        string? full = LocalPathOf(raw);
+        string root;
+        try { root = Path.GetFullPath(ImportedDir()); } catch { root = ""; }
+        if (full == null || root.Length == 0 || !full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(res, 403, new { success = false, error = new { code = "FORBIDDEN", message = "asset path outside the import folder" } });
+            return;
+        }
+        if (!File.Exists(full))
+        {
+            res.StatusCode = 404;
+            res.Close();
+            return;
+        }
+        try
+        {
+            byte[] buf = File.ReadAllBytes(full);
+            res.StatusCode = 200;
+            res.ContentType = ContentTypeForPath(full);
+            res.ContentLength64 = buf.Length;
+            res.OutputStream.Write(buf, 0, buf.Length);
+            res.OutputStream.Close();
+        }
+        catch
+        {
+            res.StatusCode = 500;
+            res.Close();
+        }
+    }
+
+    // PDF 第 N 页（1 起）：复用 CLI 的 RenderPdfPages（150 DPI、带注释/表单，
+    // 已渲染过的页会命中磁盘缓存，翻页不必重渲染）。
+    static void HandleImportPage(HttpListenerResponse res, int itemId, int pageNo)
+    {
+        var info = ImportItemInfo(itemId);
+        if (info == null || info.Value.Ext != "pdf")
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "NOT_A_PDF", message = "item is not an imported PDF" } });
+            return;
+        }
+        string pdf = info.Value.Link;
+        int? pages = info.Value.Pages;
+        if (pages == null)
+        {
+            try { pages = GetPdfPageCount(pdf); } catch { }
+        }
+        if (pages != null && (pageNo < 1 || pageNo > pages.Value))
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "PAGE_NOT_FOUND", message = $"page {pageNo} of {pages}" } });
+            return;
+        }
+        try
+        {
+            var rendered = RenderPdfPages(pdf, pageNo.ToString());
+            if (rendered.Count == 0 || !File.Exists(rendered[0]))
+            {
+                WriteJson(res, 500, new { success = false, error = new { code = "RENDER_FAILED", message = "pdf page render failed" } });
+                return;
+            }
+            byte[] buf = File.ReadAllBytes(rendered[0]);
+            res.StatusCode = 200;
+            res.ContentType = "image/png";
+            res.Headers["Cache-Control"] = "private, max-age=3600";
+            res.ContentLength64 = buf.Length;
+            res.OutputStream.Write(buf, 0, buf.Length);
+            res.OutputStream.Close();
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "RENDER_FAILED", message = ex.Message } });
+        }
+    }
+
+    static void HandleImportDelete(HttpListenerResponse res, int itemId)
+    {
+        if (!WebWriteAllowed(res, "import")) return;
+        var (ok, code, message) = ImportItemDelete(itemId, webDbPath);
+        if (!ok)
+        {
+            WriteJson(res, code == "ITEM_NOT_FOUND" ? 404 : 400, new { success = false, error = new { code, message } });
+            return;
+        }
+        WriteJson(res, 200, new { success = true, data = new { itemId, deleted = true } });
+    }
+
+    // 删除一个导入项（CLI 的 `--import-rm` 与 Web 的 DELETE 共用）：
+    // 删库里的行 + 删落地的那份文件；assets/<guid>/ 不删（可能被别的项共享，
+    // 且它只是一堆图，留着比误删安全）。
+    static (bool Ok, string Code, string Message) ImportItemDelete(long realId, string dbPath)
+    {
+        string link = "";
+        bool imported;
+        using (var conn = OpenDb(dbPath))
+        {
+            conn.Open();
+            var c = conn.CreateCommand();
+            c.CommandText = @"
+                SELECT i.Link, f.FeedUrl FROM Items i JOIN Feeds f ON i.FeedId = f.Id WHERE i.Id = @id";
+            c.Parameters.AddWithValue("@id", realId);
+            using var r = c.ExecuteReader();
+            if (!r.Read()) return (false, "ITEM_NOT_FOUND", Lang.T("Article {0} not found", realId));
+            link = r.IsDBNull(0) ? "" : r.GetString(0);
+            imported = (r.IsDBNull(1) ? "" : r.GetString(1)) == "local://import";
+        }
+        if (!imported) return (false, "NOT_IMPORTED", Lang.T("Article {0} is not an imported file", realId));
+
+        if (link.Length > 0 && File.Exists(link))
+        {
+            try { File.Delete(link); } catch { }
+        }
+        using (var conn = OpenDb(dbPath))
+        {
+            conn.Open();
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM Items WHERE Id = @id";
+            cmd.Parameters.AddWithValue("@id", realId);
+            cmd.ExecuteNonQuery();
+        }
+        return (true, "", "");
+    }
+
+    // ══════════ 导入原文件：浏览器直接打开 + 临时链接 ══════════
+    // 为什么需要它：PDF 在网页里是**逐页栅格化**看的（没有文本层、也不能选字、不能搜）。
+    // 但浏览器自带的 PDF 阅读器（或系统的 PDF 程序）比我们做得好 —— 那就别挡着，
+    // 把原文件**原样**递出去，用 `Content-Disposition: inline` 让浏览器自己决定怎么渲染。
+    //
+    // 「临时链接」解决的另一个问题是**会话**：网页的钥匙是"一个浏览器一把、活到进程结束"，
+    // 所以 /api/imports/{id}/file 直接从页面里点开没问题，但把链接贴到别的标签页、
+    // 别的阅读器、手机上看就会 401。于是给一个**进程内、只对一份文件、10 分钟过期**的令牌。
+    // 它比会话 cookie 窄得多：只读、只一份、会过期、重启即失效。
+
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (long ItemId, DateTime ExpiresUtc)> webFileTickets = new(StringComparer.Ordinal);
+    static readonly TimeSpan WebFileTicketTtl = TimeSpan.FromMinutes(10);
+
+    static string IssueWebFileTicket(long itemId)
+    {
+        // 顺手清过期项：这个表只会因为"点了多少次链接"而增长，不清就是慢性泄漏
+        DateTime now = DateTime.UtcNow;
+        foreach (var kv in webFileTickets)
+            if (kv.Value.ExpiresUtc <= now) webFileTickets.TryRemove(kv.Key, out _);
+
+        var buf = new byte[16];
+        RandomNumberGenerator.Fill(buf);
+        string ticket = Convert.ToHexString(buf).ToLowerInvariant();
+        webFileTickets[ticket] = (itemId, now + WebFileTicketTtl);
+        return ticket;
+    }
+
+    /// <summary>令牌必须**同时**对得上文件和时效：令牌本身不带文件身份，
+    /// 所以"拿 A 的令牌去读 B"也必须被拒（itemId 比对就是干这个的）。</summary>
+    static bool WebFileTicketOk(string? ticket, long itemId)
+        => !string.IsNullOrEmpty(ticket)
+           && webFileTickets.TryGetValue(ticket, out var v)
+           && v.ItemId == itemId
+           && v.ExpiresUtc > DateTime.UtcNow;
+
+    static void HandleImportLink(HttpListenerResponse res, int itemId)
+    {
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        string ticket = IssueWebFileTicket(itemId);
+        // 相对路径 + 令牌：前端拼成绝对地址（它知道当前 origin），这样换绑定/端口也不写死
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                itemId,
+                url = $"/api/imports/{itemId}/file?k={ticket}",
+                expiresInSeconds = (int)WebFileTicketTtl.TotalSeconds,
+                type = info.Value.Ext,
+                file = Path.GetFileName(info.Value.Link),
+                inline = info.Value.Ext is "pdf"
+            }
+        });
+    }
+
+    static void HandleImportFile(HttpListenerRequest req, HttpListenerResponse res, int itemId)
+    {
+        // 两条凭据任选其一：临时令牌（可贴到别处）或浏览器会话（页面里直接点开）
+        if (!WebFileTicketOk(QueryParam(req, "k"), itemId) && !WebRequestIsAuthenticated(req))
+        {
+            WriteJson(res, 401, new { success = false, error = new { code = "UNAUTHORIZED", message = "ticket expired or missing, and no session" } });
+            return;
+        }
+        var info = ImportItemInfo(itemId);
+        if (info == null)
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "ITEM_NOT_FOUND", message = "imported item not found" } });
+            return;
+        }
+        string path = info.Value.Link;
+        if (path.Length == 0 || !File.Exists(path))
+        {
+            WriteJson(res, 404, new { success = false, error = new { code = "FILE_MISSING", message = "the stored copy is gone" } });
+            return;
+        }
+        WriteFileInline(req, res, path, Path.GetFileName(path));
+    }
+
+    /// <summary>原样递出本地文件，支持单段 Range —— 浏览器的 PDF 阅读器会按需拉取区间，
+    /// 几十 MB 的扫描件不必先整份下载完才能翻第一页。</summary>
+    static void WriteFileInline(HttpListenerRequest req, HttpListenerResponse res, string path, string fileName)
+    {
+        var fi = new FileInfo(path);
+        long total = fi.Length;
+        long start = 0, end = total > 0 ? total - 1 : 0;
+        bool partial = false;
+
+        string? range = req.Headers["Range"];
+        if (!string.IsNullOrEmpty(range) && range.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase) && total > 0)
+        {
+            string spec = range[6..].Split(',')[0].Trim();     // 只认第一段：多段 Range 的响应体格式复杂，浏览器很少真用
+            int dash = spec.IndexOf('-');
+            if (dash >= 0)
+            {
+                string a = spec[..dash], b = spec[(dash + 1)..];
+                bool okA = a.Length == 0 || long.TryParse(a, out _);
+                if (okA)
+                {
+                    if (a.Length == 0 && long.TryParse(b, out long suffix)) { start = Math.Max(0, total - suffix); end = total - 1; }
+                    else if (long.TryParse(a, out long s))
+                    {
+                        start = Math.Max(0, s);
+                        end = b.Length > 0 && long.TryParse(b, out long e) ? Math.Min(total - 1, e) : total - 1;
+                    }
+                    if (start > end || start >= total)
+                    {
+                        res.StatusCode = 416;
+                        res.Headers["Content-Range"] = $"bytes */{total}";
+                        res.Close();
+                        return;
+                    }
+                    partial = true;
+                }
+            }
+        }
+
+        res.StatusCode = partial ? 206 : 200;
+        res.ContentType = ContentTypeForPath(path);
+        res.Headers["Accept-Ranges"] = "bytes";
+        // inline：**不要**触发下载，交给浏览器自己决定（PDF 用它自带的阅读器）
+        string ascii = new string(fileName.Where(c => c < 128 && c != '"' && c != '\\').ToArray());
+        if (string.IsNullOrWhiteSpace(ascii)) ascii = "imported-file";
+        res.Headers["Content-Disposition"] =
+            $"inline; filename=\"{ascii}\"; filename*=UTF-8''{Uri.EscapeDataString(fileName)}";
+        if (partial) res.Headers["Content-Range"] = $"bytes {start}-{end}/{total}";
+        res.ContentLength64 = end - start + 1;
+
+        using var fs = File.OpenRead(path);
+        fs.Seek(start, SeekOrigin.Begin);
+        var buf = new byte[64 * 1024];
+        long remain = end - start + 1;
+        while (remain > 0)
+        {
+            int want = (int)Math.Min(buf.Length, remain);
+            int got = fs.Read(buf, 0, want);
+            if (got <= 0) break;
+            res.OutputStream.Write(buf, 0, got);
+            remain -= got;
+        }
+        res.OutputStream.Close();
+    }
+
+    /// <summary>把 <c>file:///C:/x/y.png</c> 或裸路径变成绝对本地路径；不是本地路径则 null。</summary>
+    static string? LocalPathOf(string raw)
+    {
+        try
+        {
+            string s = (raw ?? "").Trim();
+            if (s.Length == 0) return null;
+            if (s.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Uri.TryCreate(s, UriKind.Absolute, out var u)) return null;
+                s = u.LocalPath;
+            }
+            if (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                s.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return null;
+            return Path.GetFullPath(s);
+        }
+        catch { return null; }
+    }
+
+    static string ContentTypeForPath(string path)
+    {
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            // ⚠️ .pdf 必须是 application/pdf：给成 octet-stream 的话，浏览器会**下载**它，
+            // 而不是用它自带的阅读器打开 —— 而"用原生阅读器打开"正是这个接口存在的理由。
+            ".pdf" => "application/pdf",
+            ".epub" => "application/epub+zip",
+            ".mobi" => "application/x-mobipocket-ebook",
+            ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".txt" or ".md" or ".markdown" => "text/plain; charset=utf-8",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            ".svg" => "image/svg+xml",
+            ".css" => "text/css; charset=utf-8",
+            ".woff" => "font/woff",
+            ".woff2" => "font/woff2",
+            ".ttf" => "font/ttf",
+            ".otf" => "font/otf",
+            _ => "application/octet-stream"
+        };
+    }
+
+    // ══════════ 向量索引 ══════════
+    // 为什么不用 IndexArticlesCli / ReindexCli：它们都会 Console.ReadLine() 问编号与确认，
+    // 在服务器里读到的是 EOF → 直接当作取消。这里照 TUI 的做法重写循环
+    // （EnsureModel → SafeEmbed → SaveVector → EmbedItemChunks），算的是同一件事。
+    static void HandleIndexStatus(HttpListenerResponse res)
+    {
+        int vectors = 0, chunks = 0, active = 0;
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            vectors = ScalarInt(conn, "SELECT COUNT(*) FROM Vectors");
+            chunks = ScalarInt(conn, "SELECT COUNT(*) FROM VectorsChunks");
+            active = ScalarInt(conn, "SELECT COUNT(*) FROM Items WHERE Status = 'active'");
+        }
+        var cfg = LoadConfig(webDbPath);
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                // 「配置过了吗」的判据与 TUI 一致：ai_config.json 是否存在。
+                // 没有这个文件就索引等于白跑（SafeEmbed 会一个个超时）。
+                configured = File.Exists(ConfigPath(webDbPath)),
+                provider = cfg.Embedding.Provider,
+                model = cfg.Embedding.Model,
+                dimensions = cfg.Embedding.Dimensions,
+                endpoint = cfg.Embedding.ApiEndpoint,
+                searchThreshold = cfg.Embedding.SearchThreshold,
+                currentModelId = CurrentEmbeddingModelId(webDbPath),
+                vectors,
+                chunks,
+                active,
+                progress = new { active = _progKind.Length > 0, kind = _progKind, done = _progDone, total = _progTotal, current = _progCurrent }
+            }
+        });
+    }
+
+    static int ScalarInt(Microsoft.Data.Sqlite.SqliteConnection conn, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
+    }
+
+    static async void HandleIndexRun(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "index")) return;
+        string body = await ReadBodyAsync(req);
+        bool reindex = BodyBool(body, "reindex");
+
+        if (!File.Exists(ConfigPath(webDbPath)))
+        {
+            WriteJson(res, 409, new
+            {
+                success = false,
+                error = new
+                {
+                    code = "AI_NOT_CONFIGURED",
+                    message = Lang.T("AI is not configured yet."),
+                    hint = "在真实终端运行 sip --init（API Key 只从终端输入，不进网页）"
+                }
+            });
+            return;
+        }
+
+        string key = "index";
+        string? busy = TryBeginDownload(key);
+        if (busy != null)
+        {
+            WriteJson(res, 409, new { success = false, error = new { code = "ALREADY_RUNNING", message = busy } });
+            return;
+        }
+        try
+        {
+            var cfg = LoadConfig(webDbPath);
+            var targets = new List<(int Id, int FeedId, string Title)>();
+            using (var conn = OpenDb(webDbPath))
+            {
+                conn.Open();
+                if (reindex)
+                {
+                    using var del1 = conn.CreateCommand();
+                    del1.CommandText = "DELETE FROM Vectors";
+                    del1.ExecuteNonQuery();
+                    using var del2 = conn.CreateCommand();
+                    del2.CommandText = "DELETE FROM VectorsChunks";
+                    del2.ExecuteNonQuery();
+                }
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = reindex
+                    ? "SELECT Id, FeedId, Title FROM Items WHERE Status = 'active'"
+                    : @"SELECT Id, FeedId, Title FROM Items
+                        WHERE Status = 'active'
+                          AND NOT EXISTS (SELECT 1 FROM Vectors v WHERE v.ItemId = Items.Id)";
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    targets.Add((r.GetInt32(0), r.GetInt32(1), r.GetString(2)));
+            }
+
+            int ok = 0, fail = 0;
+            ProgBegin("index");
+            _progTotal = targets.Count;
+            int modelId = EnsureModel(webDbPath, cfg.Embedding);
+            foreach (var t in targets)
+            {
+                _progDone = ok + fail;
+                _progCurrent = t.Title;
+                var vec = await SafeEmbed(t.Title, cfg, json: false, articleId: t.Id, sourceId: t.FeedId);
+                if (vec == null) { fail++; continue; }
+                // 维度变了（换了嵌入模型）就跟着改配置 —— 与 CLI/TUI 的自动纠正同一行为
+                if (vec.Length != cfg.Embedding.Dimensions)
+                {
+                    cfg.Embedding.Dimensions = vec.Length;
+                    SaveConfig(webDbPath, cfg);
+                }
+                SaveVector(webDbPath, t.FeedId, t.Id, modelId, vec);
+                await EmbedItemChunks(webDbPath, t.FeedId, t.Id, modelId, cfg);
+                ok++;
+            }
+
+            // 收尾：与 CLI 一致，补全文 sidecar 与分块向量（失败不影响主结果）
+            int sidecars = 0, backfilled = 0;
+            try
+            {
+                var pairs = targets.Select(t => (t.Id, t.FeedId)).ToList();
+                sidecars = BackfillFulltextSidecars(webDbPath, pairs);
+                backfilled = await BackfillChunks(webDbPath, targets.Select(t => t.FeedId).Distinct().ToList(), modelId, cfg);
+            }
+            catch { }
+
+            WriteJson(res, 200, new
+            {
+                success = true,
+                data = new { reindex, total = targets.Count, ok, fail, sidecars, backfilled, dimensions = cfg.Embedding.Dimensions }
+            });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "INDEX_FAILED", message = ex.Message } });
+        }
+        finally { ProgEnd(); EndDownload(key); }
+    }
+
+    // ══════════ 治理面：孟思琳挡位 / Agent 门 ══════════
+    static void HandleSimonStatus(HttpListenerResponse res)
+    {
+        var events = SimonLoadEvents();
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                name = "孟思琳(simon)",
+                level = CurrentSimonLevel(),
+                canDisable = false,                  // 默认开启、无法关闭，只能调挡位
+                agentGate = AgentModeOn(),
+                // 降档为什么不在网页做：见 HandleSimonLevel
+                loosenHint = "sip simon level <1|2|3>（真实终端 + Web 口令）",
+                events = events.Take(20).Select(e => new { ts = e.Ts, type = e.Type, level = e.Level, detail = e.Detail }).ToList()
+            }
+        });
+    }
+
+    static async void HandleSimonLevel(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        string body = await ReadBodyAsync(req);
+        int level = BodyInt(body, "level", 0);
+        if (level is < 1 or > 3)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "level must be 1, 2 or 3" } });
+            return;
+        }
+        int cur = CurrentSimonLevel();
+        if (level < cur)
+        {
+            // **降档 = 放宽保护**，按设计走人工通道：真实交互终端 + Web 口令。
+            // 浏览器不是那个通道 —— 「口令只在终端里输入」正是这条门的意义所在；
+            // 允许网页降档，等于任何拿到会话 cookie 的程序都能把保护关掉。
+            // 升档（收紧）反过来任意通道放行：Agent 发现异常时要能立刻收紧。
+            WriteJson(res, 403, new
+            {
+                success = false,
+                error = new
+                {
+                    code = "SIMON_LOOSEN_REQUIRES_TERMINAL",
+                    level = cur,
+                    message = Lang.T("Lowering the Simon level needs a real terminal and the Web password."),
+                    hint = $"sip simon level {level}"
+                }
+            });
+            return;
+        }
+        if (level == cur)
+        {
+            WriteJson(res, 200, new { success = true, data = new { level = cur, previous = cur, changed = false } });
+            return;
+        }
+        if (!SimonLevelSet(level))
+        {
+            WriteJson(res, 500, new
+            {
+                success = false,
+                error = new { code = "LEVEL_SAVE_FAILED", level = cur, message = Lang.T("The OS credential store rejected the write; the level was NOT changed.") }
+            });
+            return;
+        }
+        SimonRecord("level_change", $"web {cur} → {level}", level);
+        WriteJson(res, 200, new { success = true, data = new { level = CurrentSimonLevel(), previous = cur, changed = true } });
+    }
+
+    // ══════════ 遥测（默认关；开关与导出都在本机）══════════
+    static void HandleTelemetryStatus(HttpListenerResponse res)
+    {
+        var stats = TelemetryService.Stats();
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                enabled = TelemetryService.IsEnabled,
+                consent = TelemetryService.Consent,
+                events = stats.Count,
+                first = stats.First,
+                last = stats.Last,
+                db = Path.Combine(dataDir, "telemetry.db")
+            }
+        });
+    }
+
+    static async void HandleTelemetrySet(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "telemetry")) return;
+        string body = await ReadBodyAsync(req);
+        bool on = BodyBool(body, "enabled");
+        TelemetryService.SetConsent(on ? "enabled" : "disabled");
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new { enabled = TelemetryService.IsEnabled, consent = TelemetryService.Consent }
+        });
+    }
+
+    // 导出 = 把本机记录原样交给你（换机器、备份、或者干脆自己看）。
+    // 只读，不需要挡位放行；文件只经本机 HTTP 回到你自己的浏览器。
+    static void HandleTelemetryExport(HttpListenerResponse res)
+    {
+        var events = TelemetryService.AllEvents();
+        var payload = JsonSerializer.Serialize(new
+        {
+            exportedAt = DateTime.Now.ToString("O"),
+            events = events.Select(e => new
+            {
+                id = e.Id,
+                timestamp = e.Timestamp,
+                sessionId = e.SessionId,
+                type = e.Type,
+                articleId = e.ArticleId,
+                sourceId = e.SourceId,
+                versionId = e.VersionId,
+                surface = e.Surface,
+                position = e.Position,
+                data = e.DataJson
+            })
+        }, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        });
+        WriteDownload(res, "application/json; charset=utf-8", "sip-telemetry.json", payload);
+    }
+
+    // ══════════ 配置总览（只读）══════════
+    // 只读：**改配置的路仍然只在终端**（sip_settings.json 手改、sip webpass、
+    // sip aikey、sip --init、sip simon）。网页给出的事实要够用，够用来让人
+    // 知道下一步该敲哪条命令 —— 而不是把危险开关搬进浏览器。
+    static void HandleConfig(HttpListenerResponse res)
+    {
+        var st = LoadSettings();
+        var cfg = LoadConfig(webDbPath);
+        string host = string.IsNullOrWhiteSpace(st.WebHost) ? "127.0.0.1" : st.WebHost;
+        int feeds = 0, items = 0, likes = 0, fulltextFiles = 0;
+        using (var conn = OpenDb(webDbPath))
+        {
+            conn.Open();
+            feeds = ScalarInt(conn, "SELECT COUNT(*) FROM Feeds");
+            items = ScalarInt(conn, "SELECT COUNT(*) FROM Items");
+        }
+        try
+        {
+            likes = LoadSignals().Count;
+            if (Directory.Exists(FulltextDir()))
+                fulltextFiles = Directory.GetFiles(FulltextDir(), "*.md").Length;
+        }
+        catch { }
+
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                version = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?",
+                dataDir,
+                dbPath = webDbPath,
+                web = new
+                {
+                    host,
+                    port = st.WebPort,
+                    passwordSet = WebPasswordIsSet(),
+                    networkReachable = !IsLoopbackHost(host),
+                    sessionScope = "process"
+                },
+                ai = new
+                {
+                    configured = File.Exists(ConfigPath(webDbPath)),
+                    configFile = ConfigPath(webDbPath),
+                    embedding = new
+                    {
+                        provider = cfg.Embedding.Provider,
+                        model = cfg.Embedding.Model,
+                        dimensions = cfg.Embedding.Dimensions,
+                        endpoint = cfg.Embedding.ApiEndpoint,
+                        searchThreshold = cfg.Embedding.SearchThreshold,
+                        keySet = AiKeyGet(embedding: true) != null
+                    },
+                    llm = new
+                    {
+                        provider = cfg.Llm.Provider,
+                        model = cfg.Llm.Model,
+                        endpoint = cfg.Llm.ApiEndpoint,
+                        keySet = AiKeyGet(embedding: false) != null
+                    },
+                    allowPrivateNet = cfg.AllowPrivateNet
+                },
+                simon = CurrentSimonLevel(),
+                agentGate = AgentModeOn(),
+                telemetry = new { enabled = TelemetryService.IsEnabled, consent = TelemetryService.Consent },
+                insights = new { interval = st.InsightsInterval, lastAt = st.LastInsightsAt },
+                thresholds = new
+                {
+                    dedup = st.DedupThreshold,
+                    dedupSemantic = st.DedupSemanticThreshold,
+                    changeGradePolish = st.ChangeGradePolish,
+                    changeGradeReverse = st.ChangeGradeReverse,
+                    groupMatch = st.GroupMatchThreshold,
+                    floodPerDay = st.FloodThresholdPerDay
+                },
+                counts = new { feeds, items, likes, fulltext = fulltextFiles }
+            }
+        });
+    }
+
+    static async void HandleInsightsInterval(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "insights-interval")) return;
+        string body = await ReadBodyAsync(req);
+        string raw = BodyString(body, "interval").Trim();
+        if (raw.Length == 0) raw = "off";
+        // 与 CLI 同一个解析器：网页收下的值，终端必须也认
+        bool valid = raw.Equals("off", StringComparison.OrdinalIgnoreCase) || TryParseInsightsInterval(raw) != null;
+        if (!valid)
+        {
+            WriteJson(res, 400, new
+            {
+                success = false,
+                error = new { code = "BAD_INTERVAL", message = Lang.T("无效间隔，应为 7d / 30d / off 之一"), value = raw }
+            });
+            return;
+        }
+        var s = LoadSettings();
+        s.InsightsInterval = raw.ToLowerInvariant();
+        SaveSettings(s);
+        WriteJson(res, 200, new { success = true, data = new { interval = s.InsightsInterval } });
+    }
+
+    // ══════════ 批量摘要（等价于 sip --summary-all，但不会卡在 stdin 上）══════════
+    static async void HandleSummaryAll(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "summaries")) return;
+
+        if (!File.Exists(ConfigPath(webDbPath)) || AiKeyGet(embedding: false) == null)
+        {
+            WriteJson(res, 409, new
+            {
+                success = false,
+                error = new
+                {
+                    code = "AI_NOT_CONFIGURED",
+                    message = Lang.T("AI is not configured yet."),
+                    hint = "在真实终端运行 sip --init，或用 sip aikey set 存 Key（只从终端输入）"
+                }
+            });
+            return;
+        }
+
+        string key = "summaries";
+        string? busy = TryBeginDownload(key);
+        if (busy != null)
+        {
+            WriteJson(res, 409, new { success = false, error = new { code = "ALREADY_RUNNING", message = busy } });
+            return;
+        }
+        try
+        {
+            var todo = new List<(int Id, string Title)>();
+            using (var conn = OpenDb(webDbPath))
+            {
+                conn.Open();
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = @"SELECT Id, Title FROM Items
+                                    WHERE Status = 'active' AND (Summary IS NULL OR Summary = '')";
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) todo.Add((r.GetInt32(0), r.GetString(1)));
+            }
+            if (todo.Count == 0)
+            {
+                WriteJson(res, 200, new { success = true, data = new { total = 0, ok = 0, fail = 0, message = Lang.T("All active articles already have summaries") } });
+                return;
+            }
+
+            int ok = 0, fail = 0;
+            ProgBegin("summaries");
+            _progTotal = todo.Count;
+            foreach (var t in todo)
+            {
+                _progCurrent = t.Title;
+                try
+                {
+                    // quiet:true —— 别把每篇的进度写进服务器终端；json:false —— 结果我们自己序列化
+                    var (good, _) = await SummarizeItem(webDbPath, t.Id, json: false, quiet: true);
+                    if (good) ok++; else fail++;
+                }
+                catch { fail++; }
+                _progDone = ok + fail;
+            }
+            WriteJson(res, 200, new { success = true, data = new { total = todo.Count, ok, fail } });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "SUMMARY_FAILED", message = ex.Message } });
+        }
+        finally { ProgEnd(); EndDownload(key); }
+    }
+
+    // ══════════ 全文缓存清理（sip --purge-fulltext）══════════
+    static async void HandlePurgeFulltext(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "purge-fulltext")) return;
+        string body = await ReadBodyAsync(req);
+        int itemId = BodyInt(body, "itemId");
+        try
+        {
+            if (itemId > 0)
+            {
+                string p = FulltextPath(itemId);
+                bool had = File.Exists(p);
+                if (had) File.Delete(p);
+                RemoveFulltextVecs(new List<int> { itemId });
+                WriteJson(res, 200, new { success = true, data = new { itemId, cleared = had } });
+                return;
+            }
+            string dir = FulltextDir();
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+            Directory.CreateDirectory(dir);
+            WriteJson(res, 200, new { success = true, data = new { itemId = 0, cleared = true, scope = "all" } });
+        }
+        catch (Exception ex)
+        {
+            WriteJson(res, 500, new { success = false, error = new { code = "PURGE_FAILED", message = ex.Message } });
+        }
+    }
+
+    // ══════════ 推荐源（sip --onboarding）══════════
+    static void HandleOnboardingList(HttpListenerResponse res)
+    {
+        var t = LoadTemplates();
+        WriteJson(res, 200, new
+        {
+            success = true,
+            data = new
+            {
+                categories = t.Select(kv => new
+                {
+                    category = kv.Key,
+                    sources = kv.Value.Select(x => new { name = x.Name, url = x.Url }).ToList()
+                }).ToList()
+            }
+        });
+    }
+
+    static async void HandleOnboardingAdd(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        if (!WebWriteAllowed(res, "onboarding")) return;
+        string body = await ReadBodyAsync(req);
+        string category = BodyString(body, "category").Trim();
+        string pick = BodyString(body, "index").Trim().ToLowerInvariant();
+        if (pick.Length == 0) pick = "all";
+
+        var templates = LoadTemplates();
+        if (!templates.TryGetValue(category, out var list) || list.Count == 0)
+        {
+            WriteJson(res, 404, new
+            {
+                success = false,
+                error = new { code = "CATEGORY_NOT_FOUND", message = Lang.T("未找到分类 {0}", category), categories = templates.Keys.ToList() }
+            });
+            return;
+        }
+        List<SourceTemplate> chosen;
+        if (pick == "all") chosen = list;
+        else if (int.TryParse(pick, out int idx) && idx >= 1 && idx <= list.Count) chosen = new List<SourceTemplate> { list[idx - 1] };
+        else
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_INDEX", message = $"索引无效（1~{list.Count} 或 all）" } });
+            return;
+        }
+
+        string key = "onboarding";
+        string? busy = TryBeginDownload(key);
+        if (busy != null)
+        {
+            WriteJson(res, 409, new { success = false, error = new { code = "ALREADY_RUNNING", message = busy } });
+            return;
+        }
+        int ok = 0, fail = 0;
+        var errors = new List<string>();
+        try
+        {
+            ProgBegin("onboarding");
+            _progTotal = chosen.Count;
+            foreach (var t in chosen)
+            {
+                _progCurrent = t.Url;
+                try
+                {
+                    await DownloadAndSaveToDb(t.Url, webDbPath, interactive: false);
+                    ok++;
+                }
+                catch (Exception ex)
+                {
+                    fail++;
+                    if (errors.Count < 20) errors.Add($"{t.Name} ({t.Url}) — {ex.Message}");
+                }
+                _progDone = ok + fail;
+            }
+            WriteJson(res, 200, new { success = true, data = new { category, ok, fail, errors } });
+        }
+        finally { ProgEnd(); EndDownload(key); }
+    }
+
+    // ══════════ 命令面板：**只读白名单** ══════════
+    // 与 TUI 命令栏的用途等价（"我知道命令，但懒得点"），但**刻意不是**通用 CLI 执行器：
+    // 网页里开一条任意命令通道，等于把 CLI 的全部写能力塞进浏览器。
+    // 这里每个命令都映射到已有的只读内部函数，返回纯文本行。
+    static void HandleCommand(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        string line;
+        try
+        {
+            string body = ReadBodyAsync(req).GetAwaiter().GetResult();
+            line = BodyString(body, "line").Trim();
+        }
+        catch { line = (QueryParam(req, "line") ?? "").Trim(); }
+
+        if (line.Length == 0)
+        {
+            WriteJson(res, 400, new { success = false, error = new { code = "BAD_REQUEST", message = "line required" } });
+            return;
+        }
+        var (ok, lines, code) = RunReadOnlyCommand(line);
+        WriteJson(res, ok ? 200 : 400, new
+        {
+            success = ok,
+            data = new { line, lines },
+            error = ok ? null : new { code, message = Lang.T("Unknown or non-read-only command: {0}", line), hint = CommandPaletteHelp() }
+        });
+    }
+
+    static string CommandPaletteHelp() =>
+        "status · list · today · grep <关键词> · show <id> · versions <id> · edits · dedup · hidden · policy · simon · telemetry · index · config";
+
+    static (bool Ok, List<string> Lines, string Code) RunReadOnlyCommand(string line)
+    {
+        var outp = new List<string>();
+        // 命令名大小写不敏感；参数原样交给对应函数（与 TUI 命令栏同一约定）
+        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string cmd = parts[0].ToLowerInvariant();
+        string rest = line.Length > cmd.Length ? line[(cmd.Length + 1)..].Trim() : "";
+
+        // **参数个数也要管**：`simon level 1`、`telemetry enable` 这类"
+        // 拿一个只读命令名当挡箭牌、后面跟写意图"的写法必须整条拒掉，
+        // 而不是把多余参数丢掉后照样返回一份只读结果 ——
+        // 那样用户会以为自己执行的是写命令（而面板说它成功了）。
+        bool NoArgs() => rest.Length == 0;
+
+        switch (cmd)
+        {
+            case "status":
+            case "about":
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                outp.Add("sip v" + (System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?"));
+                outp.Add("data    " + dataDir);
+                outp.Add("db      " + webDbPath);
+                outp.Add("simon   level " + CurrentSimonLevel() + " · agent gate " + (AgentModeOn() ? "on" : "off"));
+                outp.Add("auth    " + (WebPasswordIsSet() ? "password" : "local-token"));
+                outp.Add("telemetry " + TelemetryService.Consent);
+                return (true, outp, "");
+
+            case "list":
+            case "feeds":
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                using (var conn = OpenDb(webDbPath))
+                {
+                    conn.Open();
+                    var c = conn.CreateCommand();
+                    c.CommandText = @"
+                        SELECT f.Id, f.Title, f.Schedule,
+                               (SELECT COUNT(*) FROM Items WHERE FeedId = f.Id AND Status = 'active') AS n
+                        FROM Feeds f ORDER BY f.Id";
+                    using var r = c.ExecuteReader();
+                    while (r.Read())
+                        outp.Add($"#{r.GetInt32(0),-4} {r.GetString(1)}  [{r.GetInt32(3)} 篇 · {(r.IsDBNull(2) ? "manual" : r.GetString(2))}]");
+                }
+                if (outp.Count == 0) outp.Add("(还没有订阅源)");
+                return (true, outp, "");
+
+            case "today":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var (done, target, tracking) = TodayProgress(webDbPath);
+                var list = GetTodayList(webDbPath, 5, refresh: false, out string generatedAt);
+                outp.Add($"今日哈汤 · 目标 {target} · 已读 {(tracking ? done.ToString() : "—（遥测关闭）")} · 生成于 {generatedAt}");
+                foreach (var t in list)
+                    outp.Add($"  #{t.ItemId,-5} {t.Title}  [{t.Source} · {t.Reason} · ≈{t.Minutes:0.#} 分]");
+                if (list.Count == 0) outp.Add("  (今天还没有值得读的)");
+                return (true, outp, "");
+            }
+
+            case "grep":
+            case "search":
+            case "s":
+            {
+                if (rest.Length == 0) return (false, outp, "BAD_REQUEST");
+                var hits = DoGrep(rest, webDbPath, 20, null);
+                if (hits == null) return (false, outp, "BAD_REQUEST");
+                outp.Add($"全文 · {rest} · {hits.Count} 篇");
+                foreach (var h in hits)
+                    outp.Add($"  #{h.ItemId,-5} {h.Title}  [{h.FeedTitle}]");
+                return (true, outp, "");
+            }
+
+            case "show":
+            case "content":
+            {
+                if (!int.TryParse(rest, out int id)) return (false, outp, "BAD_REQUEST");
+                var body = ItemBodyRaw(id);
+                if (body == null) { outp.Add($"文章 #{id} 不存在"); return (true, outp, ""); }
+                outp.Add(body.Value.Title);
+                outp.Add("");
+                foreach (var p in NormalizeParagraphs(body.Value.Body).Take(40)) outp.Add(p);
+                return (true, outp, "");
+            }
+
+            case "versions":
+            case "history":
+            {
+                if (!int.TryParse(rest, out int id)) return (false, outp, "BAD_REQUEST");
+                using var conn = OpenDb(webDbPath);
+                conn.Open();
+                var head = conn.CreateCommand();
+                head.CommandText = "SELECT Guid, FeedId, Title FROM Items WHERE Id = @id";
+                head.Parameters.AddWithValue("@id", id);
+                string guid; int feedId; string title;
+                using (var hr = head.ExecuteReader())
+                {
+                    if (!hr.Read()) { outp.Add($"文章 #{id} 不存在"); return (true, outp, ""); }
+                    guid = hr.IsDBNull(0) ? "" : hr.GetString(0);
+                    feedId = hr.GetInt32(1);
+                    title = hr.GetString(2);
+                }
+                outp.Add($"{title}  的版本历史");
+                if (guid.Length == 0) { outp.Add("  (这篇没有 Guid，不参与版本追踪)"); return (true, outp, ""); }
+                var c = conn.CreateCommand();
+                c.CommandText = "SELECT Id, Version, Status FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version DESC";
+                c.Parameters.AddWithValue("@g", guid);
+                c.Parameters.AddWithValue("@f", feedId);
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                    outp.Add($"  v{r.GetInt32(1),-3} #{r.GetInt64(0),-6} {r.GetString(2)}");
+                return (true, outp, "");
+            }
+
+            case "edits":
+            case "diffs":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                using var conn = OpenDb(webDbPath);
+                conn.Open();
+                var c = conn.CreateCommand();
+                c.CommandText = @"
+                    WITH g AS (
+                        SELECT FeedId, Guid, COUNT(*) AS n, MIN(Version) AS mn, MAX(Version) AS mx
+                        FROM Items WHERE Guid IS NOT NULL AND Guid <> ''
+                        GROUP BY FeedId, Guid HAVING COUNT(*) > 1)
+                    SELECT g.mn, g.mx, g.n,
+                           (SELECT i2.Title FROM Items i2 WHERE i2.FeedId = g.FeedId AND i2.Guid = g.Guid
+                             ORDER BY i2.Version DESC LIMIT 1)
+                    FROM g ORDER BY g.mx DESC LIMIT 50";
+                using var r = c.ExecuteReader();
+                while (r.Read())
+                    outp.Add($"  v{r.GetInt32(0)} → v{r.GetInt32(1)}（{r.GetInt32(2)} 版） {r.GetString(3)}");
+                if (outp.Count == 0) outp.Add("(还没有被改过稿的文章)");
+                return (true, outp, "");
+            }
+
+            case "dedup":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var clusters = FindDuplicateClusters(webDbPath, 48);
+                outp.Add($"48 小时窗口内发现 {clusters.Count} 组跨源重复（阈值 {LoadSettings().DedupThreshold:0.00}）");
+                foreach (var c in clusters.Take(20))
+                    outp.Add($"  [{string.Join(",", c.Members)}] {c.Title}  [{c.Source} · 重合 {c.MinOverlap:0}%]");
+                return (true, outp, "");
+            }
+
+            case "hidden":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var hidden = ListHiddenDedup(webDbPath);
+                outp.Add($"已隐藏 {hidden.Count} 篇");
+                foreach (var h in hidden) outp.Add($"  #{h.Id,-5} {h.Title}  [{h.Source}]  key={h.Key}");
+                return (true, outp, "");
+            }
+
+            case "policy":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var map = LoadSourcePolicy();
+                outp.Add($"源规则 {map.Count} 条");
+                foreach (var kv in map.OrderBy(x => x.Key))
+                    outp.Add($"  feed {kv.Key}: {kv.Value.Action} {(kv.Value.Schedule.Length > 0 ? kv.Value.Schedule : kv.Value.Tag)} {kv.Value.Note}");
+                return (true, outp, "");
+            }
+
+            case "simon":
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                outp.Add($"孟思琳(simon) 挡位 {CurrentSimonLevel()}（默认开启、无法关闭）");
+                outp.Add($"Agent 外部调用门：{(AgentModeOn() ? "开" : "关")}（开：sip --agentok）");
+                foreach (var e in SimonLoadEvents().Take(10))
+                    outp.Add($"  {e.Ts}  {e.Type}  {e.Detail}");
+                return (true, outp, "");
+
+            case "telemetry":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var stats = TelemetryService.Stats();
+                outp.Add($"遥测：{TelemetryService.Consent}（{(TelemetryService.IsEnabled ? "记录中" : "未记录")}）");
+                outp.Add($"事件 {stats.Count} 条" + (stats.First != null ? $" · 最早 {stats.First} · 最近 {stats.Last}" : ""));
+                return (true, outp, "");
+            }
+
+            case "index":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var cfg = LoadConfig(webDbPath);
+                int vectors, chunks, active;
+                using (var conn = OpenDb(webDbPath))
+                {
+                    conn.Open();
+                    vectors = ScalarInt(conn, "SELECT COUNT(*) FROM Vectors");
+                    chunks = ScalarInt(conn, "SELECT COUNT(*) FROM VectorsChunks");
+                    active = ScalarInt(conn, "SELECT COUNT(*) FROM Items WHERE Status = 'active'");
+                }
+                outp.Add($"嵌入模型 {cfg.Embedding.Model}（{cfg.Embedding.Dimensions} 维）@ {cfg.Embedding.ApiEndpoint}");
+                outp.Add($"已配置：{(File.Exists(ConfigPath(webDbPath)) ? "是" : "否（先 sip --init）")}");
+                outp.Add($"向量 {vectors} 条 · 分块 {chunks} 条 · 活跃文章 {active} 篇");
+                return (true, outp, "");
+            }
+
+            case "config":
+            {
+                if (!NoArgs()) return (false, outp, "UNKNOWN_COMMAND");
+                var st = LoadSettings();
+                outp.Add($"data folder : {dataDir}");
+                outp.Add($"db          : {webDbPath}");
+                outp.Add($"web         : {st.WebHost}:{st.WebPort}  密码 {(WebPasswordIsSet() ? "已设" : "未设")}");
+                outp.Add($"ai config   : {ConfigPath(webDbPath)}  ({(File.Exists(ConfigPath(webDbPath)) ? "存在" : "缺失")})");
+                outp.Add($"simon       : level {CurrentSimonLevel()}");
+                outp.Add($"telemetry   : {TelemetryService.Consent}");
+                outp.Add($"insights    : {st.InsightsInterval}");
+                outp.Add($"dedup 阈值  : {st.DedupThreshold}");
+                return (true, outp, "");
+            }
+
+            default:
+                return (false, outp, "UNKNOWN_COMMAND");
+        }
     }
 
 }

@@ -343,3 +343,86 @@ Agent 开关最初是"凭据库为主 + `agent_mode.json` 兜底"，理由是"�
 - **改稿追踪**仍未接后端的 `/versions`、`/diff`（后端已就绪，收益最大的一项，原建议第 8 条）。它同时卡着 P0-1：`ShowDiff` 缺 `FeedId` 条件会跨源误归档，接 Web 之前应先修这个。
 - **CSP 尚未加**（原建议第 1 条）：`script-src 'self'` 要求先把 `index.html` 里的内联 `onclick=` 改成 `data-*` + `addEventListener`。
 - 移动端响应式与 PWA（需要 HTTPS 或 Tailscale）。
+
+---
+
+## 九、2026-09-25 落地与实测（v2.0.0：Web 功能全部补齐）
+
+> 第八节记的是"第一刀"（正文净化、登录页修复、阅读报告接真）。本节记的是第二刀：**把剩下的功能全部接真**，
+> 以及顺手拆掉的两处结构性隐患。至此，§六 那份对齐清单里"Web 该有的"都有了对应入口。
+
+### 9.1 功能对齐：从 mock 到接真
+
+| 视图 | 1.3.0 | 2.0.0 |
+|---|---|---|
+| 改稿追踪 | 假数据（后端 `/versions` `/diff` 早已就绪却没人调） | `GET /api/edits` + `/versions` + `/diff` + `?version=N` 看旧版正文 |
+| 跨源去重 | 假数据，后端无路由 | `/api/dedup`(+`/scan` `/diff` `/hide` `/hide-cluster` `/undo`) |
+| 源规则 | 假数据，后端无路由 | `GET\|POST /api/policies` + `DELETE /api/policies/{id}` |
+| 本地导入 / 电子书 | 假数据，后端无路由 | `/api/imports`(+上传 `/text` `/asset` `/page/{n}` `DELETE`) |
+| 阅读报告 | 已接真，但无开关入口 | 报告 + 定时提醒 + 遥测开关与导出 |
+| 设置 / 关于 | 只有阅读偏好 + 静态文案 | 三个页签：阅读 / 系统（配置总览）/ 治理（挡位·遥测·索引·批量摘要·清理） |
+| 命令面板 | 无 | `POST /api/command`，**只读白名单** |
+
+### 9.2 三条实现纪律
+
+1. **进程内调核心函数，不 shell 出 CLI**。`*Cli` 包装器一律不调用：它们往服务器自己的 stdout 打印进度，还会用
+   `SetExit()` 改**进程级**退出码 —— 那是给一次性命令行进程用的，放进长期运行的 HTTP 服务里会让"某个请求失败"污染整个进程。
+2. **与 CLI 共用同一份事实**。去重调 `FindDuplicateClusters`/`HideAsDedup`，规则调 `LoadSourcePolicy`/`SetFeedSchedule`，
+   导入调新抽出的 `ImportFileCore`（`ImportCli` 也改调它），导出调 `BuildArticleMarkdown`。
+   *同一个数字在终端和网页上不一致，比没有这个功能更糟* —— 这一条在前两节里已经写死，这次只是继续执行。
+3. **写操作先过 `WebWriteAllowed`**（与 CLI 同一挡位语义）；读不受影响。
+
+### 9.3 这次顺手拆掉的两处结构性隐患
+
+**① `ShowDiff` 缺 `FeedId` → 跨源误归档（P0）**
+
+Guid 是文章级标识，**不同源完全可能转载同一篇**（Guid 相同）。原先：
+
+```sql
+SELECT Id, Version, Title, Content FROM Items WHERE Guid = @guid AND Status = 'active'
+UPDATE Items SET Status='archived', ArchivedAt=@now WHERE Guid=@guid AND Status='active'
+```
+
+A 源作者改稿时，这两条会把 **B 源那份 active 副本一起归档掉** —— B 源看起来就像文章凭空消失。
+修法是把归档与版本链都按 `(Guid, FeedId)` 隔离，并连带修 `--versions` / `--diff` / TUI 版本历史 / Web 的 versions+diff：
+版本号在两个源里会重复，只按 Guid 取会让"看 v1→v2"变成**跨源比较**（拿 B 源的 v1 去比 A 源的 v2）。
+
+回归用例：`Versions_AreScopedToOwnFeed`、`Edits_ListsSameFeedRevisions_ButNotCrossFeedReposts`。
+
+**② CSP + 外置脚本（原建议第 1 条，一直卡着没做）**
+
+`script-src 'self'` 的前提是"页面里没有内联脚本、也没有 `onclick=`"，所以先把前端拆成
+`index.html`（只有标记，103 KB → 25 KB）+ `app.js`（98 KB 全部逻辑，`data-act` + 一个委托监听器），
+登录页同理拆出 `login.js`。收益是双份的：**「正文里混进 `<script>`」这条路径在浏览器层面也死了** ——
+净化器哪天漏掉一个标签，浏览器也不会执行它。
+
+策略（写在 `HandleWebContext` 里，逐条有注释）：
+
+```
+default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
+img-src 'self' data: http: https:; media-src http: https:; font-src 'self';
+connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'
+```
+
+### 9.4 几个刻意的"不做"（写在这里免得以后被当成漏做）
+
+- **网页不能降挡位**：`POST /api/simon/level` 只接受**升档**（收紧任意通道放行）；降档返回
+  `SIMON_LOOSEN_REQUIRES_TERMINAL` + 去终端的命令。理由是设计里那条"人工通道 = 真实终端 + Web 口令"：
+  浏览器不是那个通道，允许网页降档等于任何拿到会话 cookie 的程序都能把保护关掉。
+- **网页不能改配置 / 设口令 / 输入 AI Key**：这些仍然只在终端（`sip webpass`、`sip --init`、`sip aikey`、手改 `sip_settings.json`）。
+  `/api/config` 是**只读**的，只报"存没存"。
+- **命令面板不是通用 CLI 执行器**：只认只读白名单，而且**参数个数也管** —— `simon level 1`、`telemetry enable`
+  这类"拿只读命令名当挡箭牌、后面跟写意图"的写法整条拒掉，而不是丢掉多余参数后照样返回一份只读结果。
+- **阅读位置不过挡位门**：`/api/reading-progress` 写的是"读到哪儿了"，属于界面状态，不是对库的改动。挡位 2 的本意是拦住改库的动作。
+- **service worker 什么也不缓存**：离线显示的旧库比没有更糟。
+
+### 9.5 实测
+
+- 静态资源：`/app.js`、`/login.js`、`/sw.js`、`/manifest.webmanifest`、`/icon.svg`、`/languages/<code>.json` 全部 200；
+  `index.html` 里 `<script` 只出现一次（`src="/app.js"`），`onclick=` / `oninput=` 为 0。
+- 多语言：`/languages/zh-CN.json` 从"永远 404、回落到 20 个键"变成完整词典（有回归用例钉着）。
+- 新增黑盒用例 **25 条**（`tests/Sip.Tests/WebFeaturesTests.cs`）：查 CSP 头与无内联脚本、静态资源、语言文件与目录穿越、
+  改稿列表与版本隔离、旧版正文、导出附件、去重扫描/对比/隐藏/撤销、规则增删与非法频率、更新计划、导入上传/阅读/删除与越权资产、
+  配置只读、遥测开关与导出、索引前置拒绝、批量摘要前置拒绝、命令面板白名单（含"带多余参数的写意图"）、阅读位置往返；
+  外加 `WebSimonTests` 一条（升档放行 + 降档拒绝 + 升档后写被拦、读照常）。
+

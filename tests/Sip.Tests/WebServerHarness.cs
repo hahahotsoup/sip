@@ -27,6 +27,10 @@ public class SipWebServer : IDisposable
     private Process? _proc;
     private int _port;
 
+    /// <summary>本实例的隔离数据目录 / 库（供用例直接塞 fixture 数据、直接断言库状态）。
+    /// 服务每次请求都重开库，所以**起服务之后**再插入的行同样能被接口看到。</summary>
+    public SipInstance Instance => _sip;
+
     public bool PasswordMode { get; }
     public string Password { get; }
     public string BaseUrl => $"http://127.0.0.1:{_port}";

@@ -1,0 +1,12 @@
+{
+  "name": "sip · 本地优先的个人信息库",
+  "short_name": "sip",
+  "description": "本地优先的个人信息库：订阅、阅读、改稿追踪、全文与语义检索，数据全在你自己电脑上。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F7F3EB",
+  "theme_color": "#A16207",
+  "lang": "zh-CN",
+  "icons": [ { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" } ]
+}

@@ -586,8 +586,9 @@ static async Task<int> RunTui(string dbPath, bool appReady = false, bool showSta
             {
                 conn.Open();
                 var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt FROM Items WHERE Guid = @g ORDER BY Version DESC";
+                cmd.CommandText = "SELECT Id, Version, Status, ArchivedAt FROM Items WHERE Guid = @g AND FeedId = @f ORDER BY Version DESC";
                 cmd.Parameters.AddWithValue("@g", n.Guid);
+                cmd.Parameters.AddWithValue("@f", n.FeedId);
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
                     versions.Add((r.GetInt64(0), r.GetInt32(1), r.GetString(2), r.IsDBNull(3) ? "" : r.GetString(3)));

@@ -122,7 +122,12 @@ static bool SimonIsReadOnly(string cmd, string sub)
     => cmd is "-l" or "--list" or "--show" or "--content" or "--versions" or "--history"
           or "--diff" or "--grep" or "--search" or "--today" or "--feed-info" or "--export-opml"
           or "--help" or "-h" or "--version" or "--insights" or "--insights-interval" or "simon"
+          // 界面入口不是"操作"：`sip tui` / `sip pic` 打开的是**真人终端界面**本身，
+          // 而挡位 3 的提示语就是"只允许通过 TUI 使用" —— 把自己的入口拦掉就等于死胡同。
+          // （pic 在分发里排在挡位检查之前，这里列出来是为了语义完整，不是必需。）
+          or "tui" or "--tui" or "pic"
        || (cmd == "telemetry" && sub is "status" or "show")
+       || (cmd == "db" && sub is "" or "status" or "show")   // 主库查询是只读；set/merge 是写（挡位 2 起拦）
        || (cmd == "--dedup" && sub is "list" or "scan")
        || (cmd == "--policy" && sub == "list");
 

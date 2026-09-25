@@ -5,7 +5,129 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-09-25
+
+> **Web 功能全部补齐。** 1.3.0 时内置 Web 只是"能读"：今日哈汤、订阅源、收藏、搜索、阅读报告接了真接口，
+> 改稿追踪 / 跨源去重 / 源规则 / 本地导入 / 电子书 / 治理面要么是假数据、要么干脆没有入口。
+> 这一版把这些全部接真，**并且顺手拆掉了那条假数据与 XSS 的隐患路径**（CSP + 外置脚本）。
+
+### Added
+
+- **改稿追踪接真**（`web/app.js` + `Web.cs`）。后端 `/api/articles/{id}/versions` 与 `/diff` 从 1.3.0 起就就绪，界面却一直读假数据；现在列表 + 逐行差异 + 历史版本正文全部来自你的库。
+  - 新增 `GET /api/edits`：列出"有历史版本的文章"（按 (FeedId, Guid) 分组，`COUNT(*) > 1`）。
+  - `GET /api/articles/{id}?version=N`：读**历史版本**的正文（TUI 里按 V 选一版的等价物）。返回里带 `version` / `versionCount` / `hasHistory` / `status`，界面据此决定要不要显示"改稿历史"。
+  - `GET /api/articles/{id}/diff?from=vA&to=vB`：改成**明确比较指定的两版**，并回 `added` / `removed` / `titleChanged`。原先的实现（1.3.0）在"两个源转载同一篇"时会拿 B 源的 v1 去比 A 源的 v2 —— 因为版本号在两个源里会重复。
+- **跨源去重接真**（`GET /api/dedup`、`POST /api/dedup/scan|hide|hide-cluster|undo`、`GET /api/dedup/diff`）。复用 CLI 的 `FindDuplicateClusters` / `HideAsDedup` / `UndoDedup` / `ListHiddenDedup`，不另写一套算法。
+  - 对比用**段落级** diff（`NormalizeParagraphs` + DiffPlex），显示的就是算法实际在比的东西，而不是另一套"看起来像"的文本处理。
+  - 隐藏**可撤销**（写 `dedup.json` + `Items.Status='dedup'`），界面上「已隐藏」列表每条都有撤销按钮。删除是不可逆的，不做。
+  - 扫描加并发护栏：连点几下就是几倍的正文载入与段落比对（同"同步"按钮的道理）。
+- **源规则接真**（`GET|POST /api/policies`、`DELETE /api/policies/{feedId}`）。`source_policy.json` 的五个动作（降频 / 归档 / 保留 / 标签 / 退订备注）都能在网页里增删。
+  - 与 CLI **同一个校验器**：`lower_frequency` 走同一个 `TryParseSchedule`，网页收不下的表达式终端也读不懂，不如当场拒。
+  - 「归档」直接调 CLI/TUI 用的 `AddTimestampForRealId`（给源标题加时间戳），「降频」调 `SetFeedSchedule` —— 不是"网页自己写一遍"。
+  - `createdBy` 永远是 `user`：**AI 永不自动写规则**，网页也不破例。
+- **本地导入 / 电子书接真**（`GET|POST /api/imports`、`GET /api/imports/{id}`、`/text`、`/asset`、`/page/{n}`、`DELETE /api/imports/{id}`）。
+  - 上传走"字节 → 临时文件 → **CLI 同一条 `ImportFileCore`**"（`ImportCli` 也改成调它）。文件被**复制进** `readwithhotsoup/imported/`，原文件你随时可以删。
+  - EPUB/DOCX/MOBI 抽出的图是 `file://` 绝对路径，而净化器只放行绝对 http(s) —— 原先这些图会被整个丢掉。现在服务端把 `<img src="file://…">` 改写成 `/api/imports/{id}/asset?path=…`，**该接口把路径围在 `imported/` 之内**（越界一律 403）。
+  - PDF：`ReadPdfFile` 从来不解析文本（只写一句占位），所以网页也不假装能读 —— 改为按页栅格化（复用 `RenderPdfPages`，150 DPI，渲染过的页命中磁盘缓存），`/api/imports/{id}/page/{n}` 直接给 PNG。`?page=` 越界返回 404 而不是空白图。
+  - 删除复用新抽出的 `ImportItemDelete`（CLI 的 `--import-rm` 也改调它）：删库行 + 删落地文件。
+- **治理面接真**：
+  - `GET /api/simon` + `POST /api/simon/level`：**升档（收紧）任意通道放行**，降档返回 `SIMON_LOOSEN_REQUIRES_TERMINAL` + 去终端的命令。
+  - `GET|POST /api/telemetry` + `GET /api/telemetry/export`：遥测开关与导出（导出是只读，不需要挡位放行）。
+  - `GET /api/config`：数据目录 / 绑定 / 会话范围 / AI 配置 / 阈值 / 计数 / 挡位 / 遥测，一次看全。**只读** —— 改配置的路仍然只在终端。
+  - `POST /api/insights/interval`：报告定时提醒（`off` / `7d` / `30d`），与 CLI 同一个解析器。
+  - `POST /api/summaries`：批量摘要（`sip --summary-all` 的等价物，但**不会卡在 stdin 上** —— CLI 那条会问序号与确认，在服务器里读到的是 EOF）。
+  - `POST /api/purge-fulltext`：清全文缓存（单篇或全部）。
+  - `GET|POST /api/index`：向量索引状态与补索引 / 重建索引。没配 AI 时**先拒**（`AI_NOT_CONFIGURED` + `sip --init`），而不是跑一遍注定超时的循环。
+- **`POST /api/feeds/{id}/schedule`**：更新计划（`sip --schedule` 的等价物，共用 `SetFeedSchedule`）。
+- **`GET|POST /api/reading-progress`**：阅读位置记忆（与 TUI 共用 `reading_progress.json`）。刻意**不过**挡位门 —— 这是界面状态（读到哪儿了），不是对库的改动。
+- **`GET /api/imports` 之外的导出**：`GET /api/articles/{id}/export` 直接下载 Markdown（复用 CLI 的 `BuildArticleMarkdown`），文件名带 RFC 5987 的 `filename*`，中文标题不再乱码或把响应头弄坏。
+- **命令面板**（`Ctrl/Cmd+K` 或顶栏 ⌘，`POST /api/command`）：等价于 TUI 命令栏的"我知道命令，但懒得点"，但**只认只读白名单**（`status / list / today / edits / dedup / hidden / policy / simon / telemetry / index / config / grep <q> / show <id> / versions <id>`）。
+  - 刻意**不做通用 CLI 执行器**：网页里开一条任意命令通道，等于把 CLI 的全部写能力塞进浏览器。
+  - **参数个数也管**：`simon level 1`、`telemetry enable` 这类"拿只读命令名当挡箭牌、后面跟写意图"的写法整条拒掉，而不是丢掉多余参数后照样返回一份只读结果（那样用户会以为写命令成功了）。
+- **`/api/today?digest=1`**：今日变化摘要（新增 / 被改过 / 可能同文）。默认**不算** —— 它要跑一次 48 小时窗口的跨源重复检测（上万篇正文），首屏不该为它等几秒。
+- **静态资源路由**（`Web.cs` 的 `TryServeStatic`）：`/app.js`、`/login.js`、`/sw.js`、`/manifest.webmanifest`、`/icon.svg`，以及**`/languages/<code>.json`**。
+  - 最后一条修的是"多语言形同虚设"：前端一直请求 `./languages/xx.json`，而服务端此前**没有任何静态路由** → 永远 404 → 永远回落到 20 个键的内置表。现在三种语言都是完整词典。
+  - 文件名只接受 `字母/数字/连接符`，服务端**不做路径拼接** —— 目录穿越没有落点（有回归用例）。
+- **PWA 可安装**：`manifest.webmanifest` + 一个**刻意什么都不缓存**的 `sw.js`。离线显示的旧库比没有更糟，所以 service worker 只做同源透传。
+- **移动端**：侧栏抽屉、按钮/正文尺寸、浮动阅读条在窄屏下重排；`viewport-fit=cover` + `theme-color`。
+- **原文件直出 + 临时链接**（`GET /api/imports/{id}/file`、`POST /api/imports/{id}/link`）。
+  - 起因：PDF 在网页里只能**逐页栅格化**看（`ReadPdfFile` 从不解析文本），于是不能选字、不能搜索、读不出正文。与其硬做一套自己的 PDF 阅读器，不如把**原文件原样**递给浏览器自带的那个 —— `Content-Disposition: inline`，并支持**单段 Range**（浏览器的 PDF 阅读器会按需拉区间，几十 MB 的扫描件不必整份下完才能翻第一页）。
+  - 「临时链接」解决的是**会话**问题：网页的钥匙是"一个浏览器一把、活到进程结束"，所以页面里点开没问题，但把链接贴到别的标签页 / 别的 PDF 程序 / 手机上会 401。令牌是**进程内、只对一份文件、10 分钟过期**的（`webFileTickets`），比会话 cookie 窄得多：只读、只一份、会过期、重启即失效。接口同时认令牌与会话，所以"登录后在页面里直接打开"和"贴到别处打开"是同一个地址。
+  - 校验：令牌必须**同时**对得上文件与时效 —— 拿 A 的令牌去读 B 也会被拒。
+  - 入口：PDF 阅读页与「本地导入」列表都有「用浏览器打开（原生阅读器）」与「临时链接」。
+
+### Security
+
+- **上 CSP，并把内联脚本整块拆出去**（`Web.cs` 的 `HandleWebContext` + `web/app.js` + `web/login.js`）。
+  - `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src http: https:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`。
+  - 为什么现在才上：`script-src 'self'` 要求页面里**没有内联脚本、也没有 `onclick=`**，所以前端先拆成 `index.html`（只有标记）+ `app.js`（全部逻辑，用 `data-act` + 一个委托监听器）。
+  - 收益是双份的：**「订阅源正文里混进 `<script>`」这条路径在浏览器层面也死了** —— 净化器哪天漏掉一个标签，浏览器也不会执行它。CSP 是第二道防线，第一道仍然是服务端净化。
+  - 回归用例钉着：`Content-Security-Policy` 头必须含 `script-src 'self'` / `frame-ancestors 'none'`，且 `index.html` 里不许再出现 `<script>` 或 `onclick=`。
+- **导入资产接口的路径围栏**：`/api/imports/{id}/asset?path=…` 只服务 `ImportedDir()` 之内的文件，越界 403。没有这道围栏，正文里一个 `src` 就能让浏览器读走机器上任意文件。
+- **命令面板的只读白名单**：见上，连同"参数个数"一起收。
+
+### Fixed
+
+- **`ShowDiff` 缺 `FeedId` 条件 → 跨源误归档**（`sipcore.cs`）。Guid 是文章级标识，不同源完全可能转载同一篇（Guid 相同）；原先 `WHERE Guid = @guid AND Status='active'` 会在 A 源改稿时**顺手把 B 源那份 active 副本一起归档**，B 源看起来就像文章凭空消失。归档与版本链现在都按 `(Guid, FeedId)` 隔离。
+  - 连带修 `--versions` / `--diff` / TUI 的版本历史 / `Web.cs` 的 versions+diff：版本号在两个源里会重复，只按 Guid 取会让"看 v1→v2"变成**跨源比较**。
+  - 回归用例：`Versions_AreScopedToOwnFeed`（跨源转载的同一 Guid 只该有 1 条历史）、`Edits_ListsSameFeedRevisions_ButNotCrossFeedReposits`。
+- **登录页的外置脚本**（`web/login.js`）：登录页不再是内联 `<script>`，同样受 `script-src 'self'` 约束。
+- **电子书正文没有走分栏翻页**（`web/app.js`）。文本型电子书（epub/docx/mobi/txt/md）的正文以前写死 `data-cols="1"` 且**没有 `#pager` 容器** —— 右下角的分栏按钮按了没反应、多栏永远只有一栏，用户看到的就是"分栏模式没有按页去读"。现在它与文章正文**共用同一套 `.pager` + `.prose`**：跟随全局栏数、多栏时 ← → / 滚轮翻页、按窗口尺寸重新分页、图片加载完重排、阅读位置一并记忆（PDF 记页码、文本记节号，同一个 itemId 不会两者兼有）。
+  - 顺带修：离开可翻页的视图时彻底关掉分页状态。否则 `pager.on` 残留为 `true`，新页面的滚轮事件还会被它接管（表现为"这一页滚不动"）。
+- **⚠️ 上面那条的第一版让"读书"变成了"页面无响应"**（同一次改动内的自纠）。原因不是分栏错了，而是**分页的单位错了**：分栏要求浏览器一次性把内容排版出来再读 `scrollWidth`/高度，代价与文档长度成正比；把**整本书**（几十万字）塞进一个 `.prose` 里做这件事，主线程直接卡死。
+  - 修法是把超长正文切成"节"（`splitBookSections` / `sectionsFromNodes`：按 h1~h3 或每 ~12000 字切一刀），**只对当前这一节分页**，并给节点加了上一节/下一节与跳节按钮 —— 排版量有界、翻页灵敏，读起来也更像一本书。
+  - 另加三道防护：分页高度上限（`PAGER_MAX_HEIGHT`，超了退回滚动）、页数上限、以及把"图片一张张加载完各自触发一次全量重排"合并到下一帧（`pagerMeasureSoon`）。正文与切分结果**按书缓存**，重渲染不再重复拉取与解析整本。
+  - 回归：`tools/webui-smoke.mjs` 直接验证"32000 字会被切成 ≥3 节、最长一节 ≤14000 字、内容不丢"，并在电子书视图上断言出现「共 N 节」与节点按钮 —— 把切分去掉，冒烟立刻红。
+- **导入的文件点进去一律落到「阅读器」，并且阅读器里有图**（`Web.cs` + `web/app.js`）。
+  - `GET /api/articles/{id}` 现在会回 `imported`，并**带上 importItemId 净化**：导入项的图片是本机 `file://` 路径，不改写成资产接口就会被净化器整个丢掉 —— 用户看到的就是"电子书里没有图"。
+  - 界面据 `imported` 直接转给阅读器：文章视图对整本书**分不了页**（只能退回滚动，于是"左栏读到底、右栏还在下面"），而阅读器按节分页、图片路径也是改写好的。同一个东西不该有两套体验。
+  - `openEbook` 现在 `await render()`，调用方等这一屏真的画完 —— 否则会先闪一下"加载正文…"再跳走。
+- **分不了页就不再装作分栏**（`pagerFallbackToSingle`）：多栏 + 纵向滚动读起来正是"左栏读到底，右栏还在下面"，比单栏更糟。现在一旦触发长度/页数上限，就把**当前这一篇**退回单栏（不动用户的全局偏好）并提示原因。
+- **版面比例：按可用宽度降栏、图片不得高过一页、节号收成一行**（`web/index.html` + `web/app.js`）。用户反馈"显示比例很奇怪"，三处原因叠在一起：
+  - **栏太窄**：阅读区 820px 里塞 3 栏，每栏只剩 266px —— 21px 的中文一行十来个字，看着就是"被拉伸的手机版"。现在 `minColumnWidth()` 按**字号**算一栏至少要多宽（约 18 字/行，下限 300px），`effectiveCols()` 再按实际可用宽度决定真排几栏：装不下就降栏，**偏好本身不改**（窗口拉宽、栏宽拉大、字号调小都会自动恢复），用户手动点栏数时才会提示一句为什么。
+  - **图比页还高**：封面/整页插图按原始尺寸铺满整栏，在分栏模式里会**溢出到页外**（翻页翻不到、滚也滚不到）。现在正文图统一 `max-height`：分页时按页高（`--page-h`，由 `pagerMeasure` 写进 CSS 变量）再收一层，单栏滚动时最多占一屏；并且居中 + 留白，不贴着正文。
+  - **按钮墙**：43 个节号按钮折成三行，喧宾夺主。现在是一行可横向滚动，节标题另起一行（"第 N / M 节 · 标题"）。
+  - 首帧就用**有效栏数**渲染（而不是先排 3 栏再由 `setCols` 纠正），免得闪一下。
+  - 回归：冒烟桩里 `--cols` 报成 3、阅读区 800px，断言渲染结果必须是 `data-cols="2"` —— 把 `effectiveCols` 改成恒等函数，冒烟立刻红。
+- **滚轮不再翻页**（`web/app.js`）。分栏模式下滚轮把"往下滚一点看看"变成"跳一整页"，误触太容易；翻页交给 ← → 键与右下角 ‹ › 按钮，滚轮恢复成最朴素的滚动。
+- **应用布局宽度与阅读宽度分开**（`web/index.html`）。`--content-w`（右下角那条「宽」滑块）本是为读长文准备的，可以拉到 2400px 铺满窗口；但它此前作用在**所有**视图上，于是把滑块拉宽之后，「今日哈汤」那三张统计卡被抻成三条横幅——用户反馈"正常 UI 的显示宽度都怪怪的"。现在 `.wrap`（列表/仪表盘）走固定的 1180px，`.wrap.narrow`（文章/电子书）才跟随阅读宽度。
+- **全屏阅读（沉浸）模式**：顶栏 ⛶ / 右下角 ⛶ / 快捷键 `F` 进入，`Esc` 退出。侧栏、顶栏、进度条一起让位，正文吃满窗口（上限 1500px 防止行长失控）。实现只是 `body` 上的一个 class —— **不重渲染**，切换是瞬时的；离开阅读类视图会自动退出（否则回到列表就没有导航了）。
+  - 刻意不做成浏览器 F11：那是整个窗口的事，这里要的是"应用内少点东西"。
+- **电子书最多两栏**（`effectiveCols` 里按视图封顶；手机上 CSS 仍会压成一栏），并且电子书视图里隐藏「3 栏」按钮——给你一个按了没用的按钮，比不给更糟。
+- **阅读页改成「细顶栏 + 右侧抽屉」**（`web/index.html` + `web/app.js`）。起因是用户反馈"上层挤压得太狠"：文章/电子书的头部原本是一摞（书库条 / 类型 / 书名 / 说明 / 节号列表 / 节标题），一行行往下挤，正文只剩一半高。
+  - 现在正文上面只有**一行**：`⋯`（展开/收起）+ 标题 + 位置（质量/版本/第 N 节）+ 收藏与原文这两个最常用的图标。
+  - 动作、元信息、摘要、来源、**目录**、以及 PDF 的「用浏览器打开 / 临时链接」全部挪进**右侧抽屉**：点开也不占正文宽度（抽屉浮在上面，只盖住它自己那块）。默认收起，展开状态记在偏好里（`metaOpen`）。
+  - `Esc` 先关抽屉、再退全屏；点遮罩也关；主动点「改稿历史」时抽屉自动打开（那张长表格摆在正文上方同样是挤压）。
+  - 回归：冒烟测试断言阅读页必须有 `.rd-bar` + `meta-toggle`，**动作按钮不许再出现在正文上方**，且抽屉默认收起、能开能关 —— 把动作搬回顶栏，冒烟立刻红。
+- **顶栏更细 + 去掉底部节按钮 + 翻到头自动接下一节**（`web/index.html` + `web/app.js`）。
+  - `.rd-bar` 压到 30px 高（图标 26px、标题 13.5px）——它只是"我在读什么、读到哪"的一条提示。
+  - 底部那排「← 上一节 / 下一节 →」拿掉（目录已经在抽屉里），改成**翻页翻到头自然接下一节**：最后一页时右下角的 `›` 直接变成「下一节 ›」，往回翻到第一页则变成「‹ 上一节」并落在上一节的**最后一页**（往前读才连贯）。
+- **调字号/行距/栏宽/栏数不再被打回第一页**（`repaginateKeepingPlace` / `pagerRestoreTo`）。重排后**页码没有可比性**（新字号下的第 3 页完全是别的内容），有可比性的是**内容**：先抓住当前页开头的那一段，重排后回到包含它的那一页；抓不到段落时退回"按比例"。RSS 文章与电子书共用这套逻辑；窗口缩放同理。
+  - 顺带把"读一半点 ♥ / 生成摘要后跳回第一页"也一起修了：重渲染会换掉整棵 DOM，所以用**子元素序号 + 比例**把位置接力过去。
+  - 回归：冒烟测试在阅读页里跑一遍 `bumpFont / setLeading / setContentWidth / setCols`，任何异常或正文容器丢失都会红。
+- **单栏也能翻页 + 记住上次读到哪**（`web/app.js`）。
+  - **单栏纵向翻页**：以前只有多栏才分页（单栏退回滚动）。现在单栏也按**段落边界**分页（`pager.offsets`，每页从某一段开始）——刻意不按像素硬切，那会把一行字切成两半（上半页看得见、下半页看不见），比滚动更难受。多栏仍是横向翻页；`setCols` 在 1↔2 栏之间切换时靠"锚点段落"把位置带过去。
+  - **翻页/滚动可切换**（右下角 `⇄`，偏好记在本机）：有人喜欢"一屏一屏"，有人习惯滚。切换时位置也带过去（翻页→滚动滚到那一段，滚动→翻页翻到含那一段的那一页）。另外加了两道保险：内容超过 5000 页或单页高度超限时自动退回滚动。
+  - **阅读状态**（`sip-web-read-state-v1`，按 itemId 存在本机）：翻页模式**没有滚动**，而服务端那份 `reading_progress.json` 记的是滚动像素（TUI 也用）——翻页时它恒为 0，等于没记。所以页码/节号/滚动位置单独记一份，**下次打开自动回到原处**（同一条目按字段合并更新，只留最近 500 篇）。文章与电子书都适用。
+  - 回归：冒烟测试钉住"存进去读得出来、局部更新不冲掉别的字段、没读过的不该有记录、非阅读视图调用不抛异常、翻页/滚动切换不抛异常"——把局部合并改成整体覆盖，冒烟立刻红。
+- **删掉 `web/index.html.bak`**（28 KB 的多余备份，`git add web/` 会一并提交）与 `index.html` 里那个**永不显示的登录壳**（`#login` / `#loginForm` / `#skipLogin` —— 真实登录在 `login.html`，留着只让人分不清真假），以及两个死面板（从未有入口的搜索面板、纯模拟的 Web 密码面板）。
+
+### Changed
+
+- **不带参数启动 = 内置 Web（双击就能用）；TUI 改为显式命令 `sip tui`**（`sipcore.cs` 入口 + `Web.cs`）。
+  - 起因很朴素：**双击 exe 的人要的是"能用"**。与其用一条弃用横幅去劝他改用 Web，不如让默认值就等于我们推荐的那个界面。旧行为是「无参 → 问一句『TUI 要弃用了，你确定吗』→ 进 TUI」：劝住了他也没更好走，没劝住他还是在用要弃用的那个。
+  - `StartWebFromCli`：逃生口 + 首次向导 + 起服务，**无参与 `--start` 共用同一条路径**（两处各写一遍，迟早只剩一处被改到）。
+  - **自动打开浏览器**，且直接开到**那条带引导令牌的链接**上。无密码模式尤其需要 —— 令牌只印在终端里，不自动开浏览器的话，双击的人还得自己复制粘贴一次。关闭方式：`--no-open`，或 `sip_settings.json` 的 `WebOpenBrowser: false`（新增字段，默认 `true`）。只在**真终端**下做：测试/脚本环境 stdout 被重定向，不会弹浏览器。
+  - **非交互（管道/脚本/无控制台）下不带参数启动不起服务**：打印帮助、退出码 1。否则"无参启动一个前台阻塞的服务器"会把脚本挂死，而终端里那条带令牌的链接也没人看得见。
+  - `sip tui`（别名 `--tui`）：显式进终端界面，**不再问"你确定吗"** —— 敲出来本身就是答案。它进了挡位 3 的只读白名单：挡位 3 的提示语是"只允许通过 TUI 使用"，把自己的入口拦掉就等于死胡同。（Agent 门照样拦程序调用 —— 那条轴管的是调用者，不是命令。）
+  - 横幅加了 `Terminal UI: sip tui` 一行；`--help` 写明"无参数 = Web、`--no-open` 关自动开浏览器"；README / 用户快速手册 / 业务逻辑梳理同步。
+- **`ImportCli` / `ImportRmCli` 拆出共用核心**（`ImportFileCore` / `ImportItemDelete`）：CLI 那层负责打印，Web 那层要结构化结果，但"复制文件、抽正文、算页数、写 Items"与"删库行 + 删落地文件"各只有一份实现。终端导入和网页导入不会对同一个文件给出不同结果。
+- **`index.html` 尺寸**：103 KB → 25 KB（逻辑搬到 98 KB 的 `app.js`）。改前端仍然要重新构建（都内嵌进 exe）。
+- **测试夹具**（`tests/Sip.Tests/WebServerHarness.cs`）：`SipWebServer` 暴露 `Instance`，用例可以直接塞 fixture 数据并断言库状态；新增 `WebFeaturesTests`（30 条）与 `WebSimonTests`（挡位这一轴单独一个实例 —— 升档会改变该进程的写策略，而降档是设计上做不到的）。
+
+---
+
+> 下面这一段是 1.3.0 之后、本次 Web 补齐**之前**就已积累但一直未发布的改动（内置 Web 界面 + 会话改为进程内一次性密钥 + Agent 门 + 主数据库等）。它们随 2.0.0 一起发布，故并入本节。
 
 ### Security
 
@@ -44,6 +166,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **主数据库：跨位置「哪一份才是真的」+ 提示 + 更改/合并**（`PrimaryDb.cs`、`sipcore.cs`）。sip 是绿色的——exe 拷到哪儿都能跑、数据目录（`readwithhotsoup/`）跟着 exe 走，于是同一个用户很容易攒出好几份库（桌面一份、U 盘一份、发布目录一份），谁也说不清哪份是"真的"。
+  - **第一次运行即认领**：把当前数据目录写进**系统凭据库**（键名 `primary_db`）。这条记录**刻意不带 `SimonScopeHash()` 作用域** —— 挡位/Agent 门/AI Key 都是"每个副本互不影响"，而这里要的恰恰相反：跟着用户走、跨所有副本可见。测试隔离沿用同一套手法（`SIP_SIMON_KEY_NAME` 换命名空间），并已纳入 `TestHost` 的凭据清理
+  - **在别的位置打开就提示**：主库在哪、当前打开的是哪一份、怎么改怎么合。提示走 **stderr** —— `--json` 的 stdout 必须干净（脚本要解析），这是给人看的诊断
+  - **只提示，不当门**：在别处照样能用那份库（绿色程序最常见的用法就是"拷一份出去试"）；真正的门仍是挡位与 Agent 门
+  - 命令：`sip db status | set [<目录>|--here] | merge [<目录>] [--yes]`（`status` 只读；`set`/`merge` 是写，挡位 2 起拦）
+  - **合并的三条规矩**：① 只读来源、只写目标（两个连接，不踩 `ATTACH` 跨库事务的语义坑）② 订阅源按 `FeedUrl` 去重、文章按 `Guid`（无 Guid 退 `Link`，再无退 标题+发布时间）③ **幂等** —— 同一份合两次，第二次全是"已存在跳过"
+  - `article_signals.json`（收藏）与 `reading_progress.json` 按**新编号**映射搬过去（目标已有的以目标为准）；向量索引、源规则、去重规则、健康状态、导入资产、全文缓存**明确不合并**，并在输出里逐项说明该用什么补（如主库重跑 `sip --index`）
+  - 回归用例 `PrimaryDbTests`（9 条；靠**两个实例共享同一凭据命名空间**来模拟"跨位置"）：第一次运行认领、同目录不再唠叨、异地提示含主库路径与指令、`--json` 的 stdout 保持纯 JSON、`set --here` 改指与改回、目录不存在被拒、非交互缺 `--yes` 被拒、自己合自己被拒、合并计数 + 侧挂文件按新 id 落地 + 再合一次幂等
 - **Web 也能导出 OPML**（`GET /api/feeds/opml`，入口在「添加订阅源」面板里、与导入同一处）：`Content-Disposition: attachment; filename="sip-feeds.opml"`，前端一个 `<a download>` 直接指向它。生成逻辑与 CLI **共用 `BuildOpml`**（不写第二套，否则两边导出的文件迟早有细微差别）。实测：200 + 正确响应头 + 21 个源全部在内
 - **`--start` 横幅提醒遥测未开启**：阅读报告全部来自本机遥测、而遥测默认关闭，不提醒的话用户打开网页只看到"没有数据"却不知道该做什么。终端是唯一能给出可执行下一步的地方。实测输出：`Telemetry : off · the reading report will have no data (turn on: sip telemetry enable)`
 

@@ -14,8 +14,9 @@ namespace Sip.Tests;
 public sealed class SipInstance : IDisposable
 {
     // 每实例唯一凭据 key 名:子进程经 ProcessStartInfo.Environment 继承,
-    // 测试之间绝不共享系统凭据(挡位/密钥完全隔离,不污染彼此与真实用户)
-    public string KeyName { get; } = "simon_db_key_test_" + Guid.NewGuid().ToString("N")[..10];
+    // 测试之间绝不共享系统凭据(挡位/密钥完全隔离,不污染彼此与真实用户)。
+    // 需要两个实例共享同一命名空间时(「主数据库」要跨位置比较,见 PrimaryDbTests)用 keyName 显式传入。
+    public string KeyName { get; }
 
     public string Root { get; }
     public string DataDir => Path.Combine(Root, "readwithhotsoup");
@@ -24,8 +25,9 @@ public sealed class SipInstance : IDisposable
     private static readonly object TemplateLock = new();
     private static string? _template;
 
-    public SipInstance(bool openAgentGate = true)
+    public SipInstance(bool openAgentGate = true, string? keyName = null)
     {
+        KeyName = string.IsNullOrEmpty(keyName) ? "simon_db_key_test_" + Guid.NewGuid().ToString("N")[..10] : keyName;
         Root = Path.Combine(TempRoot(), "sip-" + Guid.NewGuid().ToString("N")[..8]);
         CopyDirectory(EnsureTemplate(), Root);
         if (openAgentGate) OpenAgentGate();
@@ -152,8 +154,8 @@ public sealed class SipInstance : IDisposable
     /// 名字隔离不够，必须清理。</summary>
     private void DeleteTestCredentials()
     {
-        // 这三条就是本实例可能写进凭据库的全部条目:SimonDbKey(旧)、SimonLevelKey、Agent 门开关
-        foreach (var key in new[] { KeyName, KeyName + "_level", "agent_ok_" + KeyName })
+        // 这就是本实例可能写进凭据库的全部条目:SimonDbKey(旧)、SimonLevelKey、Agent 门开关、主数据库认领
+        foreach (var key in new[] { KeyName, KeyName + "_level", "agent_ok_" + KeyName, "primary_db_" + KeyName })
         {
             // "删一遍就算"不够：cmdkey 失败在这里是被吞掉的，而后果非常重 ——
             // 历史教训是**泄漏**（746 条测试垃圾把凭据库顶满，挡位/密钥/Web 会话集体静默失效）。

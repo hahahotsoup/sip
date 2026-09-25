@@ -40,7 +40,7 @@ Single-file builds for Windows / macOS / Linux. No sign-up, no cloud — everyth
 
 Once it's open, just feel your way around.
 
-> 🌐 **Don't want to touch the terminal? Try sip-web** — one command starts a zero-dependency **local web UI**: subscribe, read, and search right in your browser, no command line needed. [Take a look →](https://github.com/hahahotsoup/sip-webapiextra)
+> 🌐 **Don't want to touch the terminal?** The built-in web UI is now **feature-complete**: `sip --start` serves a local web app where you can subscribe, read, search, track author edits, dedupe across sources, set source policies, import local files and ebooks, and see your reading report. (The separate `sip-webapiextra` still works, but is no longer required.)
 
 Take it slow, no rush. It's a cure for information overload.
 
@@ -140,15 +140,11 @@ In one sentence: it doesn't collect, track, or secretly upload your stuff.
 
 ## Recently
 
-- 🧹🌳 **v1.2.2 "Data Health + Tree Comments + Multi-tag"**:
-  - `sip ingest stats` one-line summary (total evidence, versions, modified, reversed, topics, tags, new today)
-  - `sip ingest cleanup --stale` clean stale evidence (keeps items with ViewCount ≥ 3 or recently viewed)
-  - `sip ingest tree` tree-structured comments (FragmentId + recursive CTE)
-  - `sip ingest tag` multi-tag management (Tags + EvidenceTags many-to-many)
-  - `sip ingest watch` web monitoring — mark evidence for **manual refresh** (no auto-fetch)
-  - `sip --diff --semantic` semantic diff — shows semantic distance and change grade (⚪polish/🟡adjust/🔴reverse)
+- 🌐 **v2.0.0: the built-in web UI is now feature-complete.** The previous release's web UI could only *read*; this one wires up edit tracking, cross-source dedupe, source policies, local import + ebook reading, and the whole governance surface (Simon level, telemetry, vector index, bulk summaries, read-only config overview) — all by calling **the same in-process core functions the CLI uses**, so a number never differs between terminal and browser.
+  - A strict CSP plus external scripts (`web/app.js`, `web/login.js`, no inline `<script>`, no `onclick=`): the "subscription content smuggles in a `<script>`" path is now dead at the browser level too (sanitizer first, CSP second).
+  - Fixed `ShowDiff` missing its `FeedId` condition (**cross-feed mis-archiving**): when two sources repost the same article (same Guid), an edit in source A no longer archives source B's copy; version chains are now scoped per `(Guid, FeedId)`.
 - ⚡ **Million-scale adaptation**: on a 1M-article library — `--grep` full-text search 2.2s → 0.5s (FTS5, Chinese substring searchable), the TUI opens instantly (lazy sidebar), `--today` 7.5s → 3s, whole-feed updates in one transaction.
-- 🧪 **Automated test baseline**: process-level black-box cases + GitHub Actions CI — automatic regression on every change.
+- 🧪 **Automated test baseline**: process-level black-box cases (CLI contract / SSRF matrix / dedupe invariants / terminal injection / Simon guardian / web API and login) + GitHub Actions CI — automatic regression on every change.
 - 🔒 **Simon (孟思琳)**: the always-on guardian (see Security above) — integrity self-heal plus SSRF and terminal-injection protection; the level is adjustable but cannot be turned off.
 
 ## More
