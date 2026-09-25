@@ -27,5 +27,29 @@ Thumbs.db
 ## WorkBuddy project memory (local data, don't commit)
 .workbuddy-ai/
 
+## AgentTeams 运行态（临时计划/信箱/会话，属本机状态，不进仓库）
+.agent-teams/
+
+## 下列文件是**有意入库**的，不要加忽略规则：
+## docs/草稿-AI阅读悬浮球.html —— 已批准实现的交互基准（参考规格，非产品代码，不参与构建）
+
 ## Debug logs
 debug_log.txt
+
+## CLI 测试台（隔离实例，可再生产物）
+.probe/
+
+## Python 缓存（tests/verification 下的探针会生成）
+__pycache__/
+*.pyc
+
+## 验证脚本的临时目录与日志（探针产物，不该进仓库）
+tests/verification/_scratch/
+tests/verification/*.log
+tests/verification/*.txt
+tests/verification/*.jsonl
+
+## 本机安装目录的备份（体积大且是机器状态）
+readwithhotsoup-backup-*/
+sip.exe.running-old*
+

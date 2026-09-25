@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 验证侧小工具：把 Agent 门凭据写进/清出系统凭据库。
+       存在理由：sip 的 agentok 命令要求「真实终端 + Web 密码」，在无头沙箱里必然失败（rc=3），
+       于是所有导入/回填类验证都跑不动。TestHost 之所以能跑，是因为它**进程内**直接写凭据
+       （见 tests/Sip.Tests/TestHost.cs 的 OpenAgentGate），本工具把那几行抽出来给 Python 驱动用。
+       只写 agent_ok_&lt;key&gt; 这**一条**、且 key 由调用方指定（每实例随机），用完即删。 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>gate</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ktsu.CredentialCache" Version="1.3.19" />
+  </ItemGroup>
+</Project>
