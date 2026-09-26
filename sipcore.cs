@@ -1125,35 +1125,97 @@ static (bool Ok, long ItemId, string Title, string DestPath, string Code, string
     }
 }
 
-// CLI: sip --import <file> [--title <name>] [--json]
+// CLI: sip --import <file> [<file> …] [--title <name>] [--json]
+// 批量就是"把 N 个文件走同一遍 ImportFileCore"：一次导入一堆书是常态，
+// 逐个手敲 20 遍 `sip --import` 不是。
+// ⚠ 单个文件的输出形状**必须保持不变**（脚本与测试都在吃它）：
+//   一个文件 → `{success,id,title,file,feed}`；多个文件才变成 `{success,counts:{total,ok,failed},items[]}`。
+//   `--title` 只对单个文件成立 —— 一次给 20 本书起同一个名字没有意义，所以批量时直接拒绝。
 static void ImportCli(string[] args, string dbPath)
 {
     bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
-    string? filePath = null;
+    var files = new List<string>();
     string? title = null;
     for (int i = 0; i < args.Length; i++)
     {
         if (args[i] == "--title" && i + 1 < args.Length) title = args[++i];
-        else if (!args[i].StartsWith("-")) filePath = args[i];
+        else if (!args[i].StartsWith("-")) files.Add(args[i]);
     }
 
-    if (string.IsNullOrEmpty(filePath))
+    if (files.Count == 0)
     {
-        SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [--title <name>] [--json]"));
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [<file> …] [--title <name>] [--json]"));
+        return;
+    }
+    if (title != null && files.Count > 1)
+    {
+        SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [<file> …] [--title <name>] [--json]"));
+        Console.WriteLine(Lang.T("--title applies to a single file only (batch import uses each file's name as the title)"));
         return;
     }
 
-    var r = ImportFileCore(filePath, title, dbPath);
-    if (!r.Ok)
+    var results = new List<(string Src, bool Ok, long ItemId, string Title, string DestPath, string Code, string Message)>();
+    foreach (string f in files)
     {
-        ReportError(r.Code, r.Message, json: json);
-        return;
+        // 非 JSON 模式先报"正在导入第几个"：导入一本 PDF 要几秒到几十秒，
+        // 批量时没有任何进度提示会让人以为卡死了（Web 那边同样的理由）。
+        // ⚠ 进度行**只能进非 JSON 分支**：--json 的 stdout 是给脚本喂 JSON.parse 的，
+        //   前面多一行 "Importing 1/3…" 就把整份输出变成不可解析（实测就是这么红的）。
+        if (!json && files.Count > 1)
+            Console.WriteLine(Lang.T("Importing {0}/{1}: {2}", results.Count + 1, files.Count, f));
+        var r = ImportFileCore(f, title, dbPath);
+        results.Add((f, r.Ok, r.ItemId, r.Title, r.DestPath, r.Code, r.Message));
+        if (!json && r.Ok) Console.WriteLine(Lang.T("Imported: {0} → #{1}", r.Title, r.ItemId));
+        if (!json && !r.Ok) Console.WriteLine(Lang.T("Error [{0}] {1}", r.Code, r.Message));
     }
+
+    int ok = results.Count(x => x.Ok);
+    int bad = results.Count - ok;
 
     if (json)
-        JsonOut(new { success = true, id = r.ItemId, title = r.Title, file = r.DestPath, feed = "本地导入" });
-    else
-        Console.WriteLine(Lang.T("Imported: {0} → #{1}", r.Title, r.ItemId));
+    {
+        // 单文件：**逐字段与从前相同**，脚本不必改
+        if (results.Count == 1 && bad == 0)
+        {
+            var one = results[0];
+            JsonOut(new { success = true, id = one.ItemId, title = one.Title, file = one.DestPath, feed = "本地导入" });
+            return;
+        }
+        if (results.Count == 1)
+        {
+            var one = results[0];
+            ReportError(one.Code, one.Message, json: true);
+            return;
+        }
+        // 批量的 success 走**全局约定**（Web 侧一致）：success=false ⇔ 有失败。
+        // 具体几个成功几个失败在 counts 里 —— 把 success 定义成"至少成功一个"的话，
+        // agent 会把它读成"整批没问题"。
+        JsonOut(new
+        {
+            success = bad == 0,
+            counts = new { total = results.Count, ok, failed = bad },
+            items = results.Select(x => new
+            {
+                file = x.Src,
+                success = x.Ok,
+                id = x.Ok ? x.ItemId : 0,
+                title = x.Title,
+                dest = x.DestPath,
+                error = x.Ok ? null : new { code = x.Code, message = x.Message }
+            }).ToList()
+        });
+    }
+    // ⚠ 这句**必须只在非 JSON 模式**打印。它是给人看的一行总结，但对脚本来说
+    //   就是跟在 JSON 后面的一串中文 —— `JSON.parse` 会以
+    //   "'0xE5' is invalid after a single JSON value" 直接失败（实测踩过：
+    //   批量导入的 JSON 一直是不可解析的，只是以前没人拿它喂解析器）。
+    else if (files.Count > 1)
+        Console.WriteLine(Lang.T("Import done: {0} added, {1} skipped (already exist), {2} failed", ok, 0, bad));
+
+    // 退出码取**最严重**的那个（SetExit 走 Math.Max，不会把更大的码压小）。
+    // 这不只是给脚本看的：sip 的退出码是 AI/agent 判断"该重试、该换目标、还是该报错"的依据，
+    // 批量里 9 个成功 1 个失败也必须是非 0，否则 agent 会以为整批都进去了。
+    foreach (var x in results.Where(x => !x.Ok)) SetExit(ExitCodeFor(x.Code));
 }
 
 // CLI: sip --import-rm <id> [--yes] [--json]
@@ -3494,7 +3556,7 @@ static async Task RunCli(string[] args, string dbPath)
             SummaryCli(args[1], dbPath, args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase))).Wait();
             break;
         case "--import":
-            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [--title <name>] [--json]")); return; }
+            if (args.Length < 2) { SetExit(); Console.WriteLine(Lang.T("Usage: sip --import <file> [<file> …] [--title <name>] [--json]")); return; }
             ImportCli(args.Skip(1).ToArray(), dbPath);
             break;
         case "--import-rm":
@@ -3535,7 +3597,7 @@ static void PrintHelp()
     Console.WriteLine(Lang.T("  --purge-fulltext [id]  clear the full-text cache"));
     Console.WriteLine(Lang.T("  --feed-info <n>  source identity & health (type/author/site/updated/status; --json)"));
     Console.WriteLine(Lang.T("  --export-opml [file]  export feeds as OPML; --import-opml <file>  import feeds"));
-    Console.WriteLine(Lang.T("  --import <file> [--title <name>]  import local file (txt/md/pdf/epub/mobi/docx)"));
+    Console.WriteLine(Lang.T("  --import <file> [<file> …] [--title <name>]  import local file(s) (txt/md/pdf/epub/mobi/docx)"));
     Console.WriteLine(Lang.T("  --import-rm <id> [--yes]  remove an imported file"));
     Console.WriteLine(Lang.T("  --toc <id>  table of contents of an imported book (EPUB chapters / PDF bookmarks)"));
     Console.WriteLine(Lang.T("  --chapter <id> <chapterId|#ord>  read one chapter (--json, --max-chars N)"));

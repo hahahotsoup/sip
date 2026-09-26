@@ -46,6 +46,7 @@ const state = {
   ebookMeta: null,
   ebookPage: 1,
   ebookPages: null,
+  pdfSpread: false,    // PDF 对开双页（一屏两页）。只对 PDF 生效，记在偏好里
   jumpKw: "",
   lang: "zh-CN",
   dict: {},
@@ -488,12 +489,24 @@ async function realPolicyDel(feedId) {
 }
 
 /* ───────── 本地导入 / 电子书 ───────── */
+/** 批量导入：**逐个**上传。服务端同一时刻只允许一个导入（`TryBeginDownload("import")`，
+ *  撞上会回 409 ALREADY_RUNNING），所以这里不能并发 —— 并发换不来速度，只会换来一堆 409。
+ *
+ *  两个曾经踩过的坑，改这里时别退回去：
+ *  ① 失败信息是**粘住**的：原先只在开始时写"导入中 i/n"，失败时写错误、成功后什么都不写，
+ *     于是最后一个文件失败时那句红字会一直留在框里，看着像整批都失败了；
+ *  ② "i/n" 是**当前项**不是**总进度**：批量导入几十本时，用户无从判断还要多久，
+ *     而导入一本 PDF 要几秒到几十秒（抽正文 + 复制文件），"点完就没动静"就是这么来的。 */
 async function realImportFiles(files) {
   if (!files || !files.length) return;
-  let ok = 0, fail = 0;
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    setMsg("impMsg", `导入中 ${i + 1}/${files.length} · ${f.name}`, "");
+  const list = Array.from(files);
+  const t0 = Date.now();
+  const failed = [];
+  let ok = 0;
+
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    setMsg("impMsg", `导入中 ${i + 1}/${list.length}：${f.name} · 已完成 ${ok} 个`, "");
     try {
       await api(`/api/imports?name=${encodeURIComponent(f.name)}`, {
         method: "POST",
@@ -502,12 +515,24 @@ async function realImportFiles(files) {
       });
       ok++;
     } catch (e) {
-      fail++;
-      setMsg("impMsg", `导入失败：${f.name} —— ${e.message || "未知错误"}`, "bad");
+      failed.push({ name: f.name, msg: e.message || "未知错误" });
     }
+    // 进度行每个文件都重写一次：批量导入几十本时，"还要多久"只能靠这个数字判断
+    setMsg("impMsg", `导入中 ${i + 1}/${list.length} · 成功 ${ok} · 失败 ${failed.length}`, "");
   }
-  toast(`导入完成：${ok} 成功 / ${fail} 失败`);
-  if (fail === 0) setMsg("impMsg", `导入完成：${ok} 个文件`, "ok");
+
+  const secs = ((Date.now() - t0) / 1000).toFixed(1);
+  if (failed.length === 0) {
+    setMsg("impMsg", `导入完成：${ok} 个文件 · 用时 ${secs}s`, "ok");
+  } else {
+    // 失败清单**逐条**列出：批量导入里"3 个失败"没有意义，
+    // 用户要知道是哪 3 个、以及为什么（格式不支持 / 文件为空 / 太大 / 锁冲突）
+    setMsg("impMsg",
+      `导入完成：成功 ${ok} / 失败 ${failed.length} · 用时 ${secs}s\n` +
+      failed.map((x) => `· ${x.name} —— ${x.msg}`).join("\n"),
+      "bad");
+  }
+  toast(`导入完成：${ok} 成功 / ${failed.length} 失败`);
   await loadRealData();
 }
 
@@ -550,6 +575,53 @@ async function realImportDel(itemId) {  if (!confirm("删除这份导入（同�
   } catch (e) { toast(e.message || "删除失败"); }
 }
 
+/* ── PDF 对开双页 ──────────────────────────────────────────────
+   PDF 是以**页**为单位的栅格图（`/api/imports/{id}/page/N` 出 PNG），没有可重排的文字，
+   所以"双栏"只能是两张整页图并排。这里定一套页码对齐规则，全局（渲染 / 翻页 / 跳页 /
+   进度记忆）都必须走同一个函数 —— 否则"翻一页"和"显示一屏"会各自算出不同的页。 */
+function pdfSpreadOn() {
+  return !!state.pdfSpread && !!state.ebookMeta?.isPdf;
+}
+/** 一屏的起始页（跨页锚点）：
+ *  单页模式 = 当前页；
+ *  对开模式 = **奇数页**（1 单独一屏当封面，之后 3-4 / 5-6 … 奇数在左、偶数在右）。 */
+function pdfAnchorOf(page) {
+  const max = state.ebookPages || 1;
+  const p = Math.min(max, Math.max(1, page | 0));
+  if (!pdfSpreadOn()) return p;
+  return p <= 1 ? 1 : (p % 2 === 0 ? p - 1 : p);
+}
+/** 一屏显示哪两页：封面（第 1 页）单独一屏，其余 [奇, 偶]；末页为奇数时右半留空。 */
+function pdfSpreadPages(page) {
+  const max = state.ebookPages || 1;
+  const a = pdfAnchorOf(page);
+  if (!pdfSpreadOn() || a <= 1) return [1];
+  return a + 1 <= max ? [a, a + 1] : [a];
+}
+/** 翻页步长：对开时一屏两页。进度条与 ← → 都按它走，免得"按一下只挪了半屏"。 */
+function pdfStep() {
+  return pdfSpreadOn() ? 2 : 1;
+}
+
+/** 切「单页 / 对开」。**保留当前这一页**（对开会把偶数页归到它所在的跨页锚点）——
+ *  用户按这个键时正在读第 N 页，切完仍应在第 N 页那一屏上，而不是被打回开头。
+ *  落点用**锚点**而不是原页码存进度：对开模式下的进度必须是跨页起始页，
+ *  否则下次打开会算出"另一屏"，或者让 ← 翻不动（锚点算出来还是当前页）。 */
+function setPdfSpread(on, userInitiated) {
+  const max = state.ebookPages || 1;
+  const cur = state.ebookPage || 1;
+  state.pdfSpread = !!on;
+  savePrefs({ pdfSpread: state.pdfSpread });
+  // 对开模式下末页是奇数（没有右半页）时，锚点只能是它前一页，否则会落在一个空跨页上
+  let anchor = pdfAnchorOf(cur);
+  if (pdfSpreadOn() && anchor > 1 && anchor + 1 > max) anchor = Math.max(1, anchor - 2);
+  state.ebookPage = Math.min(max, Math.max(1, anchor));
+  if (userInitiated) toast(state.pdfSpread ? "对开双页：一屏两页，← → 翻一屏" : "单页：一屏一页");
+  render();
+  if (state.view === "ebook" && state.ebookMeta?.isPdf && state.ebookId)
+    api("/api/reading-progress", { method: "POST", body: JSON.stringify({ itemId: state.ebookId, position: state.ebookPage }) }).catch(() => { });
+}
+
 async function openEbook(itemId) {
   state.view = "ebook";
   state.ebookId = itemId;
@@ -568,6 +640,8 @@ async function openEbook(itemId) {
     toast(e.message || "打不开");
     state.view = "imported";
   }
+  // 恢复进度后按**对开规则**归一：进度里存的可能是单页模式留下的偶数页
+  state.ebookPage = pdfAnchorOf(state.ebookPage);
   // **await**：调用方（比如"文章视图发现这是导入项就转给阅读器"）要等这一屏真的画完，
   // 否则会先闪一下"加载正文…"再跳走。
   await render();
@@ -576,7 +650,10 @@ async function openEbook(itemId) {
 
 function ebookGo(page) {
   const max = state.ebookPages || 1;
-  state.ebookPage = Math.min(max, Math.max(1, page | 0));
+  // 对开模式下末页单独占一屏的话没有"右半页"，锚点只能落在前一屏
+  let a = pdfAnchorOf(page);
+  if (pdfSpreadOn() && a > 1 && a + 1 > max) a = Math.max(1, a - 2);
+  state.ebookPage = Math.min(max, Math.max(1, a));
   render();
   $("content").scrollTop = 0;
   api("/api/reading-progress", { method: "POST", body: JSON.stringify({ itemId: state.ebookId, position: state.ebookPage }) }).catch(() => { });
@@ -751,6 +828,8 @@ function restorePrefs() {
   if (p.theme) setTheme(p.theme);
   if (p.metaOpen) state.metaOpen = true;   // 阅读抽屉的展开状态也记着
   if (p.paged === false) state.paged = false;
+  // PDF 对开双页：偏好跨会话保留（"我习惯一次读两页"不该每次重新点一遍）
+  if (p.pdfSpread) state.pdfSpread = true;
   if (p.size) document.documentElement.style.setProperty("--reading-size", p.size + "px");
   if (p.lh) {
     document.documentElement.style.setProperty("--reading-leading", String(p.lh / 100));
@@ -1586,34 +1665,53 @@ async function render() {
           <a class="btn" href="/api/articles/${state.ebookId}/export" download>导出 MD</a>`;
     if (m.isPdf) {
       const pages = state.ebookPages || 0;
+      const spread = pdfSpreadOn();
       const cur = Math.min(Math.max(1, state.ebookPage), Math.max(1, pages));
+      const shown = pdfSpreadPages(cur);          // 这一屏实际渲染哪 1~2 页
+      // 每屏最多两页，所以"上一屏/下一屏"是 ±2；末页单独一屏时回退到它前一屏
+      const step = pdfStep();
+      const prevA = pdfAnchorOf(cur - step);
+      const nextA = pdfAnchorOf(cur + step);
+      const atFirst = cur <= 1;
+      const atLast = nextA === cur;               // 算出来的下一屏就是当前屏 → 到头了
+      const curLabel = spread && shown.length > 1
+        ? `${shown[0]}-${shown[shown.length - 1]}`
+        : String(shown[0] || cur);
+      // 对开时右半页可能是空的（末页是奇数）——放一个同宽的空白 pane，
+      // 这样有内容的左页**不会跑到屏幕中间**去，翻到最后一屏时页面不会横跳
+      const paneHtml = (/** @type {number} */ p) =>
+        p >= 1 && p <= pages
+          ? `<div class="pane"><img src="/api/imports/${state.ebookId}/page/${p}" alt="第 ${p} 页" loading="lazy" /></div>`
+          : `<div class="pane blank" aria-hidden="true"><img alt="" /></div>`;
       v.innerHTML = `
-        ${readBarHtml(m.title || "", `<span class="b">PDF</span><span class="b acc">第 ${cur} / ${pages || "?"} 页</span>`)}
-        <div class="card diffbox" style="cursor:default;text-align:center;padding:8px">
-          <img src="/api/imports/${state.ebookId}/page/${cur}" alt="第 ${cur} 页" style="max-width:100%;border-radius:6px" />
+        ${readBarHtml(m.title || "", `<span class="b">PDF</span><span class="b acc">第 ${curLabel} / ${pages || "?"} 页</span>${spread ? `<span class="b">对开</span>` : ""}`)}
+        <div class="pdfview">
+          <div class="pdfspread">${shown.map(paneHtml).join("")}</div>
         </div>
         <div class="row" style="justify-content:space-between">
-          <button class="btn" ${cur <= 1 ? "disabled" : ""} data-act="ebook-page" data-page="${cur - 1}">← 上一页</button>
+          <button class="btn" ${atFirst ? "disabled" : ""} data-act="ebook-page" data-page="${prevA}">← 上一${spread ? "屏" : "页"}</button>
           <div class="row" style="margin:0;align-items:center">
             <button class="btn" data-act="ebook-page" data-page="1">首页</button>
-            <input type="number" min="1" max="${pages || 1}" value="${cur}" data-act="ebook-goto"
+            <input type="number" min="1" max="${spread ? Math.max(1, pages - 2) : pages || 1}" value="${cur}" data-act="ebook-goto"
                    style="width:72px;padding:6px;border-radius:8px;border:1px solid var(--line);background:var(--elev)" />
             <button class="btn" data-act="ebook-page" data-page="${pages}">末页</button>
+            <button class="btn ${spread ? "pri" : ""}" data-act="pdf-spread" title="对开双页：左右并排显示两页">${spread ? "对开 ✓" : "对开"}</button>
           </div>
-          <button class="btn pri" ${cur >= pages ? "disabled" : ""} data-act="ebook-page" data-page="${cur + 1}">下一页 →</button>
+          <button class="btn pri" ${atLast ? "disabled" : ""} data-act="ebook-page" data-page="${nextA}">下一${spread ? "屏" : "页"} →</button>
         </div>`;
       showReadDrawer(`
         <p class="kicker">EBOOK · 本地导入</p>
         <h3>${esc(m.title || "")}</h3>
         <div class="meta"><span class="b">PDF</span><span class="b">${esc(fmtSize(m.size))}</span>
-          ${pages ? `<span class="b">${pages} 页</span>` : ""}</div>
+          ${pages ? `<span class="b">${pages} 页</span>` : ""}${spread ? `<span class="b acc">对开双页</span>` : ""}</div>
         <div class="row">
           <button class="btn pri" data-act="file-open" data-id="${state.ebookId}">用浏览器打开（原生阅读器）</button>
           <button class="btn" data-act="file-link" data-id="${state.ebookId}">复制临时链接</button>
           ${bookActions}
           <button class="btn" data-act="nav" data-v="imported">← 书库</button>
         </div>
-        <div class="note">PDF 没有文本层，所以网页只能**按页栅格化**（150 DPI，渲染过的页缓存在 <span class="mono">readwithhotsoup/temp/</span>）——不能选字、不能搜索、也读不出正文。<br/>
+        <div class="note">网页里 PDF 是**按页栅格化**的图（150 DPI，渲染过的页缓存在 <span class="mono">readwithhotsoup/temp/</span>），所以在这一层不能选字、不能搜索。<br/>
+          想看纸质书那样一次读两页：点正文上方的「对开」（或右下角那个按钮）—— <b>对开 = 左右并排两页</b>，← → 一次翻一屏；第 1 页当封面单独一屏，之后按 2-3 / 4-5 / 6-7 成对。<br/>
           要选字/搜索/批注，用上面的「用浏览器打开」：那是把**原文件**原样递给浏览器自带的 PDF 阅读器。<br/>
           「复制临时链接」给的是<b>进程内、只对这一份、10 分钟过期</b>的令牌地址，可以贴到别的标签页、别的 PDF 程序或手机上（普通接口地址在别的浏览器里会 401）。</div>`);
     } else {
@@ -2339,6 +2437,7 @@ document.addEventListener("click", async (e) => {
     case "policy-del": realPolicyDel(id); return;
     case "ebook-open": await openEbook(id); return;
     case "ebook-page": ebookGo(+hit.dataset.page); return;
+    case "pdf-spread": setPdfSpread(!state.pdfSpread, true); return;
     case "book-sec": {
       await gotoSection(+hit.dataset.idx, "first");
       return;
@@ -2405,7 +2504,22 @@ document.addEventListener("change", (e) => {
   if (act === "ebook-goto") { ebookGo(+el.value); return; }
 });
 
-/* 命令面板键盘：↑↓ 选择、Enter 执行、Esc 关闭；Ctrl/Cmd+K 打开 */
+/* ───────── 命令面板键盘：↑↓ 选择、Enter 执行、Esc 关闭；Ctrl/Cmd+K 打开 */
+/** 焦点是否在"用户正在打字"的控件里。
+ *  单字母/数字快捷键**必须先问这一句**：PDF 阅读区就有一个页码输入框，
+ *  没有这个守卫的话，输"2"跳页会顺手把对开模式切掉、输"12"会切两次。 */
+function typingInField(e) {
+  const t = e.target;
+  if (!t) return false;
+  if (t.isContentEditable) return true;
+  const tag = (t.tagName || "").toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  const type = (t.getAttribute("type") || "text").toLowerCase();
+  // 勾选框/按钮型的 input 不接收文字，按快捷键时不该被当成"在打字"
+  return !(type === "checkbox" || type === "radio" || type === "button" || type === "submit");
+}
+
 document.addEventListener("keydown", (e) => {
   // ── AI 对话面板优先接管键盘 ──
   // 面板开着时，用户在**打字**：Esc 该关面板、Enter 该发送，
@@ -2438,7 +2552,8 @@ document.addEventListener("keydown", (e) => {
     closeReadPanel(); e.preventDefault(); return;
   }
   if (e.key === "Escape" && state.immersive) { setImmersive(false); e.preventDefault(); return; }
-  // F：切换全屏阅读（阅读视图内）
+  // F：切换全屏阅读（阅读视图内）。它本来就挡住了输入框（下面那句 instanceof），
+  // 所以这里不重复加 typingInField —— 一个条件两处表述，日后只会改漏一处。
   if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey
       && (state.view === "article" || state.view === "ebook")
       && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
@@ -2454,8 +2569,15 @@ document.addEventListener("keydown", (e) => {
   // 只有 PDF 是"按页"的：← → 翻页。文本型电子书已经在上面由分栏翻页接管，
   // 没有分页时就是普通纵向滚动，方向键不该再触发一次重渲染（那会把翻页重置回第一页）。
   if (!state.ebookMeta?.isPdf) return;
-  if (e.key === "ArrowLeft") ebookGo((state.ebookPage || 1) - 1);
-  if (e.key === "ArrowRight") ebookGo((state.ebookPage || 1) + 1);
+  // 正在页码框里打字：方向键属于"改数字"，不该同时把页面翻掉
+  if (typingInField(e)) return;
+  // 对开双页时**一屏两页**：还按 ±1 走的话，按一下只挪半屏（右边那页跑到左边），
+  // 用户得按两次才等于翻一页 —— 步长必须跟渲染出的屏一致。
+  const d = pdfStep();
+  if (e.key === "ArrowLeft") ebookGo((state.ebookPage || 1) - d);
+  if (e.key === "ArrowRight") ebookGo((state.ebookPage || 1) + d);
+  // 翻页键顺手支持对开开关：PDF 阅读里不用把鼠标移到按钮上
+  if (e.key === "2" && !e.ctrlKey && !e.metaKey && !e.altKey && !typingInField(e)) setPdfSpread(!state.pdfSpread, true);
 });
 
 /* ───────── 静态控件 ───────── */
@@ -2769,7 +2891,11 @@ function aiSyncOrb() {
 function aiWhereNow() {
   if (state.view === "ebook") {
     const m = state.ebookMeta || {};
-    if (m.isPdf) return `第 ${state.ebookPage || 1} 页`;
+    if (m.isPdf) {
+      // 对开时一屏两页：位置读数也要说"第 4-5 页"，否则用户看到第 5 页的图却显示"第 4 页"
+      const ps = pdfSpreadPages(state.ebookPage || 1);
+      return ps.length > 1 ? `第 ${ps[0]}-${ps[ps.length - 1]} 页` : `第 ${ps[0] || state.ebookPage || 1} 页`;
+    }
     const secs = state.ebookText?.sections || [];
     const i = state.ebookText?.section ?? 0;
     const s = secs[i];
@@ -2843,6 +2969,14 @@ function aiBuildAnchor(sel) {
     a.ord = i + 1;
     const lead = aiSectionLead(sec);
     if (lead) a.sectionLead = lead;
+  } else if (state.view === "ebook" && state.ebookMeta?.isPdf) {
+    // PDF 的 ord 就是**页号**：服务端拿它做第 2 层"本章 = 当前页"
+    // （`current ??= chapters.FirstOrDefault(c => c.Ord == anchor.Ord)`，
+    //   无书签的 PDF 退化成"每页一章"，一页正好一行）。
+    // 不送 ord 的话第 2 层整层为空 → AI 只能回"没有可依据的资料"。
+    // 对开一屏两页时送**左页**：那是这一屏阅读的起点。
+    a.ord = state.ebookPage || 1;
+    a.chapterId = "pdf:p" + (state.ebookPage || 1);
   }
   return a;
 }

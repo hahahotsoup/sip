@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> **一次导入一批书，PDF 能像纸质书那样摊开读。**
+
+### Added
+
+- **CLI 批量导入**：`sip --import a.pdf b.epub c.md` 一条命令吃完多个文件。
+  - 单个文件的输出形状**逐字段不变**（`{success,id,title,file,feed}`）；多个文件才变成 `{success,counts,items[]}`，`items` 每本一行、带真实 id 与逐条 error。
+  - 失败**不中断**后面的文件，退出码取最严重的那一个 —— 批量里 9 成 1 败必须非 0，否则 agent 会以为整批都进去了。
+  - `--title` 只对单个文件成立，批量时当场拒绝（一次给 N 本书起同一个名字没有意义）。
+  - 非 JSON 模式逐条打印 `Importing i/n: <文件>`；**JSON 模式一行都不打**（见 Fixed）。
+- **PDF 对开双页**（`web/app.js` + `web/index.html`）：阅读器里新增「对开」开关（正文上方按钮，或按 `2`），左右并排两页。
+  - 页码对齐：第 1 页当封面**单独一屏**，之后按 2-3 / 4-5 / 6-7 成对；`←` `→` 与「上一屏/下一屏」一次翻**一屏**（步长跟着模式走，不再是固定 ±1）。
+  - 末页是奇数时右半页留一个**同宽空位**，有内容的左页不会跑到屏幕中央、翻到最后一屏也不会横跳。
+  - 位置读数变成 `第 4-5 页`；选项记在本地偏好里，下次打开还是对开。
+  - 窄屏（≤900px）自动降级成**纵向叠放**（并排只会让每页缩到看不清），翻页仍按跨页走。
+- **Web 批量导入的总进度与失败清单**（`web/app.js`）：进度行写「导入中 3/12 · 成功 2 · 失败 1」，结束时逐条列出哪个文件、为什么失败（格式不支持 / 文件为空 / 太大 / 锁冲突），并附用时。
+
+### Fixed
+
+- **`--import --json` 的输出一直不是合法 JSON**：`ImportCli` 里那行 "Import done: …" 总结漏在了 `if (json)` 块的 else 分支之外，于是它紧跟在 JSON 后面打进 stdout，任何 `JSON.parse` 都会以 `'0xE5' is invalid after a single JSON value` 失败。README 早就写明「提示走 stderr，`--json` 的输出保持干净」，这行违背的正是那条契约。
+- **批量导入的失败提示会「粘住」**（`web/app.js`）：原先只在失败时写那句红字、成功时不写，于是最后一个文件失败时它一直留在框里，看着像整批都失败了。现在每个文件都重写一次状态行，结束时给出成功/失败与失败清单。
+- **在页码输入框里打字会误触新增的 `2` 快捷键**：输 `12` 跳页会顺手把对开模式切两次。加了 `typingInField()` 守卫（`TEXTAREA` / `SELECT` / `contenteditable` / 各类文字型 `INPUT`），数字与字母类快捷键先问一句「现在是不是在打字」。
+  - 既有的 `F`（全屏）本来就有 `instanceof HTMLInputElement` 检查，不受影响 —— 所以没有改它，只是把重复的判据去掉了。
+
 ## [2.0.0] - 2026-09-25
 
 > **Web 功能全部补齐。** 1.3.0 时内置 Web 只是"能读"：今日哈汤、订阅源、收藏、搜索、阅读报告接了真接口，

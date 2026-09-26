@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PDF 对开双页 · 视觉验证</title>
+<style>
+/* ── 下面这套是 web/index.html 里那条 CSS 的**逐字拷贝**（含变量定义），不是重写 ──
+   重写一份只能证明"我写的那份好看"，证明不了产品里那段 CSS 排得对。 */
+:root{
+  --bg:#faf7f2; --elev:#fff; --ink:#2b2724; --muted:#837c74; --line:#e6e0d6;
+  --accent:#b4653a; --soft:#f3ece2;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,"Segoe UI","Noto Sans SC",sans-serif;font-size:14px}
+.h2{font-family:Georgia,"Songti SC",serif;font-size:20px;margin:14px 16px 6px;font-weight:600}
+.note{margin:0 16px 10px;color:var(--muted);font-size:12px;line-height:1.7}
+.row{display:flex;gap:8px;align-items:center;margin:0 16px 10px;flex-wrap:wrap}
+.btn{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--elev);
+  color:var(--ink);font-size:12.5px;cursor:pointer}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.b{padding:2px 7px;border-radius:99px;background:var(--soft);color:var(--muted);font-size:11.5px}
+.b.acc{background:#f6e5da;color:var(--accent)}
+
+/* ── ↓↓↓ 以下逐字拷自 web/index.html 第 212–223 行 ↓↓↓ ── */
+.pdfview{display:flex;flex-direction:column;gap:8px;padding:8px;overflow:auto}
+.pdfspread{display:flex;gap:10px;align-items:flex-start;justify-content:center}
+.pdfspread .pane{flex:1 1 0;min-width:0;display:flex;justify-content:center}
+.pdfspread img{
+  width:100%;height:auto;display:block;border-radius:6px;background:#fff;
+  box-shadow:0 1px 6px rgba(0,0,0,.18);
+}
+/* 封面单独一屏（书摊开的样子就是封面在右、左边空着）——右边的占位保持两页宽度对齐 */
+.pdfspread .pane.blank{visibility:hidden}
+/* 窄屏放不下两页：并排只会让每页缩到看不清，所以**降级成纵向叠放**，翻页仍按跨页走。
+   这里不改成"单页模式"——改模式会打乱用户选的页码与步长。 */
+@media (max-width:900px){ .pdfspread{flex-direction:column;align-items:stretch} }
+/* ── ↑↑↑ 拷贝结束 ↑↑↑ ── */
+</style>
+</head>
+<body>
+
+<h2 class="h2">PDF 对开双页 · 第 1 页封面（单独一屏，右侧留空占位）</h2>
+<p class="note">
+  用例：对开模式下一屏两页。左＝第 3 页、右＝第 4 页，各占一半宽。
+  页面图是产品自己的 <code>RenderPdfPages</code>（150 DPI）渲出来的，不是示意图。
+</p>
+<div class="row">
+  <span class="b">PDF</span><span class="b acc">第 1 / 4 页</span><span class="b">对开</span>
+  <button class="btn">← 上一屏</button>
+  <button class="btn">首页</button>
+  <input type="number" value="3" style="width:72px;padding:6px;border-radius:8px;border:1px solid var(--line)">
+  <button class="btn">末页</button>
+  <button class="btn pri">对开 ✓</button>
+  <button class="btn pri">下一屏 →</button>
+</div>
+
+<div class="pdfview">
+  <div class="pdfspread">
+    <div class="pane blank" aria-hidden="true"><img alt=""></div>
+    <div class="pane"><img src="page-001.png" alt="第 1 页"></div>
+  </div>
+</div>
+
+</body>
+</html>
